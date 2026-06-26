@@ -52,7 +52,9 @@
     background:linear-gradient(135deg,var(--blue),var(--orange));
     display:flex; align-items:center; justify-content:center; font-size:19px;
     box-shadow:0 4px 14px rgba(37,99,235,0.4);
+    overflow:hidden;
   }
+  .logo-mark img { width:100%; height:100%; object-fit:cover; display:block; }
   .logo-text-main { font-family:Rajdhani,sans-serif; font-weight:700; font-size:19px; letter-spacing:0.5px; line-height:1.05; }
   .logo-text-main span { color:var(--orange); }
   .logo-text-sub { font-size:9.5px; color:var(--dim); letter-spacing:1.5px; text-transform:uppercase; }
@@ -995,10 +997,16 @@ async function _loadAllTeamSquadsFromFirestore() {
   } catch(e){ return false; }
 }
 async function _saveDream11TeamToFirestore(teamId, data) {
-  if (!window._fbDb || !window._fbFns) return;
+  if (!window._fbDb || !window._fbFns) {
+    throw new Error('Firebase not ready');
+  }
   const { doc, setDoc } = window._fbFns;
-  setDoc(doc(window._fbDb, 'pp_dream11_teams', teamId), data)
-    .catch(e => console.error('Dream11 team save error:', e));
+  try {
+    await setDoc(doc(window._fbDb, 'pp_dream11_teams', teamId), data);
+  } catch(e) {
+    console.error('Dream11 team save error:', e.code || e.message, e);
+    throw e;
+  }
 }
 async function _loadAllDream11TeamsFromFirestore() {
   if (!window._fbDb || !window._fbFns) return false;
@@ -1466,6 +1474,7 @@ async function handleForgotPassword() {
 function newMatchTemplate() {
   return {
     id: uid(), sport:'cricket', format:'T20', teamA:'', teamB:'', deadline: Date.now()+86400000,
+    seriesName: '',
     status:'upcoming', createdAt: getDateTime(), questions: [], participants: [],
     megaParticipants: [], megaPool: 0, megaDistributed: false,
     freeParticipants: []
@@ -1559,6 +1568,8 @@ async function saveDraftMatch() {
   draftMatch.teamB = document.getElementById('dm-teamB')?.value.trim() || '';
   draftMatch.sport = document.getElementById('dm-sport')?.value || 'cricket';
   if (draftMatch.sport === 'cricket' && !draftMatch.format) draftMatch.format = 'T20';
+  const seriesNameEl2 = document.getElementById('dm-seriesName');
+  if (seriesNameEl2) draftMatch.seriesName = seriesNameEl2.value.trim();
   const deadlineStr = document.getElementById('dm-deadline')?.value;
   if (deadlineStr) draftMatch.deadline = new Date(deadlineStr).getTime();
 
@@ -3039,7 +3050,7 @@ function renderHeader() {
   return `
   <div id="header">
     <div class="logo-wrap">
-      <div class="logo-mark">🏆</div>
+      <div class="logo-mark"><img src="icons/babar.jpg" alt="Babar Azam" /></div>
       <div>
         <div class="logo-text-main">AKMAL <span>DREAM 11</span></div>
         <div class="logo-text-sub">Live</div>
@@ -4586,10 +4597,12 @@ function d11AdminSaveNewMatch() {
   const teamA = document.getElementById('dm-teamA')?.value?.trim() || draftMatch.teamA;
   const teamB = document.getElementById('dm-teamB')?.value?.trim() || draftMatch.teamB;
   const deadlineEl = document.getElementById('dm-deadline');
+  const seriesNameEl = document.getElementById('dm-seriesName');
   if (!teamA || !teamB) { showNotif('Enter both team names', 'error'); return; }
   draftMatch.teamA = teamA;
   draftMatch.teamB = teamB;
   draftMatch.sport = draftMatch.sport || 'cricket';
+  if (seriesNameEl) draftMatch.seriesName = seriesNameEl.value.trim();
   if (deadlineEl?.value) draftMatch.deadline = new Date(deadlineEl.value).getTime();
   // Save match
   const mid = draftMatch.id;
@@ -6668,33 +6681,58 @@ function d11AiAutoSelect() {
   }
 
   const userSeed = (currentUser && currentUser.email) || 'guest';
+  const players = d11m.players;
 
-  // Base performance score (objective quality).
-  // A small user-unique perturbation (0–6 pts) shuffles borderline picks so
-  // every user gets a different combination without hurting overall quality.
-  const aiScore = (p) =>
-    (Number(p.points) || 0) * 4 +
-    d11PlayerCredit(p) * 2 +
-    (p.isPlayingXI ? 10 : 0) +
-    _aiSeedRandom(userSeed, p.id) * 6;   // ← unique per user+player pair
+  // Upfront feasibility check — is a valid 11 even theoretically possible
+  // with this pool? (enough total players + enough players in each
+  // mandatory role). If not, fail fast with a clear message instead of
+  // running the selection loops at all.
+  const mins = { WK: 1, BAT: 3, AR: 1, BOWL: 3 };
+  const roleAvail = { WK: 0, BAT: 0, AR: 0, BOWL: 0 };
+  players.forEach(p => { if (roleAvail[p.role] !== undefined) roleAvail[p.role]++; });
+  const feasible = players.length >= D11_TEAM_SIZE &&
+    Object.keys(mins).every(r => roleAvail[r] >= mins[r]);
+  if (!feasible) {
+    showNotif('Not enough players in the pool to build a valid 11 — add more players (need at least 1 WK, 3 BAT, 1 AR, 3 BOWL).', 'error');
+    return;
+  }
 
-  // Sort all players by score descending
-  const sorted = [...d11m.players].sort((a, b) => aiScore(b) - aiScore(a));
+  // Objective quality score — same for every user (no randomness here).
+  const qualityScore = (p) =>
+    (Number(p.points) || 0) * 4 + d11PlayerCredit(p) * 2 + (p.isPlayingXI ? 10 : 0);
+  const minCredit = Math.min(...players.map(d11PlayerCredit));
 
-  const picks = [];
   const roleCounts = { WK: 0, BAT: 0, AR: 0, BOWL: 0 };
   const sideCounts = { A: 0, B: 0 };
+  const picks = [];
   let creditsUsed = 0;
+  let rngCounter = 0;
+  // Deterministic per-user, per-turn random draw — same user always gets
+  // the same team for this pool, different users get different teams.
+  const nextRand = () => _aiSeedRandom(userSeed, 'turn' + (rngCounter++));
 
-  const canAdd = (p) => {
+  // Budget-safety lookahead: never take a player if doing so would make it
+  // impossible to afford the cheapest possible combination for the slots
+  // still remaining after this pick. This is what guarantees the loop
+  // always reaches 11 picks (when a valid 11 exists at all) instead of
+  // greedily painting itself into a corner on credits.
+  const isBudgetSafe = (p) => {
+    const slotsLeftAfter = D11_TEAM_SIZE - picks.length - 1;
+    const creditAfter = creditsUsed + d11PlayerCredit(p);
+    return creditAfter + slotsLeftAfter * minCredit <= D11_CREDIT_BUDGET + 1e-9;
+  };
+  const canAdd = (p, relaxRoleMax) => {
+    if (picks.includes(p.id)) return false;
     if (picks.length >= D11_TEAM_SIZE) return false;
-    const [, max] = D11_ROLE_LIMITS[p.role];
-    if ((roleCounts[p.role] || 0) >= max) return false;
+    if (!relaxRoleMax) {
+      const [, max] = D11_ROLE_LIMITS[p.role];
+      if ((roleCounts[p.role] || 0) >= max) return false;
+    }
     if ((sideCounts[p.side] || 0) >= D11_MAX_PER_SIDE) return false;
     if (creditsUsed + d11PlayerCredit(p) > D11_CREDIT_BUDGET + 1e-9) return false;
+    if (!isBudgetSafe(p)) return false;
     return true;
   };
-
   const addPlayer = (p) => {
     picks.push(p.id);
     roleCounts[p.role] = (roleCounts[p.role] || 0) + 1;
@@ -6702,23 +6740,68 @@ function d11AiAutoSelect() {
     creditsUsed += d11PlayerCredit(p);
   };
 
-  // Phase 1: Guarantee minimums — 1 WK, 3 BAT, 1 AR, 3 BOWL
-  const mins = { WK: 1, BAT: 3, AR: 1, BOWL: 3 };
+  // Weighted-random pick among the top-K eligible candidates (ranked by
+  // quality) — this is what makes every user's team genuinely different
+  // while still staying among the strongest available options, rather
+  // than every user converging on the identical single "best" 11.
+  function pickWeightedRandom(eligible, k) {
+    if (eligible.length === 0) return null;
+    const topK = eligible.slice(0, Math.min(k, eligible.length));
+    const weights = topK.map((_, idx) => topK.length - idx); // better ranked → higher weight
+    const total = weights.reduce((a, b) => a + b, 0);
+    let r = nextRand() * total;
+    for (let i = 0; i < topK.length; i++) {
+      r -= weights[i];
+      if (r <= 0) return topK[i];
+    }
+    return topK[topK.length - 1];
+  }
+
+  // Phase 1: lock in role minimums first (1 WK, 3 BAT, 1 AR, 3 BOWL) so a
+  // later fallback phase can never end up with a team missing a mandatory role.
   for (const role of ['WK', 'BOWL', 'BAT', 'AR']) {
-    const need = mins[role];
-    for (const p of sorted) {
-      if (picks.includes(p.id)) continue;
-      if (p.role !== role) continue;
-      if ((roleCounts[role] || 0) >= need) break;
-      if (canAdd(p)) addPlayer(p);
+    while ((roleCounts[role] || 0) < mins[role]) {
+      const eligible = players.filter(p => p.role === role && canAdd(p)).sort((a, b) => qualityScore(b) - qualityScore(a));
+      const chosen = pickWeightedRandom(eligible, 4);
+      if (!chosen) break;
+      addPlayer(chosen);
     }
   }
 
-  // Phase 2: Fill remaining slots with best available (any role not at max)
-  for (const p of sorted) {
-    if (picks.length >= D11_TEAM_SIZE) break;
-    if (picks.includes(p.id)) continue;
-    if (canAdd(p)) addPlayer(p);
+  // Phase 2: fill remaining slots (role max + budget-safety still enforced)
+  let guard = 0;
+  while (picks.length < D11_TEAM_SIZE && guard++ < 200) {
+    const eligible = players.filter(p => canAdd(p)).sort((a, b) => qualityScore(b) - qualityScore(a));
+    const chosen = pickWeightedRandom(eligible, 5);
+    if (!chosen) break;
+    addPlayer(chosen);
+  }
+
+  // Phase 3 (fallback): relax per-role MAX caps only — role minimums were
+  // already locked in during Phase 1, so this can't produce an invalid team.
+  if (picks.length < D11_TEAM_SIZE) {
+    let guard2 = 0;
+    while (picks.length < D11_TEAM_SIZE && guard2++ < 200) {
+      const eligible = players.filter(p => canAdd(p, true)).sort((a, b) => qualityScore(b) - qualityScore(a));
+      const chosen = pickWeightedRandom(eligible, 5);
+      if (!chosen) break;
+      addPlayer(chosen);
+    }
+  }
+
+  // Phase 4 (last resort): relax role max + drop the budget-safety lookahead
+  // (hard credit cap and side limit are still respected) — fills with the
+  // cheapest remaining players first. Only reachable on extremely tight
+  // pools; role minimums are still intact from Phase 1.
+  if (picks.length < D11_TEAM_SIZE) {
+    const byCheapest = [...players].sort((a, b) => d11PlayerCredit(a) - d11PlayerCredit(b));
+    for (const p of byCheapest) {
+      if (picks.length >= D11_TEAM_SIZE) break;
+      if (picks.includes(p.id)) continue;
+      if ((sideCounts[p.side] || 0) >= D11_MAX_PER_SIDE) continue;
+      if (creditsUsed + d11PlayerCredit(p) > D11_CREDIT_BUDGET + 1e-9) continue;
+      addPlayer(p);
+    }
   }
 
   if (picks.length < D11_TEAM_SIZE) {
@@ -6726,11 +6809,11 @@ function d11AiAutoSelect() {
     return;
   }
 
-  // Phase 3: Auto C & VC — top 2 by aiScore among selected
+  // Auto C & VC — top 2 by quality among selected
   const pickedPlayers = picks
     .map(pid => d11m.players.find(x => x.id === pid))
     .filter(Boolean)
-    .sort((a, b) => aiScore(b) - aiScore(a));
+    .sort((a, b) => qualityScore(b) - qualityScore(a));
 
   d11TeamDraft.picks = picks;
   d11TeamDraft.captain = pickedPlayers[0]?.id || null;
@@ -6815,12 +6898,25 @@ async function d11SubmitTeam() {
 
   d11TeamDraft.totalPoints = calcDream11TeamPoints(d11TeamDraft, d11m);
   dream11Teams[d11TeamDraft.id] = { ...d11TeamDraft };
-  await _saveDream11TeamToFirestore(d11TeamDraft.id, dream11Teams[d11TeamDraft.id]);
-  showNotif('✅ Team submitted! Now join a contest 👇');
-  d11ContestMatchId = d11TeamDraft.matchId;
-  tab = 'dream11JoinContest';
-  render();
-  window.scrollTo(0,0);
+  try {
+    await _saveDream11TeamToFirestore(d11TeamDraft.id, dream11Teams[d11TeamDraft.id]);
+    try { localStorage.setItem('pp_dream11_teams_cache', JSON.stringify(dream11Teams)); } catch(e) {}
+    showNotif('✅ Team submitted! Now join a contest 👇');
+    d11ContestMatchId = d11TeamDraft.matchId;
+    tab = 'dream11JoinContest';
+    render();
+    window.scrollTo(0,0);
+  } catch(e) {
+    delete dream11Teams[d11TeamDraft.id];
+    const errCode = e.code || e.message || 'unknown';
+    if (errCode.includes('permission') || errCode.includes('PERMISSION')) {
+      showNotif('❌ Save failed: Permission denied — please log out and log in again', 'error');
+    } else if (errCode.includes('unavailable') || errCode.includes('network') || errCode.includes('Firebase not ready')) {
+      showNotif('❌ Save failed: No internet connection — please check your network', 'error');
+    } else {
+      showNotif('❌ Team save failed (' + errCode + ') — try again', 'error');
+    }
+  }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -8119,6 +8215,10 @@ function renderDream11Hub() {
           <label class="label">Team B</label>
           ${renderD11TeamPickerField('B', draftMatch.teamB)}
         </div>
+        <div class="mb14">
+          <label class="label">Tournament / Series Name (optional)</label>
+          <input class="input" id="dm-seriesName" placeholder="e.g. ICC T20 World Cup 2026" value="${(draftMatch.seriesName||'').replace(/"/g,'&quot;')}" oninput="draftMatch.seriesName=this.value" />
+        </div>
         <div class="mb18">
           <label class="label">Deadline (match start time)</label>
           <input class="input" id="dm-deadline" type="datetime-local" value="${draftMatch.deadline ? (() => { const d=new Date(draftMatch.deadline); const pad=n=>String(n).padStart(2,'0'); return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes()); })() : ''}" />
@@ -8223,6 +8323,7 @@ function renderDream11Hub() {
         </div>
         ${d11m.scored ? `<span class="match-status status-completed">RESULT OUT</span>` : isLiveScoring ? `<span class="match-status status-live">🔴 LIVE</span>` : dLocked ? `<span class="match-status status-live">LOCKED</span>` : `<span class="match-status status-upcoming">OPEN</span>`}
       </div>
+      ${m.seriesName ? `<div style="font-size:11px;font-weight:700;color:#c084fc;margin-bottom:6px">🏆 ${m.seriesName}</div>` : ''}
       ${m.sport !== 'football' ? `<div style="margin-bottom:6px"><span class="match-sport-tag tag-cricket">${m.format==='ODI'?'🔵':m.format==='Test'?'🏛️':'⚡'} ${m.format||'T20'}</span></div>` : ''}
       <div style="font-size:11.5px;color:var(--dim);margin-bottom:4px">👥 ${d11m.players.length} players pool ready ${xiCount > 0 ? `· 🏏 ${xiCount} confirmed Playing XI` : ''}</div>
       ${!d11m.scored && deadlineStr ? `<div class="match-deadline" style="text-align:left;margin:0 0 4px">${dLocked ? '🔒 Deadline passed' : `⏰ Deadline: ${deadlineStr}`}</div>${!dLocked && m.deadline ? `<div class="d11-countdown" data-deadline="${m.deadline}" style="font-size:11px;font-weight:700;color:var(--orange);margin-bottom:10px">${d11FormatCountdown(m.deadline - Date.now())}</div>` : ''}` : ''}
@@ -9473,6 +9574,7 @@ function renderAdminD11MatchesList() {
         </div>
         ${d11m?.scored ? `<span class="match-status status-completed">SCORED</span>` : dLocked ? `<span class="match-status status-live">LOCKED</span>` : `<span class="match-status status-upcoming">OPEN</span>`}
       </div>
+      ${m.seriesName ? `<div style="font-size:10.5px;font-weight:700;color:#c084fc;margin-bottom:6px">🏆 ${m.seriesName}</div>` : ''}
       <div style="margin-bottom:8px">
         ${d11m?.published ? `<span class="match-status" style="background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.35)">🟢 PUBLISHED</span>` : `<span class="match-status" style="background:rgba(234,179,8,0.15);color:#facc15;border:1px solid rgba(234,179,8,0.35)">🔒 UNPUBLISHED</span>`}
       </div>
@@ -9845,6 +9947,8 @@ function renderAdminCreateMatch() {
     ${renderTeamPickerField('A', m.teamA)}
     <label class="label">Team B</label>
     ${renderTeamPickerField('B', m.teamB)}
+    <label class="label">Tournament / Series Name (optional)</label>
+    <input class="input mb14" id="dm-seriesName" placeholder="e.g. ICC T20 World Cup 2026" value="${(m.seriesName||'').replace(/"/g,'&quot;')}" />
     <label class="label">Prediction Deadline</label>
     <input class="input" id="dm-deadline" type="datetime-local" value="${deadlineLocal}" />
   </div>
@@ -10244,19 +10348,22 @@ function renderD11QuickScoreTable() {
     </tr>`;
   };
 
-  // ── Batting Card view ──────────────────────────────────────
+  // ── Batting Card view (editable — same inputs/ids as Table view) ──
+  const cardInp = (id, val, w) =>
+    `<input type="number" min="0" id="${id}" value="${val??''}" placeholder="0" style="width:${w}px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;color:var(--text);padding:4px 3px;font-size:11px;text-align:center" />`;
+
   const renderBattingCard = (players, teamName, teamColor) => {
-    const batters = players.filter(p => (p.stats?.runs ?? '') !== '' || (p.stats?.ballsFaced ?? '') !== '');
-    if (!batters.length) return `<div style="font-size:12px;color:var(--dim);text-align:center;padding:12px">No batting data yet for ${teamName}</div>`;
+    if (!players.length) return `<div style="font-size:12px;color:var(--dim);text-align:center;padding:12px">No players for ${teamName}</div>`;
     return `
     <div style="margin-bottom:14px">
       <div style="font-size:11.5px;font-weight:800;color:${teamColor};text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px;padding-left:4px">${teamName}</div>
       <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:14px;overflow:hidden">
-        <div style="display:grid;grid-template-columns:1fr 36px 36px 28px 28px 52px 58px;padding:7px 12px;background:rgba(255,255,255,0.05);font-size:10px;font-weight:700;color:var(--dim);text-align:right">
+        <div style="display:grid;grid-template-columns:1fr 38px 38px 30px 30px 54px 58px;padding:7px 12px;background:rgba(255,255,255,0.05);font-size:10px;font-weight:700;color:var(--dim);text-align:right">
           <div style="text-align:left">Batter</div><div>R</div><div>B</div><div>4s</div><div>6s</div><div>SR</div><div style="color:var(--gold)">Pts</div>
         </div>
-        ${batters.map(p => {
+        ${players.map(p => {
           const s = p.stats || {};
+          const pid = `qs-${matchId}-${p.id}`;
           const runs = Number(s.runs)||0; const balls = Number(s.ballsFaced)||0;
           const fours = Number(s.fours)||0; const sixes = Number(s.sixes)||0;
           const isOut = s.isOut;
@@ -10267,25 +10374,28 @@ function renderD11QuickScoreTable() {
             + (runs===0&&isOut&&balls>0?sc.duckPenalty:0) + srD.pts;
           const fieldPts = (Number(s.catches)||0)*sc.perCatch + (Number(s.stumpings)||0)*sc.perStumping + (Number(s.runOuts)||0)*sc.perRunOut;
           return `
-          <div style="display:grid;grid-template-columns:1fr 36px 36px 28px 28px 52px 58px;padding:8px 12px;border-top:1px solid rgba(255,255,255,0.05);align-items:center">
+          <div style="display:grid;grid-template-columns:1fr 38px 38px 30px 30px 54px 58px;padding:8px 12px;border-top:1px solid rgba(255,255,255,0.05);align-items:center">
             <div>
               <div style="font-size:12px;font-weight:600;color:var(--text)">${p.name}</div>
-              <div style="font-size:10px;color:var(--dim);margin-top:1px;display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+              <div style="font-size:10px;color:var(--dim);margin-top:2px;display:flex;align-items:center;gap:4px;flex-wrap:wrap">
                 <span class="d11-role-chip d11-role-${p.role}" style="font-size:8px;padding:1px 4px">${p.role}</span>
-                ${isOut===false?'<span style="color:#4ade80">not out</span>':isOut?'<span style="color:var(--dim)">out</span>':''}
+                <label style="display:flex;align-items:center;gap:2px;cursor:pointer">
+                  <input type="checkbox" id="${pid}-isOut" ${isOut?'checked':''} style="width:12px;height:12px;accent-color:var(--orange)" />
+                  <span style="font-size:9px">Out?</span>
+                </label>
                 ${(Number(s.catches)||0)>0?`<span style="color:#60a5fa">🧤${s.catches}ct</span>`:''}
                 ${(Number(s.stumpings)||0)>0?`<span style="color:#a78bfa">🥊${s.stumpings}st</span>`:''}
                 ${(Number(s.runOuts)||0)>0?`<span style="color:#fb923c">🏃${s.runOuts}ro</span>`:''}
               </div>
             </div>
-            <div style="text-align:right;font-size:13px;font-weight:700;color:${runs>=50?'#fbbf24':runs>=25?'var(--text)':'var(--dim)'}">${(s.runs??'')===''?'—':runs}</div>
-            <div style="text-align:right;font-size:11px;color:var(--dim)">${balls||'—'}</div>
-            <div style="text-align:right;font-size:11px;color:var(--dim)">${fours||'—'}</div>
-            <div style="text-align:right;font-size:11px;color:var(--dim)">${sixes||'—'}</div>
+            <div>${cardInp(`${pid}-runs`, s.runs, 34)}</div>
+            <div>${cardInp(`${pid}-balls`, s.ballsFaced, 34)}</div>
+            <div>${cardInp(`${pid}-fours`, s.fours, 28)}</div>
+            <div>${cardInp(`${pid}-sixes`, s.sixes, 28)}</div>
             <div style="text-align:right;font-size:10.5px;font-weight:700;color:${srD.color}">${srLabel}${srD.pts!==0?`<div style="font-size:8.5px">${srD.pts>0?'+':''}${srD.pts}pts</div>`:''}</div>
             <div style="text-align:right">
               <div style="font-size:13px;font-weight:700;color:var(--gold)">${p.points||0}</div>
-              <div style="font-size:9px;color:var(--dim)">🏏${batPts}${fieldPts>0?`<span style="color:#60a5fa"> 🧤+${fieldPts}</span>`:''}</div>
+              <div style="font-size:9px;color:var(--dim)">🏏${Math.round(batPts)}${fieldPts>0?`<span style="color:#60a5fa"> 🧤+${fieldPts}</span>`:''}</div>
             </div>
           </div>`;
         }).join('')}
@@ -10294,17 +10404,18 @@ function renderD11QuickScoreTable() {
   };
 
   const renderBowlingCard = (players, teamName, teamColor) => {
-    const bowlers = players.filter(p => (Number(p.stats?.wickets)||0)>0 || (Number(p.stats?.oversBowled)||0)>0);
-    if (!bowlers.length) return `<div style="font-size:12px;color:var(--dim);text-align:center;padding:12px">No bowling data yet for ${teamName}</div>`;
+    const bowlers = players;
+    if (!bowlers.length) return `<div style="font-size:12px;color:var(--dim);text-align:center;padding:12px">No players for ${teamName}</div>`;
     return `
     <div style="margin-bottom:14px">
       <div style="font-size:11.5px;font-weight:800;color:${teamColor};text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px;padding-left:4px">${teamName}</div>
       <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:14px;overflow:hidden">
-        <div style="display:grid;grid-template-columns:1fr 36px 26px 36px 36px 52px 58px;padding:7px 12px;background:rgba(255,255,255,0.05);font-size:10px;font-weight:700;color:var(--dim);text-align:right">
+        <div style="display:grid;grid-template-columns:1fr 38px 30px 38px 38px 54px 58px;padding:7px 12px;background:rgba(255,255,255,0.05);font-size:10px;font-weight:700;color:var(--dim);text-align:right">
           <div style="text-align:left">Bowler</div><div>O</div><div>M</div><div>R</div><div>W</div><div>ER</div><div style="color:var(--gold)">Pts</div>
         </div>
         ${bowlers.map(p => {
           const s = p.stats || {};
+          const pid = `qs-${matchId}-${p.id}`;
           const overs = Number(s.oversBowled)||0; const maidens = Number(s.maidens)||0;
           const rg = Number(s.runsGiven)||0; const wkts = Number(s.wickets)||0;
           const erD = calcERDisplay(s);
@@ -10312,10 +10423,10 @@ function renderD11QuickScoreTable() {
           const bowlPts = wkts*sc.perWicket + (wkts>=5?sc.fiveWicketBonus:wkts>=3?sc.threeWicketBonus:0) + maidens*sc.maidenOverBonus + erD.pts;
           const fieldPts = (Number(s.catches)||0)*sc.perCatch + (Number(s.stumpings)||0)*sc.perStumping + (Number(s.runOuts)||0)*sc.perRunOut;
           return `
-          <div style="display:grid;grid-template-columns:1fr 36px 26px 36px 36px 52px 58px;padding:8px 12px;border-top:1px solid rgba(255,255,255,0.05);align-items:center">
+          <div style="display:grid;grid-template-columns:1fr 38px 30px 38px 38px 54px 58px;padding:8px 12px;border-top:1px solid rgba(255,255,255,0.05);align-items:center">
             <div>
               <div style="font-size:12px;font-weight:600;color:var(--text)">${p.name}</div>
-              <div style="font-size:10px;color:var(--dim);margin-top:1px;display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+              <div style="font-size:10px;color:var(--dim);margin-top:2px;display:flex;align-items:center;gap:4px;flex-wrap:wrap">
                 <span class="d11-role-chip d11-role-${p.role}" style="font-size:8px;padding:1px 4px">${p.role}</span>
                 ${wkts>=5?'<span style="color:#fbbf24">🔥5W</span>':wkts>=3?'<span style="color:#4ade80">3W+</span>':''}
                 ${(Number(s.catches)||0)>0?`<span style="color:#60a5fa">🧤${s.catches}ct</span>`:''}
@@ -10323,14 +10434,14 @@ function renderD11QuickScoreTable() {
                 ${(Number(s.runOuts)||0)>0?`<span style="color:#fb923c">🏃${s.runOuts}ro</span>`:''}
               </div>
             </div>
-            <div style="text-align:right;font-size:12px;font-weight:600;color:var(--text)">${overs||'—'}</div>
-            <div style="text-align:right;font-size:11px;color:var(--dim)">${maidens||'—'}</div>
-            <div style="text-align:right;font-size:11px;color:var(--dim)">${rg||'—'}</div>
-            <div style="text-align:right;font-size:13px;font-weight:700;color:${wkts>0?'#f87171':'var(--dim)'}">${wkts||'—'}</div>
+            <div><input type="number" min="0" step="0.1" id="${pid}-overs" value="${s.oversBowled??''}" placeholder="0" style="width:34px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:6px;color:var(--text);padding:4px 3px;font-size:11px;text-align:center"/></div>
+            <div><input type="number" min="0" id="${pid}-maidens" value="${s.maidens??''}" placeholder="0" style="width:26px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:6px;color:var(--text);padding:4px 3px;font-size:11px;text-align:center"/></div>
+            <div>${cardInp(`${pid}-runsGiven`, s.runsGiven, 34)}</div>
+            <div>${cardInp(`${pid}-wickets`, s.wickets, 34)}</div>
             <div style="text-align:right;font-size:10.5px;font-weight:700;color:${erD.color}">${erLabel}${erD.pts!==0?`<div style="font-size:8.5px">${erD.pts>0?'+':''}${erD.pts}pts</div>`:''}</div>
             <div style="text-align:right">
               <div style="font-size:13px;font-weight:700;color:var(--gold)">${p.points||0}</div>
-              <div style="font-size:9px;color:var(--dim)">🎳${bowlPts}${fieldPts>0?`<span style="color:#60a5fa"> 🧤+${fieldPts}</span>`:''}</div>
+              <div style="font-size:9px;color:var(--dim)">🎳${Math.round(bowlPts)}${fieldPts>0?`<span style="color:#60a5fa"> 🧤+${fieldPts}</span>`:''}</div>
             </div>
           </div>`;
         }).join('')}
@@ -10833,6 +10944,7 @@ function newUtMatchTemplate(tournamentId) {
     tournamentId,
     teamA: '', teamB: '',
     format: 'T20',
+    seriesName: '',
     deadline: null,
     entryFee: UT_MIN_ENTRY_FEE,
     players: [],     // [{id,name,role,side,stats,points,isPlayingXI,photo,credit}]
@@ -10980,7 +11092,7 @@ async function utConfirmPasswordPrompt() {
 
 // ── Match create/manage (owner) ──
 function utStartCreateMatch() {
-  utCreateMatchDraft = { teamA: '', teamB: '', format: 'T20', deadline: '', entryFee: String(UT_MIN_ENTRY_FEE) };
+  utCreateMatchDraft = { teamA: '', teamB: '', format: 'T20', seriesName: '', deadline: '', entryFee: String(UT_MIN_ENTRY_FEE) };
   utTeamPickerOpenFor = null;
   render();
 }
@@ -11016,6 +11128,7 @@ function utSaveNewMatch() {
   const m = newUtMatchTemplate(t.id);
   m.teamA = teamA; m.teamB = teamB;
   m.format = d.format || 'T20';
+  m.seriesName = (d.seriesName || '').trim();
   m.deadline = new Date(d.deadline).getTime();
   m.entryFee = fee;
   t.matches[m.id] = m;
@@ -12159,6 +12272,10 @@ function renderUtDashboard() {
         </div>`;
       })()}
       <div class="mb14">
+        <label class="label">Tournament / Series Name (optional)</label>
+        <input class="input" value="${(d.seriesName||'').replace(/"/g,'&quot;')}" oninput="utUpdateCreateMatchField('seriesName', this.value)" placeholder="e.g. PSL 2026" />
+      </div>
+      <div class="mb14">
         <label class="label">Deadline (match start time)</label>
         <input class="input" type="datetime-local" value="${d.deadline}" oninput="utUpdateCreateMatchField('deadline', this.value)" />
       </div>
@@ -12289,6 +12406,7 @@ function utMatchCard(t, m, owner) {
         ${m.published ? `<span class="match-status" style="background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.35)">🟢 PUBLISHED</span>` : `<span class="match-status" style="background:rgba(234,179,8,0.15);color:#facc15;border:1px solid rgba(234,179,8,0.35)">🔒 NOT PUBLISHED</span>`}
         <span class="match-sport-tag tag-cricket" style="margin-left:6px">${m.format==='ODI'?'🔵':m.format==='Test'?'🏛️':'⚡'} ${m.format||'T20'}</span>
       </div>
+      ${m.seriesName ? `<div style="font-size:10.5px;font-weight:700;color:#c084fc;margin-bottom:6px">🏆 ${m.seriesName}</div>` : ''}
       <div style="font-size:11.5px;color:var(--dim);margin-bottom:6px">👥 ${m.players.length} players · 💰 Rs ${m.entryFee} entry · 📋 ${teamCount} teams joined</div>
       <div style="font-size:11px;color:var(--orange);margin-bottom:10px">⏰ Deadline: ${deadlineStr}</div>
       <button class="btn-primary btn-block" style="font-size:12px;padding:10px;margin-bottom:8px;background:${m.published ? 'linear-gradient(135deg,#dc2626,#b91c1c)' : 'linear-gradient(135deg,#16a34a,#15803d)'}" onclick="utTogglePublish('${m.id}')">${m.published ? '🚫 Unpublish' : '🚀 Publish (password required)'}</button>
@@ -12313,6 +12431,7 @@ function utMatchCard(t, m, owner) {
       </div>
       ${m.scored ? `<span class="match-status status-completed">FINAL</span>` : dLocked ? `<span class="match-status status-live">LOCKED</span>` : `<span class="match-status status-upcoming">OPEN</span>`}
     </div>
+    ${m.seriesName ? `<div style="font-size:11px;font-weight:700;color:#c084fc;margin-bottom:6px">🏆 ${m.seriesName}</div>` : ''}
     <div style="margin-bottom:6px">
       <span class="match-sport-tag tag-cricket">${m.format==='ODI'?'🔵':m.format==='Test'?'🏛️':'⚡'} ${m.format||'T20'}</span>
     </div>
@@ -12416,39 +12535,42 @@ function renderUtQuickScoreTable() {
     </tr>`;
   };
 
-  // ── Batting Card ──
+  // ── Batting Card (editable — same ids as Table view) ──
   const renderBattingCard = (players, teamName, teamColor) => {
-    const batters = players.filter(p => (p.stats?.runs??'')!=='' || (p.stats?.ballsFaced??'')!=='');
-    if (!batters.length) return `<div style="font-size:12px;color:var(--dim);text-align:center;padding:12px">No batting data yet for ${teamName}</div>`;
+    if (!players.length) return `<div style="font-size:12px;color:var(--dim);text-align:center;padding:12px">No players for ${teamName}</div>`;
     return `
     <div style="margin-bottom:14px">
       <div style="font-size:11.5px;font-weight:800;color:${teamColor};text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px;padding-left:4px">${teamName}</div>
       <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:14px;overflow:hidden">
-        <div style="display:grid;grid-template-columns:1fr 36px 36px 28px 28px 52px 58px;padding:7px 12px;background:rgba(255,255,255,0.05);font-size:10px;font-weight:700;color:var(--dim);text-align:right">
+        <div style="display:grid;grid-template-columns:1fr 38px 38px 30px 30px 54px 58px;padding:7px 12px;background:rgba(255,255,255,0.05);font-size:10px;font-weight:700;color:var(--dim);text-align:right">
           <div style="text-align:left">Batter</div><div>R</div><div>B</div><div>4s</div><div>6s</div><div>SR</div><div style="color:var(--gold)">Pts</div>
         </div>
-        ${batters.map(p => {
+        ${players.map(p => {
           const s = p.stats||{}; const runs=Number(s.runs)||0; const balls=Number(s.ballsFaced)||0;
           const fours=Number(s.fours)||0; const sixes=Number(s.sixes)||0; const isOut=s.isOut;
           const srD=calcSRDisplay(s); const srLabel=balls>0?((runs/balls)*100).toFixed(1):'—';
           const batPts=runs*sc.perRun+fours*sc.boundary4Bonus+sixes*sc.boundary6Bonus+(runs>=100?sc.century100Bonus:runs>=50?sc.half50Bonus:0)+(runs===0&&isOut&&balls>0?sc.duckPenalty:0)+srD.pts;
           const fPts=(Number(s.catches)||0)*sc.perCatch+(Number(s.stumpings)||0)*sc.perStumping+(Number(s.runOuts)||0)*sc.perRunOut;
+          const pid=`utqs-${mid}-${p.id}`;
           return `
-          <div style="display:grid;grid-template-columns:1fr 36px 36px 28px 28px 52px 58px;padding:8px 12px;border-top:1px solid rgba(255,255,255,0.05);align-items:center">
+          <div style="display:grid;grid-template-columns:1fr 38px 38px 30px 30px 54px 58px;padding:8px 12px;border-top:1px solid rgba(255,255,255,0.05);align-items:center">
             <div>
               <div style="font-size:12px;font-weight:600;color:var(--text)">${p.name}</div>
-              <div style="font-size:10px;color:var(--dim);margin-top:1px;display:flex;gap:4px;flex-wrap:wrap;align-items:center">
+              <div style="font-size:10px;color:var(--dim);margin-top:2px;display:flex;gap:4px;flex-wrap:wrap;align-items:center">
                 <span class="d11-role-chip d11-role-${p.role}" style="font-size:8px;padding:1px 4px">${p.role}</span>
-                ${isOut===false?'<span style="color:#4ade80">not out</span>':isOut?'<span style="color:var(--dim)">out</span>':''}
+                <label style="display:flex;align-items:center;gap:2px;cursor:pointer">
+                  <input type="checkbox" id="${pid}-isOut" ${isOut?'checked':''} style="width:12px;height:12px;accent-color:var(--orange)" />
+                  <span style="font-size:9px">Out?</span>
+                </label>
                 ${(Number(s.catches)||0)>0?`<span style="color:#60a5fa">🧤${s.catches}ct</span>`:''}
                 ${(Number(s.stumpings)||0)>0?`<span style="color:#a78bfa">🥊${s.stumpings}st</span>`:''}
                 ${(Number(s.runOuts)||0)>0?`<span style="color:#fb923c">🏃${s.runOuts}ro</span>`:''}
               </div>
             </div>
-            <div style="text-align:right;font-size:13px;font-weight:700;color:${runs>=50?'#fbbf24':runs>=25?'var(--text)':'var(--dim)'}">${(s.runs??'')===''?'—':runs}</div>
-            <div style="text-align:right;font-size:11px;color:var(--dim)">${balls||'—'}</div>
-            <div style="text-align:right;font-size:11px;color:var(--dim)">${fours||'—'}</div>
-            <div style="text-align:right;font-size:11px;color:var(--dim)">${sixes||'—'}</div>
+            <div>${inp(`${pid}-runs`, s.runs, 34)}</div>
+            <div>${inp(`${pid}-balls`, s.ballsFaced, 34)}</div>
+            <div>${inp(`${pid}-fours`, s.fours, 28)}</div>
+            <div>${inp(`${pid}-sixes`, s.sixes, 28)}</div>
             <div style="text-align:right;font-size:10.5px;font-weight:700;color:${srD.color}">${srLabel}${srD.pts!==0?`<div style="font-size:8.5px">${srD.pts>0?'+':''}${srD.pts}pts</div>`:''}</div>
             <div style="text-align:right"><div style="font-size:13px;font-weight:700;color:var(--gold)">${p.points||0}</div><div style="font-size:9px;color:var(--dim)">🏏${Math.round(batPts)}${fPts>0?`<span style="color:#60a5fa"> 🧤+${fPts}</span>`:''}</div></div>
           </div>`;
@@ -12457,28 +12579,28 @@ function renderUtQuickScoreTable() {
     </div>`;
   };
 
-  // ── Bowling Card ──
+  // ── Bowling Card (editable — same ids as Table view) ──
   const renderBowlingCard = (players, teamName, teamColor) => {
-    const bowlers = players.filter(p => (Number(p.stats?.wickets)||0)>0||(Number(p.stats?.oversBowled)||0)>0);
-    if (!bowlers.length) return `<div style="font-size:12px;color:var(--dim);text-align:center;padding:12px">No bowling data yet for ${teamName}</div>`;
+    if (!players.length) return `<div style="font-size:12px;color:var(--dim);text-align:center;padding:12px">No players for ${teamName}</div>`;
     return `
     <div style="margin-bottom:14px">
       <div style="font-size:11.5px;font-weight:800;color:${teamColor};text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px;padding-left:4px">${teamName}</div>
       <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:14px;overflow:hidden">
-        <div style="display:grid;grid-template-columns:1fr 36px 26px 36px 36px 52px 58px;padding:7px 12px;background:rgba(255,255,255,0.05);font-size:10px;font-weight:700;color:var(--dim);text-align:right">
+        <div style="display:grid;grid-template-columns:1fr 38px 30px 38px 38px 54px 58px;padding:7px 12px;background:rgba(255,255,255,0.05);font-size:10px;font-weight:700;color:var(--dim);text-align:right">
           <div style="text-align:left">Bowler</div><div>O</div><div>M</div><div>R</div><div>W</div><div>ER</div><div style="color:var(--gold)">Pts</div>
         </div>
-        ${bowlers.map(p => {
+        ${players.map(p => {
           const s=p.stats||{}; const overs=Number(s.oversBowled)||0; const maidens=Number(s.maidens)||0;
           const rg=Number(s.runsGiven)||0; const wkts=Number(s.wickets)||0;
           const erD=calcERDisplay(s); const erLabel=overs>0?(rg/overs).toFixed(2):'—';
           const bowlPts=wkts*sc.perWicket+(wkts>=5?sc.fiveWicketBonus:wkts>=3?sc.threeWicketBonus:0)+maidens*sc.maidenOverBonus+erD.pts;
           const fPts=(Number(s.catches)||0)*sc.perCatch+(Number(s.stumpings)||0)*sc.perStumping+(Number(s.runOuts)||0)*sc.perRunOut;
+          const pid=`utqs-${mid}-${p.id}`;
           return `
-          <div style="display:grid;grid-template-columns:1fr 36px 26px 36px 36px 52px 58px;padding:8px 12px;border-top:1px solid rgba(255,255,255,0.05);align-items:center">
+          <div style="display:grid;grid-template-columns:1fr 38px 30px 38px 38px 54px 58px;padding:8px 12px;border-top:1px solid rgba(255,255,255,0.05);align-items:center">
             <div>
               <div style="font-size:12px;font-weight:600;color:var(--text)">${p.name}</div>
-              <div style="font-size:10px;color:var(--dim);margin-top:1px;display:flex;gap:4px;flex-wrap:wrap;align-items:center">
+              <div style="font-size:10px;color:var(--dim);margin-top:2px;display:flex;gap:4px;flex-wrap:wrap;align-items:center">
                 <span class="d11-role-chip d11-role-${p.role}" style="font-size:8px;padding:1px 4px">${p.role}</span>
                 ${wkts>=5?'<span style="color:#fbbf24">🔥5W</span>':wkts>=3?'<span style="color:#4ade80">3W+</span>':''}
                 ${(Number(s.catches)||0)>0?`<span style="color:#60a5fa">🧤${s.catches}ct</span>`:''}
@@ -12486,10 +12608,10 @@ function renderUtQuickScoreTable() {
                 ${(Number(s.runOuts)||0)>0?`<span style="color:#fb923c">🏃${s.runOuts}ro</span>`:''}
               </div>
             </div>
-            <div style="text-align:right;font-size:12px;font-weight:600;color:var(--text)">${overs||'—'}</div>
-            <div style="text-align:right;font-size:11px;color:var(--dim)">${maidens||'—'}</div>
-            <div style="text-align:right;font-size:11px;color:var(--dim)">${rg||'—'}</div>
-            <div style="text-align:right;font-size:13px;font-weight:700;color:${wkts>0?'#f87171':'var(--dim)'}">${wkts||'—'}</div>
+            <div><input type="number" min="0" step="0.1" id="${pid}-overs" value="${s.oversBowled??''}" placeholder="0" style="width:34px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:var(--text);padding:4px 3px;font-size:11px;text-align:center"/></div>
+            <div><input type="number" min="0" id="${pid}-maidens" value="${s.maidens??''}" placeholder="0" style="width:26px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:6px;color:var(--text);padding:4px 3px;font-size:11px;text-align:center"/></div>
+            <div>${inp(`${pid}-runsGiven`, s.runsGiven, 34)}</div>
+            <div>${inp(`${pid}-wickets`, s.wickets, 34)}</div>
             <div style="text-align:right;font-size:10.5px;font-weight:700;color:${erD.color}">${erLabel}${erD.pts!==0?`<div style="font-size:8.5px">${erD.pts>0?'+':''}${erD.pts}pts</div>`:''}</div>
             <div style="text-align:right"><div style="font-size:13px;font-weight:700;color:var(--gold)">${p.points||0}</div><div style="font-size:9px;color:var(--dim)">🎳${Math.round(bowlPts)}${fPts>0?`<span style="color:#60a5fa"> 🧤+${fPts}</span>`:''}</div></div>
           </div>`;
