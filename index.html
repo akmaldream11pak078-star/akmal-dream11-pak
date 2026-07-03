@@ -681,14 +681,40 @@ const D11_MEGA_ENTRY_FEE = 30; // Rs 30 entry fee to join Dream11 Mega Contest
 const D11_MEGA_COMPANY_SHARE = 0.10; // 10% of Dream11 mega pool goes to company, 90% split among winners
 const D11_H2H_ENTRY_FEE = 60; // Rs 60 per user for Dream11 H2H
 const D11_H2H_COMPANY_SHARE = 0.10; // 10% company cut, 90% to the winner
-const D11_CUSTOM_CONTEST_MAX_PLAYERS = 5; // Max players allowed in a user-created Dream11 contest
+const D11_CUSTOM_CONTEST_MAX_PLAYERS = 100; // Max players allowed in a user-created Dream11 contest
 const D11_CUSTOM_CONTEST_MAX_PER_USER = 2; // Max number of Custom Contests one user can create per match
 const D11_CUSTOM_CONTEST_COMPANY_SHARE = 0.10; // 10% company cut
 const D11_TOURNAMENT_CREATION_FEE = 0; // Rs creator pays the company to create a tournament (temporarily 0, raise later)
 const D11_TOURNAMENT_MAX_PARTICIPANTS = 100; // Max users allowed to join one tournament
 const D11_TOURNAMENT_COMPANY_SHARE = 0.10; // 10% company cut on the entry-fee pool (when creator sets a paid entry)
 const D11_TOURNAMENT_SPLIT = [0.50, 0.30, 0.20]; // Top 3 prize split of distributable pool
-const D11_CUSTOM_CONTEST_SPLIT = [0.50, 0.30, 0.20]; // Top 3 prize split of distributable pool
+const D11_CUSTOM_CONTEST_SPLIT = [0.50, 0.30, 0.20]; // Top 3 prize split of distributable pool (used only when joiners < 4)
+
+// Custom Dream11 Contest — "Mega style" prize distribution.
+// 70% of joiners win a prize (rounded), remaining 90% of the pool (10% company
+// cut) is split among winners using a weighted curve so rank 1 gets the
+// biggest share and it tapers down — same spirit as the Mega Contest brackets,
+// just scaled to a max of D11_CUSTOM_CONTEST_MAX_PLAYERS (100) joiners.
+const D11_CUSTOM_CONTEST_WINNER_SHARE = 0.70; // 70% of players win
+
+function getD11CustomContestWinnerCount(joinCount) {
+  if (joinCount <= 1) return joinCount; // 1 joiner handled separately (refund)
+  if (joinCount <= 3) return Math.max(1, joinCount - 1); // tiny contests: all but last place win
+  return Math.max(1, Math.round(joinCount * D11_CUSTOM_CONTEST_WINNER_SHARE));
+}
+
+// Builds a decreasing weight table of length `winnerCount` — rank 1 gets the
+// largest weight, tapering smoothly down to the last winning rank — mirroring
+// the "top-heavy but many winners" shape used by the Mega Contest brackets.
+function buildD11CustomContestWeights(winnerCount) {
+  const weights = [];
+  for (let i = 0; i < winnerCount; i++) {
+    // Smooth taper: front ranks worth noticeably more, tail ranks converge
+    // to a small base weight so even the last winning rank gets something.
+    weights.push(Math.round(100 / Math.pow(i + 1, 0.65)) + 8);
+  }
+  return weights;
+}
 
 // ════════════════════════════════════════════════════════════
 // USER TOURNAMENTS (UT) — a regular user creates their own
@@ -8706,19 +8732,43 @@ async function finalizeD11CustomContests(matchId) {
       })
       .sort((a,b) => b.points - a.points);
 
-    const distributable = Math.round(cc.pool * (1 - D11_CUSTOM_CONTEST_COMPANY_SHARE));
-    const prizes = {};
-    const payCount = Math.min(3, ranked.length);
-    const splitSlice = D11_CUSTOM_CONTEST_SPLIT.slice(0, payCount);
-    const splitSum = splitSlice.reduce((a,b)=>a+b, 0);
+    // Rule: only 1 joiner → cancelled, full entry fee refunded (same as Mega)
+    if (ranked.length <= 1) {
+      if (ranked.length === 1) {
+        savePromises.push(_adminWalletRefund(ranked[0].email, cc.entryFee, matchId, 'Custom Dream11 Contest cancelled — only 1 joiner, full refund', 'd11_custom_refund'));
+      }
+      cc.prizes = {};
+      cc.status = 'completed';
+      cc.cancelled = ranked.length === 1;
+      savePromises.push(_saveD11CustomContestToFirestore(cc.id, cc));
+      continue;
+    }
 
-    for (let i = 0; i < payCount; i++) {
-      const share = splitSlice[i] / splitSum;
-      const amount = Math.round(distributable * share);
-      if (amount <= 0) continue;
-      prizes[ranked[i].email] = amount;
-      // Credit prize server-side
-      savePromises.push(_adminWalletPrize(ranked[i].email, amount, 'd11_custom_prize', matchId, cc.code));
+    const distributable = Math.round(cc.pool * (1 - D11_CUSTOM_CONTEST_COMPANY_SHARE));
+
+    // Mega-style: ~70% of joiners win, weighted taper from rank 1 downward.
+    const winnerCount = Math.min(ranked.length, getD11CustomContestWinnerCount(ranked.length));
+    const weightTable = buildD11CustomContestWeights(winnerCount);
+    const weightSum = weightTable.reduce((a,b) => a+b, 0);
+
+    const prizes = {};
+    let i = 0;
+    while (i < ranked.length && i < weightTable.length) {
+      // Group consecutive tied ranks and split their combined prize equally
+      let j = i;
+      while (j + 1 < ranked.length && ranked[j+1].points === ranked[i].points) j++;
+      const tieGroup = ranked.slice(i, j+1);
+      const tieEndIdx = Math.min(j, weightTable.length - 1);
+      const combinedWeight = weightTable.slice(i, tieEndIdx + 1).reduce((a,b) => a + b, 0);
+      const combinedPrize = Math.round(distributable * (combinedWeight / weightSum));
+      const share = Math.round(combinedPrize / tieGroup.length);
+      tieGroup.forEach(p => {
+        if (share > 0) {
+          prizes[p.email] = share;
+          savePromises.push(_adminWalletPrize(p.email, share, 'd11_custom_prize', matchId, cc.code));
+        }
+      });
+      i = j + 1;
     }
 
     cc.prizes = prizes;
@@ -9215,7 +9265,7 @@ function renderD11CustomContestSection(matchId, locked, myCustomContests) {
   return `
   <div class="card mb12" style="background:rgba(168,85,247,0.08);border-color:rgba(168,85,247,0.3)">
     <div style="font-weight:700;font-size:14px;color:#c084fc;margin-bottom:4px">🛠️ Create Your Own Dream11 Contest</div>
-    <div style="font-size:11px;color:var(--dim);margin-bottom:10px">Set an entry fee and invite up to ${D11_CUSTOM_CONTEST_MAX_PLAYERS} friends with a code. 10% app fee, remaining 90% split 50/30/20 among the top 3. Max ${D11_CUSTOM_CONTEST_MAX_PER_USER} custom contests per match.</div>
+    <div style="font-size:11px;color:var(--dim);margin-bottom:10px">Set an entry fee and invite up to ${D11_CUSTOM_CONTEST_MAX_PLAYERS} friends with a code. 10% app fee, remaining 90% pool shared among top ~70% players (Mega-style payout — more joiners, more winners). Max ${D11_CUSTOM_CONTEST_MAX_PER_USER} custom contests per match.</div>
     ${locked ? `<span style="font-size:11px;color:var(--dim)">🔒 Closed — contest is locked</span>` :
       limitReached ? `<span style="font-size:11px;color:#4ade80;font-weight:700">✅ You've created ${myCreatedCount}/${D11_CUSTOM_CONTEST_MAX_PER_USER} contests for this match — limit reached</span>` : `
     <div style="display:flex;gap:8px">
@@ -11209,6 +11259,43 @@ function renderDream11ViewTeam() {
     </div>`;
   };
 
+  // ── Which contests did this user join for this match? (Free / Mega / Custom) ──
+  const myContestBadges = [];
+  if (t.matchId && t.userEmail) {
+    if ((d11m?.freeParticipants||[]).includes(t.userEmail)) {
+      myContestBadges.push({ label: '🆓 Free Contest', color: '#4ade80', prize: null, contestType: 'free' });
+    }
+    if ((d11m?.megaParticipants||[]).includes(t.userEmail)) {
+      const prize = d11m?.megaPrizes?.[t.userEmail];
+      myContestBadges.push({ label: '🏆 Mega Contest', color: '#fbbf24', prize: prize || null, contestType: 'mega' });
+    }
+    Object.values(d11CustomContests)
+      .filter(cc => cc.matchId === t.matchId && (cc.participants||[]).includes(t.userEmail))
+      .forEach(cc => {
+        const prize = cc.prizes?.[t.userEmail];
+        myContestBadges.push({ label: `🛠️ Custom: ${cc.code}`, color: '#c084fc', prize: prize || null, ccId: cc.id });
+      });
+  }
+
+  const myContestsHtml = myContestBadges.length ? `
+  <div class="card mb14">
+    <div class="section-title" style="margin-bottom:10px">🎟️ My Contests Joined</div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      ${myContestBadges.map(b => {
+        const clickAttr = b.ccId
+          ? `onclick="openD11ContestParticipants('${t.matchId}','custom','${b.ccId}')"`
+          : b.contestType
+            ? `onclick="openD11ContestParticipants('${t.matchId}','${b.contestType}')"`
+            : '';
+        return `
+        <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.04);border:1px solid var(--card-b);border-radius:10px;padding:9px 12px;${clickAttr?'cursor:pointer':''}" ${clickAttr}>
+          <span style="font-size:12.5px;font-weight:700;color:${b.color}">${b.label} ›</span>
+          <span style="font-size:12px;font-weight:700;color:${b.prize?'#4ade80':'var(--dim)'}">${b.prize?'🎉 Rs '+b.prize+' won':'—'}</span>
+        </div>
+      `;}).join('')}
+    </div>
+  </div>` : '';
+
   return `
   <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="goDream11Hub()">← Back to Dream11</button>
 
@@ -11230,6 +11317,8 @@ function renderDream11ViewTeam() {
       ${!d11m?.scored && d11m?.lastLiveUpdateAt ? `<span class="match-status status-live" style="margin-top:4px;display:inline-block">🔴 LIVE</span>` : d11m?.scored ? `<span class="match-status status-completed" style="margin-top:4px;display:inline-block">🏁 FINAL</span>` : ''}
     </div>
   </div>
+
+  ${myContestsHtml}
 
   <div style="background:linear-gradient(180deg,#1d6b3a,#155a2f);border-radius:16px;padding:18px 8px;margin-bottom:18px;position:relative;overflow:hidden">
     <div style="position:absolute;top:50%;left:50%;width:160%;height:55%;border:1.5px solid rgba(255,255,255,0.15);border-radius:50%;transform:translate(-50%,-50%)"></div>
