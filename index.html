@@ -15974,5 +15974,71 @@ function _applyPlayerDp(type, playerId, b64) {
 </script>
 
 <input type="file" id="player-dp-input" accept="image/*" style="display:none" onchange="_onPlayerDpChange(this)">
+
+<!-- ══════════════════════════════════════════════════════════════════
+     UPDATE CHECKER — jab bhi naya feature add karo, neeche APP_VERSION
+     number badha dena (e.g. "1.0.0" → "1.0.1"). Users ko automatically
+     "Update Available" banner dikhega, koi re-install nahi chahiye.
+     ══════════════════════════════════════════════════════════════════ -->
+<script>
+const APP_VERSION = "1.0.0";
+const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
+const CHECK_INTERVAL_MS = 60 * 1000;
+
+function _createUpdateBanner() {
+  if (document.getElementById('d11-update-banner')) return;
+  const banner = document.createElement('div');
+  banner.id = 'd11-update-banner';
+  banner.style.cssText = `
+    position:fixed; left:14px; right:14px; bottom:96px; z-index:9999;
+    background:linear-gradient(135deg,#2563eb,#1d4ed8); color:#fff;
+    border-radius:16px; padding:14px 16px; display:flex; align-items:center;
+    justify-content:space-between; gap:12px; box-shadow:0 10px 30px rgba(37,99,235,0.5);
+    font-family:'Inter',sans-serif; animation:d11SlideUp 0.3s ease;
+  `;
+  banner.innerHTML = `
+    <style>
+      @keyframes d11SlideUp { from{opacity:0;transform:translateY(20px)} to{opacity:1;transform:translateY(0)} }
+    </style>
+    <div style="font-size:13.5px; font-weight:600; line-height:1.3;">
+      🚀 New version available!<br><span style="font-size:11.5px;opacity:0.85;font-weight:400;">Update karein latest features ke liye</span>
+    </div>
+    <button id="d11-update-btn" style="
+      background:#fff; color:#1d4ed8; border:none; border-radius:10px;
+      padding:9px 16px; font-weight:700; font-size:13px; font-family:Rajdhani,sans-serif;
+      white-space:nowrap; cursor:pointer;
+    ">Update</button>
+  `;
+  document.body.appendChild(banner);
+  document.getElementById('d11-update-btn').onclick = () => {
+    if ('caches' in window) {
+      caches.keys().then((names) => Promise.all(names.map((n) => caches.delete(n)))).finally(() => {
+        location.reload(true);
+      });
+    } else {
+      location.reload(true);
+    }
+  };
+}
+
+async function _checkForUpdate() {
+  try {
+    const res = await fetch(LIVE_URL + '?t=' + Date.now(), { cache: 'no-store' });
+    const html = await res.text();
+    const match = html.match(/APP_VERSION\s*=\s*"([^"]+)"/);
+    if (match && match[1] && match[1] !== APP_VERSION) {
+      _createUpdateBanner();
+    }
+  } catch (e) {
+    // offline ya network error — chup chaap ignore karo
+  }
+}
+
+window.addEventListener('load', () => {
+  setTimeout(_checkForUpdate, 3000);
+  setInterval(_checkForUpdate, CHECK_INTERVAL_MS);
+});
+</script>
+
 </body>
 </html>
