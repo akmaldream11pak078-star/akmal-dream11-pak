@@ -21,17 +21,26 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Network-first strategy: hamesha latest version try karo, offline ho to cache se do
+// Stale-while-revalidate: cache se TURANT dikhao (fast open),
+// background me naya version fetch karke cache update kar do agli baar ke liye.
+// APP_VERSION update-checker already user ko naya version batata hai (banner),
+// isliye yahan fresh-fetch ka wait karne ki zaroorat nahi — speed priority hai.
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
 
   event.respondWith(
-    fetch(event.request)
-      .then((response) => {
-        const clone = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-        return response;
+    caches.open(CACHE_NAME).then((cache) =>
+      cache.match(event.request).then((cachedResponse) => {
+        const networkFetch = fetch(event.request)
+          .then((networkResponse) => {
+            cache.put(event.request, networkResponse.clone());
+            return networkResponse;
+          })
+          .catch(() => cachedResponse);
+
+        // Cache mila to turant wahi bhejo, warna network ka wait karo
+        return cachedResponse || networkFetch;
       })
-      .catch(() => caches.match(event.request))
+    )
   );
 });
