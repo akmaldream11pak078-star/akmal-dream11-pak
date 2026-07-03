@@ -1,88 +1,68 @@
-// Akmal Dream 11 Pak — Service Worker
-// Caches app shell for fast load and offline support
+// ── AkmalDream11Pak Service Worker ──────────────────────────
+// IMPORTANT: Bump CACHE_VERSION every time you deploy a new update.
+// This is what triggers the "Update Available" banner in the app.
+const CACHE_VERSION = 'v1.0.1'; // 👈 CHANGE THIS NUMBER ON EVERY UPDATE
+const CACHE_NAME = 'akmal-d11-' + CACHE_VERSION;
 
-const CACHE_NAME = 'akmal-d11-v1';
-const STATIC_ASSETS = [
-  '/',
-  '/index.html',
-  '/manifest.json',
-  'https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600;700;800&display=swap'
+const CORE_ASSETS = [
+  './',
+  './index.html',
+  './manifest.json',
+  './icon-192.png',
+  './icon-512.png'
 ];
 
-// Install — cache app shell
-self.addEventListener('install', event => {
+// Install: cache core files, activate immediately (don't wait)
+self.addEventListener('install', (event) => {
   self.skipWaiting();
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => {
-      return cache.addAll(STATIC_ASSETS).catch(() => {});
-    })
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(CORE_ASSETS)).catch(() => {})
   );
 });
 
-// Activate — clean old caches
-self.addEventListener('activate', event => {
+// Activate: delete old caches, take control of open pages immediately
+self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
+    caches.keys().then((keys) =>
+      Promise.all(
+        keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))
+      )
     ).then(() => self.clients.claim())
   );
 });
 
-// Fetch — network first, fallback to cache
-self.addEventListener('fetch', event => {
-  const url = new URL(event.request.url);
+// Fetch: network-first for HTML (so updates are detected fast),
+// cache-first for other static assets (faster load, offline support)
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
+  if (req.method !== 'GET') return;
 
-  // Skip Firebase/API calls — always go to network
-  if (
-    url.hostname.includes('firebase') ||
-    url.hostname.includes('firestore') ||
-    url.hostname.includes('googleapis') ||
-    url.hostname.includes('gstatic') ||
-    event.request.method !== 'GET'
-  ) {
-    return;
-  }
+  const isHTML = req.mode === 'navigate' || (req.headers.get('accept') || '').includes('text/html');
 
-  event.respondWith(
-    fetch(event.request)
-      .then(response => {
-        // Cache fresh copy for next time
-        if (response && response.status === 200) {
-          const copy = response.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
-        }
-        return response;
-      })
-      .catch(() => {
-        // Network failed — serve from cache
-        return caches.match(event.request).then(cached => {
-          if (cached) return cached;
-          // Fallback to index.html for navigation requests
-          if (event.request.mode === 'navigate') {
-            return caches.match('/index.html');
-          }
+  if (isHTML) {
+    event.respondWith(
+      fetch(req)
+        .then((res) => {
+          const copy = res.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+          return res;
+        })
+        .catch(() => caches.match(req))
+    );
+  } else {
+    event.respondWith(
+      caches.match(req).then((cached) => {
+        return cached || fetch(req).then((res) => {
+          const copy = res.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+          return res;
         });
-      })
-  );
+      }).catch(() => fetch(req))
+    );
+  }
 });
 
-// Push Notifications support
-self.addEventListener('push', event => {
-  if (!event.data) return;
-  try {
-    const data = event.data.json();
-    self.registration.showNotification(data.title || 'Akmal Dream 11 Pak', {
-      body: data.body || '',
-      icon: data.icon || '/icon-192.png',
-      badge: '/icon-192.png',
-      data: { url: data.url || '/' }
-    });
-  } catch(e) {}
-});
-
-self.addEventListener('notificationclick', event => {
-  event.notification.close();
-  event.waitUntil(
-    clients.openWindow(event.notification.data?.url || '/')
-  );
+// Listen for a message from the page telling this new SW to activate now
+self.addEventListener('message', (event) => {
+  if (event.data === 'SKIP_WAITING') self.skipWaiting();
 });
