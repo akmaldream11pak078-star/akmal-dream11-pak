@@ -404,8 +404,9 @@
   .d11-dual-name { font-size:11.5px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
   .d11-dual-sel { font-size:9.5px; color:var(--dim); margin-top:1px; }
   .d11-dual-pts { font-size:13px; font-weight:800; color:var(--gold); font-family:Rajdhani,sans-serif; margin-top:2px; }
-  .d11-dual-toggle { position:absolute; top:4px; right:4px; width:20px; height:20px; border-radius:50%; font-size:12px; font-weight:800; display:flex; align-items:center; justify-content:center; background:rgba(37,99,235,0.2); color:var(--blue-l); border:1px solid rgba(37,99,235,0.4); }
+  .d11-dual-toggle { position:absolute; top:4px; right:4px; width:20px; height:20px; border-radius:50%; font-size:12px; font-weight:800; display:flex; align-items:center; justify-content:center; background:rgba(37,99,235,0.2); color:var(--blue-l); border:1px solid rgba(37,99,235,0.4); z-index:2; }
   .d11-dual-toggle.active { background:var(--red); color:#fff; border-color:var(--red); }
+  .d11-dual-backup-toggle { position:absolute; top:26px; right:4px; z-index:1; }
   .d11-team-card {
     padding:13px 14px; border-radius:13px; background:rgba(255,255,255,0.04);
     border:1px solid rgba(255,255,255,0.08); margin-bottom:9px;
@@ -752,6 +753,10 @@ let masterTeamsPhotoCropQueue = []; // [{target:'flag'|'player', playerId, sourc
 let masterTeamsPasteText = null; // null = paste box closed
 let masterTeamsPasteMode = false; // show paste UI
 let masterTeamsScanMode = false; // show scan UI
+let masterTeamsPhotoSearchTarget = null; // {key, playerId, name} — which player the image-search modal is fetching a photo for
+let masterTeamsPhotoSearchResults = []; // [{thumb,title}] results shown in the image-search modal
+let masterTeamsPhotoSearchLoading = false; // true while a Wikipedia lookup is in flight
+let masterTeamsPhotoSearchError = null; // error/empty message to show in the modal
 let dream11Teams = {}; // Dream11 user team submissions (keyed by teamId)
 let d11h2hContests = {}; // Dream11 H2H contests, stored separately from prediction H2H
 let d11CustomContests = {}; // User-created Dream11 custom contests
@@ -3632,6 +3637,7 @@ function render() {
       ${tab==='referral' ? renderReferral() : ''}
     </div>
     ${renderBottomNav()}
+    ${masterTeamsPhotoSearchTarget ? renderMasterTeamsPhotoSearchModal() : ''}
   `;
 }
 
@@ -6592,6 +6598,145 @@ function masterTeamsRemoveFlag(key) {
   _saveTeamSquadToFirestore(key, squad);
   try { localStorage.setItem('pp_team_squads_cache', JSON.stringify(teamSquads)); } catch(e){}
   render();
+}
+
+// ── Master Teams: Search player photo online (Wikipedia/Wikidata — free, no API key) ──
+function masterTeamsOpenPhotoSearch(key, playerId) {
+  const squad = teamSquads[key];
+  const p = squad && squad.players.find(x => x.id === playerId);
+  if (!p) return;
+  masterTeamsPhotoSearchTarget = { key, playerId, name: p.name };
+  masterTeamsPhotoSearchResults = [];
+  masterTeamsPhotoSearchError = null;
+  masterTeamsPhotoSearchLoading = true;
+  render();
+  _masterTeamsRunPhotoSearch(p.name);
+}
+
+function masterTeamsClosePhotoSearch() {
+  masterTeamsPhotoSearchTarget = null;
+  masterTeamsPhotoSearchResults = [];
+  masterTeamsPhotoSearchError = null;
+  masterTeamsPhotoSearchLoading = false;
+  render();
+}
+
+function masterTeamsRetryPhotoSearch(newName) {
+  if (!masterTeamsPhotoSearchTarget) return;
+  const query = (newName || masterTeamsPhotoSearchTarget.name || '').trim();
+  if (!query) return;
+  masterTeamsPhotoSearchLoading = true;
+  masterTeamsPhotoSearchError = null;
+  masterTeamsPhotoSearchResults = [];
+  render();
+  _masterTeamsRunPhotoSearch(query);
+}
+
+async function _masterTeamsRunPhotoSearch(name) {
+  try {
+    // Step 1: Wikipedia search to find matching articles (handles nicknames, spelling variants etc.)
+    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(name + ' cricketer')}&format=json&origin=*&srlimit=6`;
+    const searchRes = await fetch(searchUrl);
+    const searchData = await searchRes.json();
+    const titles = (searchData.query && searchData.query.search || []).map(r => r.title);
+    if (titles.length === 0) {
+      masterTeamsPhotoSearchLoading = false;
+      masterTeamsPhotoSearchError = 'No results found. Try a different spelling.';
+      render();
+      return;
+    }
+    // Step 2: fetch page images for those titles
+    const titlesParam = titles.slice(0, 6).map(t => encodeURIComponent(t)).join('|');
+    const imgUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${titlesParam}&prop=pageimages&piprop=original&format=json&origin=*`;
+    const imgRes = await fetch(imgUrl);
+    const imgData = await imgRes.json();
+    const pages = (imgData.query && imgData.query.pages) || {};
+    const results = Object.values(pages)
+      .filter(pg => pg.original && pg.original.source)
+      .map(pg => ({ thumb: pg.original.source, title: pg.title }));
+    masterTeamsPhotoSearchLoading = false;
+    if (results.length === 0) {
+      masterTeamsPhotoSearchError = 'Matches found but no photos available. Try a different name.';
+    } else {
+      masterTeamsPhotoSearchResults = results;
+    }
+    render();
+  } catch (e) {
+    masterTeamsPhotoSearchLoading = false;
+    masterTeamsPhotoSearchError = 'Search failed — check your internet connection.';
+    render();
+  }
+}
+
+async function masterTeamsSelectSearchedPhoto(url) {
+  const target = masterTeamsPhotoSearchTarget;
+  if (!target) return;
+  const squad = teamSquads[target.key];
+  const p = squad && squad.players.find(x => x.id === target.playerId);
+  if (!p) { masterTeamsClosePhotoSearch(); return; }
+  try {
+    // Convert the remote image into a compact base64 dataURL so it's stored the same way as manual uploads
+    const res = await fetch(url);
+    const blob = await res.blob();
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const maxSide = 140;
+      const ratio = Math.min(maxSide / img.width, maxSide / img.height, 1);
+      canvas.width = Math.round(img.width * ratio);
+      canvas.height = Math.round(img.height * ratio);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      const b64 = canvas.toDataURL('image/jpeg', 0.8);
+      p.photo = b64;
+      _saveTeamSquadToFirestore(target.key, squad);
+      try { localStorage.setItem('pp_team_squads_cache', JSON.stringify(teamSquads)); } catch(e){}
+      masterTeamsClosePhotoSearch();
+      showNotif('✅ Photo set from search!');
+    };
+    img.onerror = () => { showNotif('Could not load that image, try another', 'error'); };
+    img.src = dataUrl;
+  } catch (e) {
+    showNotif('Could not fetch that image (CORS/network) — try another result', 'error');
+  }
+}
+
+function renderMasterTeamsPhotoSearchModal() {
+  const t = masterTeamsPhotoSearchTarget;
+  return `
+  <div style="position:fixed;inset:0;z-index:2000;background:rgba(5,10,20,0.82);backdrop-filter:blur(4px);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this)masterTeamsClosePhotoSearch()">
+    <div class="card" style="width:100%;max-width:600px;max-height:82vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:18px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div style="font-weight:700;font-size:15px">🔍 Search Photo — ${t.name}</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="masterTeamsClosePhotoSearch()">✕</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:14px">
+        <input class="input" id="mt-photo-search-input" placeholder="Player name" value="${t.name.replace(/"/g,'&quot;')}" onkeydown="if(event.key==='Enter')masterTeamsRetryPhotoSearch(this.value)" />
+        <button class="btn-primary" style="width:auto;padding:0 18px" onclick="masterTeamsRetryPhotoSearch(document.getElementById('mt-photo-search-input').value)">Search</button>
+      </div>
+      ${masterTeamsPhotoSearchLoading ? `
+        <div style="text-align:center;padding:30px 10px;color:var(--dim);font-size:13px">⏳ Searching Wikipedia...</div>
+      ` : masterTeamsPhotoSearchError ? `
+        <div style="text-align:center;padding:24px 10px;color:var(--dim);font-size:13px">${masterTeamsPhotoSearchError}</div>
+      ` : `
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+          ${masterTeamsPhotoSearchResults.map(r => `
+            <div onclick="masterTeamsSelectSearchedPhoto('${r.thumb.replace(/'/g,"\\'")}')" style="cursor:pointer;border-radius:12px;overflow:hidden;border:1px solid var(--card-b);aspect-ratio:1/1;position:relative">
+              <img src="${r.thumb}" style="width:100%;height:100%;object-fit:cover;display:block" loading="lazy" />
+              <div style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.6);color:#fff;font-size:9px;padding:3px 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${r.title}</div>
+            </div>
+          `).join('')}
+        </div>
+        <div style="font-size:11px;color:var(--dim2);margin-top:12px;text-align:center">Tap a photo to set it as this player's DP · Source: Wikipedia</div>
+      `}
+    </div>
+  </div>
+  `;
 }
 
 function masterTeamsUpdateNewPlayerName(val) { masterTeamsNewPlayerName = val; }
@@ -11425,7 +11570,7 @@ function d11DualPlayerCard(p, rank, selCounts, selTotal) {
     <div class="d11-dual-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80" title="Confirmed Playing XI">✅</span>' : ''}${isBackup ? ' <span style="color:#60a5fa" title="Backup player">🔁</span>' : ''}</div>
     <div class="d11-dual-sel">${selTotal > 0 ? `${selPct}% Sel.` : '— Sel.'}</div>
     <div class="d11-dual-pts">${d11PlayerCredit(p)} Cr</div>
-    ${!picked ? `<button class="d11-dual-toggle ${isBackup?'active':''}" style="background:${isBackup?'#2563eb':'transparent'};border-color:#60a5fa;color:${isBackup?'#fff':'#60a5fa'};font-size:9px;width:auto;padding:2px 6px" title="Mark as backup" onclick="d11ToggleBackup('${p.id}')">${isBackup?'✕ B':'+ B'}</button>` : ''}
+    ${!picked ? `<button class="d11-dual-toggle d11-dual-backup-toggle ${isBackup?'active':''}" style="background:${isBackup?'#2563eb':'transparent'};border-color:#60a5fa;color:${isBackup?'#fff':'#60a5fa'};font-size:9px;width:auto;padding:2px 6px" title="Mark as backup" onclick="d11ToggleBackup('${p.id}')">${isBackup?'✕ B':'+ B'}</button>` : ''}
   </div>`;
 }
 
@@ -13437,10 +13582,13 @@ function renderAdminMasterTeamDetail(key) {
   <div class="empty-state" style="padding:24px 10px">No players added yet.</div>
   ` : sortedPlayers.map(p => `
   <div class="card mb10" style="display:flex;align-items:center;gap:10px">
-    <label style="cursor:pointer;flex-shrink:0">
-      ${p.photo ? `<img src="${p.photo}" style="width:46px;height:46px;border-radius:50%;object-fit:cover;border:1px solid var(--border)" />` : `<div style="width:46px;height:46px;border-radius:50%;background:var(--bg-soft);display:flex;align-items:center;justify-content:center;font-size:18px">👤</div>`}
-      <input type="file" accept="image/*" style="display:none" onchange="masterTeamsUploadPlayerPhoto('${key}','${p.id}', this)" />
-    </label>
+    <div style="position:relative;flex-shrink:0">
+      <label style="cursor:pointer;display:block">
+        ${p.photo ? `<img src="${p.photo}" style="width:46px;height:46px;border-radius:50%;object-fit:cover;border:1px solid var(--border)" />` : `<div style="width:46px;height:46px;border-radius:50%;background:var(--bg-soft);display:flex;align-items:center;justify-content:center;font-size:18px">👤</div>`}
+        <input type="file" accept="image/*" style="display:none" onchange="masterTeamsUploadPlayerPhoto('${key}','${p.id}', this)" />
+      </label>
+      <button onclick="masterTeamsOpenPhotoSearch('${key}','${p.id}')" title="Search photo online" style="position:absolute;bottom:-3px;right:-3px;width:19px;height:19px;border-radius:50%;border:1.5px solid var(--navy);background:var(--blue);color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center;padding:0">🔍</button>
+    </div>
     <div style="flex:1;min-width:0">
       <div style="font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name}</div>
       <div style="display:flex;gap:6px;margin-top:4px">
@@ -16250,7 +16398,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "1.0.3";
+const APP_VERSION = "1.0.4";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
