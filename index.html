@@ -658,7 +658,6 @@ function pkDate(ts) {
 }
 // ⬇️ APK download — embedded directly in this HTML file (see apk_data.js), no separate hosting needed
 const APK_DOWNLOAD_URL = (typeof APK_BASE64_DATA !== 'undefined') ? APK_BASE64_DATA : "/app.apk";
-const APK_VERSION_LABEL = "v4.3"; // shown on the download button
 const MEGA_CONTEST_ENTRY_FEE = 10; // Rs 10 entry fee to join Mega Contest
 const MEGA_CONTEST_COMPANY_SHARE = 0.10; // 10% of mega pool goes to company, 90% admin distributes
 const H2H_ENTRY_FEE = 50; // Rs 50 per player
@@ -3607,6 +3606,7 @@ function render() {
       ${tab==='dream11Completed' ? renderDream11CompletedMatches() : ''}
       ${tab==='completedMatchDetail' ? renderCompletedMatchDetail() : ''}
       ${tab==='d11ScorecardPage' ? renderD11ScorecardPage() : ''}
+      ${tab==='d11LiveScorecard' ? renderD11LiveScorecard() : ''}
       ${tab==='dream11Pool' ? renderDream11AdminPool() : ''}
       ${tab==='dream11Build' ? renderDream11BuildTeam() : ''}
       ${tab==='dream11JoinContest' ? renderD11JoinContest() : ''}
@@ -4385,7 +4385,7 @@ function renderProfile() {
   <button class="btn-secondary btn-block mb10" onclick="goTab('referral')">🤝 My Referral Code</button>
   <button class="btn-secondary btn-block mb10" onclick="goTab('history')">📜 Transaction History</button>
 
-  <a href="${APK_DOWNLOAD_URL}" download class="btn-primary btn-block mb10" style="display:flex;align-items:center;justify-content:center;gap:8px;text-decoration:none;background:linear-gradient(135deg,#16a34a,#15803d)">📥 Download Android App ${APK_VERSION_LABEL}</a>
+  <a href="${APK_DOWNLOAD_URL}" download class="btn-primary btn-block mb10" style="display:flex;align-items:center;justify-content:center;gap:8px;text-decoration:none;background:linear-gradient(135deg,#16a34a,#15803d)">📥 Download Android App</a>
   <div style="font-size:10.5px;color:var(--dim);text-align:center;margin-top:-6px;margin-bottom:10px">Latest updated APK — Android ke liye</div>
   `;
 }
@@ -10047,6 +10047,7 @@ function renderDream11Hub() {
       </div>
       ${!dLocked ? `<button class="btn-primary btn-block mb0" style="font-size:12px;padding:10px;margin-top:8px;background:linear-gradient(135deg,#f59e0b,#ea580c)" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">🏟️ Join Mega / H2H / Custom Contest</button>` : ''}
       ${isLiveScoring ? `<button class="btn-secondary btn-block mb0" style="font-size:12px;padding:10px;margin-top:8px" onclick="openDream11Leaderboard('${m.id}')">🏅 View Live Leaderboard</button>` : ''}
+      ${m.scorecardText ? `<button class="btn-primary btn-block mb0" style="background:linear-gradient(135deg,#0f766e,#0d9488);font-size:12px;padding:10px;margin-top:8px" onclick="openD11ScorecardPage('${m.id}')">📋 Full Batting & Bowling Scorecard Dekho →</button>` : ''}
     </div></div>`;
   }).join('')}</div>`;
   })()}
@@ -10541,6 +10542,104 @@ async function d11RefreshScores() {
   showNotif('✅ Scores updated!');
 }
 
+function openD11LiveScorecard(matchId) {
+  d11ActiveMatchId = matchId;
+  tab = 'd11LiveScorecard';
+  render();
+  window.scrollTo(0, 0);
+}
+
+// Builds a Cricbuzz-style batting/bowling scoreboard directly from d11m.players[].stats
+// (the same stats the fantasy points engine uses) — so it works the moment admin pastes
+// or enters stats, whether the match is still live or already completed. No dependency
+// on the separate raw scorecardText field.
+function renderD11LiveScorecard() {
+  const m = matches[d11ActiveMatchId];
+  const d11m = dream11Matches[d11ActiveMatchId];
+  if (!m || !d11m) return '<div class="empty-state">Match not found.<br><button class="btn-secondary" style="margin-top:14px" onclick="goDream11Hub()">Back</button></div>';
+  const dLocked = isD11Locked(d11ActiveMatchId);
+  const isLive = !d11m.scored && dLocked && !!d11m.lastLiveUpdateAt;
+  const squadA = d11GetTeamSquad ? d11GetTeamSquad(m.teamA) : null;
+  const squadB = d11GetTeamSquad ? d11GetTeamSquad(m.teamB) : null;
+  const flagA = squadA?.flag || '🏑';
+  const flagB = squadB?.flag || '🏑';
+
+  const playersWithStats = (d11m.players||[]).filter(p => p.stats);
+  const bySide = { A: playersWithStats.filter(p => p.side === 'A'), B: playersWithStats.filter(p => p.side === 'B') };
+
+  const battingRow = (p) => {
+    const s = p.stats;
+    const sr = s.ballsFaced > 0 ? ((s.runs / s.ballsFaced) * 100).toFixed(1) : '0.0';
+    return `
+    <div class="d11-player-row">
+      <div class="d11-player-left">
+        ${p.photo ? `<img src="${p.photo}" style="width:26px;height:26px;border-radius:50%;object-fit:cover;flex-shrink:0" />` : ''}
+        <div class="d11-player-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80;font-size:10px">✅</span>' : ''}${!s.isOut ? ' <span style="color:#60a5fa;font-size:10px">(not out)</span>' : ''}</div>
+      </div>
+      <div style="display:flex;gap:10px;font-size:11px;color:var(--dim);white-space:nowrap">
+        <span style="font-weight:800;color:var(--text);min-width:22px;text-align:right">${s.runs||0}</span>
+        <span>(${s.ballsFaced||0}b)</span>
+        <span>${s.fours||0}×4</span>
+        <span>${s.sixes||0}×6</span>
+        <span>SR ${sr}</span>
+      </div>
+    </div>`;
+  };
+  const bowlingRow = (p) => {
+    const s = p.stats;
+    const eco = s.oversBowled > 0 ? (s.runsGiven / s.oversBowled).toFixed(1) : '0.0';
+    return `
+    <div class="d11-player-row">
+      <div class="d11-player-left">
+        ${p.photo ? `<img src="${p.photo}" style="width:26px;height:26px;border-radius:50%;object-fit:cover;flex-shrink:0" />` : ''}
+        <div class="d11-player-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80;font-size:10px">✅</span>' : ''}</div>
+      </div>
+      <div style="display:flex;gap:10px;font-size:11px;color:var(--dim);white-space:nowrap">
+        <span>${s.oversBowled||0}-${s.maidens||0}-${s.runsGiven||0}</span>
+        <span style="font-weight:800;color:#4ade80;min-width:14px;text-align:right">${s.wickets||0}w</span>
+        <span>Eco ${eco}</span>
+      </div>
+    </div>`;
+  };
+
+  const inningsBlock = (sidePlayers, sideName, flag) => {
+    const batters = sidePlayers.filter(p => (p.stats.ballsFaced||0) > 0 || p.stats.isOut === false);
+    const bowlers = sidePlayers.filter(p => (p.stats.oversBowled||0) > 0);
+    if (batters.length === 0 && bowlers.length === 0) return '';
+    return `
+    <div class="section-title" style="margin-top:16px">${flag} ${sideName} Innings</div>
+    ${batters.length ? `<div style="font-size:10.5px;font-weight:700;color:var(--dim);margin-bottom:4px">🏏 BATTING</div>${batters.map(battingRow).join('')}` : ''}
+    ${bowlers.length ? `<div style="font-size:10.5px;font-weight:700;color:var(--dim);margin:10px 0 4px">🎯 BOWLING</div>${bowlers.map(bowlingRow).join('')}` : ''}
+    `;
+  };
+
+  return `
+  <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="goDream11Hub()">← Back to Dream11</button>
+  <div class="card mb14" style="background:linear-gradient(135deg,rgba(37,99,235,0.15),rgba(249,115,22,0.08));border-color:rgba(37,99,235,0.3)">
+    <div style="text-align:center;margin-bottom:10px">${isLive ? '<span class="match-status status-live">🔴 LIVE</span>' : '<span class="match-status status-completed">🏁 COMPLETED</span>'}</div>
+    <div style="display:flex;align-items:center;justify-content:center;gap:16px;margin-bottom:6px">
+      <div style="text-align:center">
+        <div style="font-size:22px">${flagA}</div>
+        <div style="font-weight:700;font-size:13px;margin-top:3px">${m.teamA||'TBD'}</div>
+        ${m.scoreA ? `<div style="font-family:Rajdhani,sans-serif;font-weight:700;font-size:17px;color:var(--gold);margin-top:4px">${m.scoreA}</div>` : ''}
+      </div>
+      <div style="font-family:Rajdhani,sans-serif;font-weight:700;font-size:15px;color:var(--dim)">VS</div>
+      <div style="text-align:center">
+        <div style="font-size:22px">${flagB}</div>
+        <div style="font-weight:700;font-size:13px;margin-top:3px">${m.teamB||'TBD'}</div>
+        ${m.scoreB ? `<div style="font-family:Rajdhani,sans-serif;font-weight:700;font-size:17px;color:var(--gold);margin-top:4px">${m.scoreB}</div>` : ''}
+      </div>
+    </div>
+    ${isLive ? `<div style="text-align:center;font-size:11px;color:#f87171;margin-top:6px">🔴 Live points updating — ${d11m.lastLiveUpdateAt}</div>` : ''}
+    ${m.resultText ? `<div style="text-align:center;font-size:13px;font-weight:700;color:#4ade80;padding:8px;background:rgba(74,222,128,0.08);border-radius:9px;margin-top:8px">🏆 ${m.resultText}</div>` : ''}
+  </div>
+  ${playersWithStats.length === 0 ? `<div class="card" style="text-align:center;padding:32px;color:var(--dim)"><div style="font-size:32px;margin-bottom:10px">📋</div>Scoreboard abhi available nahi hai.</div>` : `
+  ${inningsBlock(bySide.A, m.teamA||'Team A', flagA)}
+  ${inningsBlock(bySide.B, m.teamB||'Team B', flagB)}
+  `}
+  `;
+}
+
 function openD11ScorecardPage(matchId) {
   d11ActiveMatchId = matchId;
   tab = 'd11ScorecardPage';
@@ -10556,7 +10655,7 @@ function renderD11ScorecardPage() {
   const flagA = squadA?.flag || '\ud83c\udfd1';
   const flagB = squadB?.flag || '\ud83c\udfd1';
   return `
-  <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="tab='completedMatchDetail';render();window.scrollTo(0,0)">\u2190 Back to Match</button>
+  <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="goDream11Hub()">\u2190 Back to Dream11</button>
   <div class="card mb14" style="background:linear-gradient(135deg,rgba(37,99,235,0.15),rgba(249,115,22,0.08));border-color:rgba(37,99,235,0.3)">
     <div style="text-align:center;margin-bottom:10px"><span class="match-status status-completed">\ud83c\udfc1 COMPLETED</span></div>
     <div style="display:flex;align-items:center;justify-content:center;gap:16px;margin-bottom:10px">
@@ -16151,7 +16250,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "1.0.2";
+const APP_VERSION = "1.0.3";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
