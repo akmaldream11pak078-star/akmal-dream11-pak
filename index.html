@@ -872,6 +872,7 @@ const D11_ROLE_LIMITS = { WK:[1,4], BAT:[3,6], AR:[1,4], BOWL:[3,6] };
 const D11_ROLE_LABELS = { WK:'Wicket-Keeper', BAT:'Batsman', AR:'All-Rounder', BOWL:'Bowler' };
 const D11_TEAM_SIZE = 11;
 const D11_CREDIT_BUDGET = 100; // total credit budget users have to build their 11 — same as real Dream11
+const D11_MAX_BACKUPS = 3; // backup players — free (no credit cost), auto-replace a same-role main player who isn't in the confirmed Playing XI
 const D11_DEFAULT_CREDIT = 9.0; // used if a player somehow has no credit set, so budget math never breaks
 const D11_MAX_PER_SIDE = 7;
 
@@ -5162,7 +5163,10 @@ function recalcDream11MatchPoints(d11m) {
 function newDream11TeamTemplate(matchId, userEmail) {
   return {
     id: uid(), matchId, userEmail,
-    picks: [],          // array of player ids (length 11)
+    picks: [],          // array of player ids (length 11) — this is the LIVE lineup; ids here may get swapped by auto-replace
+    originalPicks: [],  // the user's original 11 picks, exactly as submitted — never changes, used to know who was replaced
+    backups: [],         // array of up to D11_MAX_BACKUPS backup player ids — free (no credit cost), same-role auto-replace
+    replacements: {},    // map of { originalPlayerId: backupPlayerId } — filled in automatically when a main pick is confirmed not in Playing XI
     captain: null,       // player id
     viceCaptain: null,   // player id
     totalPoints: 0,
@@ -5177,8 +5181,14 @@ function calcDream11TeamPoints(team, d11m) {
     const p = (d11m.players||[]).find(x => x.id === pid);
     if (!p) return;
     let pts = p.points || 0;
-    if (pid === team.captain) pts *= 2;
-    else if (pid === team.viceCaptain) pts *= 1.5;
+    // captain/viceCaptain store the ORIGINAL player id the user chose. If that
+    // player was auto-replaced by a backup (see d11ApplyBackupReplacements),
+    // the multiplier still applies — it now lands on whichever id sits in the
+    // same lineup slot, i.e. the backup that took over the captaincy slot.
+    const effectiveCaptain = team.replacements && team.replacements[team.captain] ? team.replacements[team.captain] : team.captain;
+    const effectiveVc = team.replacements && team.replacements[team.viceCaptain] ? team.replacements[team.viceCaptain] : team.viceCaptain;
+    if (pid === effectiveCaptain) pts *= 2;
+    else if (pid === effectiveVc) pts *= 1.5;
     total += pts;
   });
   return Math.round(total);
@@ -5216,6 +5226,78 @@ function dream11TeamComposition(picks, d11m) {
   return { counts, sideCounts };
 }
 
+// ── Backup player auto-replace ──────────────────────────────────
+// Runs whenever admin confirms/changes Playing XI status for a match.
+// For every submitted team in that match: any ORIGINAL pick who is not in
+// the confirmed Playing XI gets swapped for the first unused backup of the
+// same role who IS in the Playing XI. Swap only happens once per player
+// (a backup that has already been used to cover someone else is skipped).
+// If no matching backup is available, the original pick stays (unchanged
+// behaviour — same as today, they just score 0 if they didn't play).
+function d11ApplyBackupReplacements(matchId) {
+  const d11m = dream11Matches[matchId];
+  if (!d11m) return;
+  const teams = Object.values(dream11Teams).filter(t => t.matchId === matchId);
+  let anyChanged = false;
+
+  teams.forEach(team => {
+    if (!team.originalPicks || team.originalPicks.length === 0) return; // old teams submitted before this feature — leave as-is
+    if (!team.backups || team.backups.length === 0) return; // no backups chosen, nothing to do
+
+    const usedBackupIds = new Set(Object.values(team.replacements || {}));
+    let changed = false;
+
+    team.originalPicks.forEach(originalId => {
+      const originalPlayer = (d11m.players||[]).find(x => x.id === originalId);
+      if (!originalPlayer) return;
+
+      const alreadyReplaced = !!(team.replacements && team.replacements[originalId]);
+      const currentlyInXI = originalPlayer.isPlayingXI;
+
+      if (currentlyInXI && alreadyReplaced) {
+        // Admin flipped them back into the Playing XI after an earlier replace — undo the swap
+        const backupId = team.replacements[originalId];
+        const slotIdx = team.picks.indexOf(backupId);
+        if (slotIdx >= 0) team.picks[slotIdx] = originalId;
+        delete team.replacements[originalId];
+        usedBackupIds.delete(backupId);
+        changed = true;
+        return;
+      }
+
+      if (!currentlyInXI && !alreadyReplaced) {
+        // Find first backup with the same role, confirmed in Playing XI, not already used
+        const backupId = team.backups.find(bId => {
+          if (usedBackupIds.has(bId)) return false;
+          if (team.picks.includes(bId)) return false; // shouldn't happen, safety check
+          const bp = (d11m.players||[]).find(x => x.id === bId);
+          return bp && bp.role === originalPlayer.role && bp.isPlayingXI;
+        });
+        if (backupId) {
+          const slotIdx = team.picks.indexOf(originalId);
+          if (slotIdx >= 0) {
+            team.picks[slotIdx] = backupId;
+            team.replacements = team.replacements || {};
+            team.replacements[originalId] = backupId;
+            usedBackupIds.add(backupId);
+            changed = true;
+          }
+        }
+      }
+    });
+
+    if (changed) {
+      team.totalPoints = calcDream11TeamPoints(team, d11m);
+      _saveDream11TeamToFirestore(team.id, team);
+      anyChanged = true;
+    }
+  });
+
+  if (anyChanged) {
+    try { localStorage.setItem('pp_dream11_teams_cache', JSON.stringify(dream11Teams)); } catch(e) {}
+  }
+}
+
 function dream11ValidateTeam(picks, d11m) {
   const errors = [];
   if (picks.length !== D11_TEAM_SIZE) errors.push(`Exactly ${D11_TEAM_SIZE} players required (currently ${picks.length})`);
@@ -5233,6 +5315,12 @@ function dream11ValidateTeam(picks, d11m) {
     return sum + (p ? d11PlayerCredit(p) : 0);
   }, 0);
   if (creditsUsed > D11_CREDIT_BUDGET + 1e-9) errors.push(`Over credit budget: ${creditsUsed.toFixed(1)}/${D11_CREDIT_BUDGET} Cr used`);
+  return errors;
+}
+
+function dream11ValidateBackups(backups) {
+  const errors = [];
+  if (backups && backups.length > D11_MAX_BACKUPS) errors.push(`Max ${D11_MAX_BACKUPS} backup players allowed`);
   return errors;
 }
 
@@ -6691,6 +6779,7 @@ function d11TogglePlayingXI(playerId) {
   if (!p) return;
   p.isPlayingXI = !p.isPlayingXI;
   _saveDream11MatchToFirestore(d11ActiveMatchId, d11m);
+  d11ApplyBackupReplacements(d11ActiveMatchId);
   render();
   showNotif(p.isPlayingXI ? `${p.name} marked as confirmed Playing XI` : `${p.name} unmarked from Playing XI`);
 }
@@ -6699,6 +6788,7 @@ function d11MarkAllPlayingXI(side) {
   if (!d11m) return;
   d11m.players.filter(p => p.side === side).forEach(p => { p.isPlayingXI = true; });
   _saveDream11MatchToFirestore(d11ActiveMatchId, d11m);
+  d11ApplyBackupReplacements(d11ActiveMatchId);
   render();
 }
 function d11ClearAllPlayingXI() {
@@ -6706,6 +6796,7 @@ function d11ClearAllPlayingXI() {
   if (!d11m) return;
   d11m.players.forEach(p => { p.isPlayingXI = false; });
   _saveDream11MatchToFirestore(d11ActiveMatchId, d11m);
+  d11ApplyBackupReplacements(d11ActiveMatchId);
   render();
   showNotif('Playing XI confirmation cleared for all players');
 }
@@ -6732,7 +6823,12 @@ function d11SaveStatsForPlayer(playerId) {
     oversBowled: get('oversBowled'), runsGiven: get('runsGiven')
   };
   p.points = calcDream11PlayerPoints(p.stats, d11ActiveMatchId);
+  const s = p.stats;
+  const hasActivity = Number(s.ballsFaced||0) > 0 || Number(s.oversBowled||0) > 0 || Number(s.catches||0) > 0 ||
+    Number(s.stumpings||0) > 0 || Number(s.runOuts||0) > 0 || !!s.isOut;
+  if (hasActivity) p.isPlayingXI = true;
   _saveDream11MatchToFirestore(d11ActiveMatchId, d11m);
+  d11ApplyBackupReplacements(d11ActiveMatchId);
   d11RefreshLiveTeamPoints(d11ActiveMatchId);
   render();
   showNotif(`${p.name}: ${p.points} pts calculated${!d11m.scored ? ' — live scores updated for users 🔴' : ''}`);
@@ -6873,9 +6969,17 @@ function d11SaveGridAll() {
   (d11m.players||[]).forEach(p => {
     p.stats = d11GridReadRow(p.id);
     p.points = calcDream11PlayerPoints(p.stats, d11ActiveMatchId);
+    // If admin entered any real activity for this player (batted, bowled, fielded,
+    // or was marked out), they clearly played — auto-confirm Playing XI so the
+    // backup auto-replace logic treats them correctly without a separate manual tick.
+    const s = p.stats;
+    const hasActivity = (s.ballsFaced||0) > 0 || (s.oversBowled||0) > 0 || (s.catches||0) > 0 ||
+      (s.stumpings||0) > 0 || (s.runOuts||0) > 0 || !!s.isOut;
+    if (hasActivity) p.isPlayingXI = true;
   });
   recalcDream11MatchPoints(d11m);
   _saveDream11MatchToFirestore(d11ActiveMatchId, d11m);
+  d11ApplyBackupReplacements(d11ActiveMatchId);
   d11RefreshLiveTeamPoints(d11ActiveMatchId);
   d11GridEntryOpen = false;
   render();
@@ -6949,7 +7053,7 @@ function _d11ParseMdTable(text) {
           const cells = rawCells.filter((c,idx,arr) => !(idx===0 && c==='') && !(idx===arr.length-1 && c===''));
           if (cells.length < 2) { i++; continue; }
           const rawName = nameIdx > -1 ? cells[nameIdx] : cells[0];
-          const name = (rawName||'').replace(/\((c|wk)\)/gi, '').trim();
+          const name = (rawName||'').replace(/\((c\s*&\s*wk|wk\s*&\s*c|c|wk|vc)\)/gi, '').trim();
           const num = (v) => { const n = parseInt((v||'').replace(/[^\d]/g,''), 10); return isNaN(n) ? 0 : n; };
           if (name) {
             if (isBatting) {
@@ -7067,6 +7171,14 @@ function _d11ApplyParsedRows(battingRows, bowlingRows, fieldingRows) {
   });
   const matched = matchedPlayerIds.size;
 
+  // Any player whose stats just came in from the scan/paste clearly played the
+  // match — auto-confirm them as Playing XI so admin doesn't have to also tick
+  // them manually. This also lets the backup auto-replace logic run correctly
+  // for anyone who did NOT get stats (i.e. wasn't in this scorecard at all).
+  matchedPlayerIds.forEach(pid => {
+    const p = d11m.players.find(x => x.id === pid);
+    if (p) p.isPlayingXI = true;
+  });
 
   // Fill any untouched fields to 0 so calc doesn't break, then compute points instantly.
   d11m.players.forEach(p => {
@@ -7082,6 +7194,7 @@ function _d11ApplyParsedRows(battingRows, bowlingRows, fieldingRows) {
   });
   recalcDream11MatchPoints(d11m);
   _saveDream11MatchToFirestore(d11ActiveMatchId, d11m);
+  d11ApplyBackupReplacements(d11ActiveMatchId);
   d11RefreshLiveTeamPoints(d11ActiveMatchId);
   return { matched, unmatched: [...new Set(unmatched)] };
 }
@@ -7919,6 +8032,20 @@ function d11AiAutoSelect() {
   }
 }
 
+function d11ToggleBackup(playerId) {
+  if (!d11TeamDraft) return;
+  const d11m = dream11Matches[d11TeamDraft.matchId];
+  d11TeamDraft.backups = d11TeamDraft.backups || [];
+  const idx = d11TeamDraft.backups.indexOf(playerId);
+  if (idx >= 0) {
+    d11TeamDraft.backups.splice(idx, 1);
+  } else {
+    if (d11TeamDraft.picks.includes(playerId)) { showNotif('This player is already in your main 11', 'error'); return; }
+    if (d11TeamDraft.backups.length >= D11_MAX_BACKUPS) { showNotif(`Only ${D11_MAX_BACKUPS} backup players allowed`, 'error'); return; }
+    d11TeamDraft.backups.push(playerId);
+  }
+  render();
+}
 function d11TogglePick(playerId) {
   if (!d11TeamDraft) return;
   const d11m = dream11Matches[d11TeamDraft.matchId];
@@ -7975,12 +8102,13 @@ function d11SetViceCaptain(playerId) {
 }
 async function d11SubmitTeam() {
   const d11m = dream11Matches[d11TeamDraft.matchId];
-  const errors = dream11ValidateTeam(d11TeamDraft.picks, d11m);
+  const errors = dream11ValidateTeam(d11TeamDraft.picks, d11m).concat(dream11ValidateBackups(d11TeamDraft.backups));
   if (!d11TeamDraft.captain) errors.push('Please select a Captain');
   if (!d11TeamDraft.viceCaptain) errors.push('Please select a Vice-Captain');
   if (errors.length) { showNotif(errors[0], 'error'); return; }
   if (isD11Locked(d11TeamDraft.matchId)) { showNotif('This contest is now locked — deadline has passed', 'error'); return; }
 
+  d11TeamDraft.originalPicks = [...d11TeamDraft.picks];
   d11TeamDraft.totalPoints = calcDream11TeamPoints(d11TeamDraft, d11m);
   dream11Teams[d11TeamDraft.id] = { ...d11TeamDraft };
   try {
@@ -11143,12 +11271,31 @@ function renderDream11BuildTeam() {
       </div>
     </div>`;
   }).join('')}
+
+  <div class="section-title" style="margin-top:18px">🔁 Backup Players (${(d11TeamDraft.backups||[]).length}/${D11_MAX_BACKUPS})</div>
+  <div class="empty-state" style="padding:8px 4px;font-size:11px;text-align:left">Free picks — no credit cost. If a main player isn't in the confirmed Playing XI, a backup of the SAME role automatically takes their spot.</div>
+  ${(d11TeamDraft.backups||[]).length === 0 ? `<div class="empty-state" style="padding:10px 4px;font-size:11px">No backups selected yet — tap "+ B" next to any player above to add one (up to ${D11_MAX_BACKUPS}).</div>` : (d11TeamDraft.backups||[]).map(bid => {
+    const p = d11m.players.find(x => x.id === bid);
+    if (!p) return '';
+    return `
+    <div class="d11-player-row picked">
+      <div class="d11-player-left">
+        <span class="d11-role-chip d11-role-${p.role}">${p.role}</span>
+        <div class="d11-player-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80;font-size:11px">✅</span>' : ''}</div>
+      </div>
+      <button class="d11-cv-btn" onclick="d11ToggleBackup('${bid}')">✕</button>
+    </div>`;
+  }).join('')}
   ` : ''}
 
   <div class="d11-sticky-bar">
     <div>
       <div style="font-size:11px;color:var(--dim)">Selected</div>
       <div class="display" style="font-size:18px">${d11TeamDraft.picks.length}/${D11_TEAM_SIZE}</div>
+    </div>
+    <div>
+      <div style="font-size:11px;color:var(--dim);text-align:center">Backups</div>
+      <div class="display" style="font-size:18px;color:#60a5fa;text-align:center">${(d11TeamDraft.backups||[]).length}/${D11_MAX_BACKUPS}</div>
     </div>
     <div>
       <div style="font-size:11px;color:var(--dim);text-align:center">Credits Left</div>
@@ -11166,6 +11313,7 @@ function renderDream11BuildTeam() {
 // and a points/credit indicator — with a +/✕ toggle button like the official app.
 function d11DualPlayerCard(p, rank, selCounts, selTotal) {
   const picked = d11TeamDraft.picks.includes(p.id);
+  const isBackup = (d11TeamDraft.backups||[]).includes(p.id);
   const selPct = selTotal > 0 ? Math.round(((selCounts[p.id]||0) / selTotal) * 100) : 0;
   const avatar = p.photo
     ? `<img src="${p.photo}" class="d11-dual-avatar" />`
@@ -11175,9 +11323,10 @@ function d11DualPlayerCard(p, rank, selCounts, selTotal) {
     <div class="d11-dual-rank">${rank}<br/><span class="d11-role-chip d11-role-${p.role}" style="margin-top:2px;display:inline-block">${p.role}</span></div>
     <button class="d11-dual-toggle ${picked?'active':''}" onclick="d11TogglePick('${p.id}')">${picked?'✕':'+'}</button>
     ${avatar}
-    <div class="d11-dual-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80" title="Confirmed Playing XI">✅</span>' : ''}</div>
+    <div class="d11-dual-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80" title="Confirmed Playing XI">✅</span>' : ''}${isBackup ? ' <span style="color:#60a5fa" title="Backup player">🔁</span>' : ''}</div>
     <div class="d11-dual-sel">${selTotal > 0 ? `${selPct}% Sel.` : '— Sel.'}</div>
     <div class="d11-dual-pts">${d11PlayerCredit(p)} Cr</div>
+    ${!picked ? `<button class="d11-dual-toggle ${isBackup?'active':''}" style="background:${isBackup?'#2563eb':'transparent'};border-color:#60a5fa;color:${isBackup?'#fff':'#60a5fa'};font-size:9px;width:auto;padding:2px 6px" title="Mark as backup" onclick="d11ToggleBackup('${p.id}')">${isBackup?'✕ B':'+ B'}</button>` : ''}
   </div>`;
 }
 
@@ -11263,6 +11412,7 @@ function renderDream11ViewTeam() {
 
   const fieldPlayerCard = (p) => {
     const isC = t.captain === p.id, isVC = t.viceCaptain === p.id;
+    const isSwappedIn = t.replacements && Object.values(t.replacements).includes(p.id);
     const mult = isC ? 2 : isVC ? 1.5 : 1;
     const finalPts = Math.round((p.points||0) * mult);
     return `
@@ -11270,6 +11420,7 @@ function renderDream11ViewTeam() {
       <div style="position:relative">
         ${p.photo ? `<img src="${p.photo}" style="width:54px;height:54px;border-radius:50%;object-fit:cover;border:2px solid rgba(255,255,255,0.5)" />` : `<div style="width:54px;height:54px;border-radius:50%;background:rgba(255,255,255,0.12);border:2px solid rgba(255,255,255,0.4);display:flex;align-items:center;justify-content:center;font-size:22px">👤</div>`}
         ${isC ? `<div style="position:absolute;top:-4px;right:-4px;width:18px;height:18px;border-radius:50%;background:var(--gold);color:#000;font-size:10px;font-weight:800;display:flex;align-items:center;justify-content:center;border:1px solid rgba(0,0,0,0.3)">C</div>` : isVC ? `<div style="position:absolute;top:-4px;right:-4px;width:18px;height:18px;border-radius:50%;background:#60a5fa;color:#000;font-size:9px;font-weight:800;display:flex;align-items:center;justify-content:center;border:1px solid rgba(0,0,0,0.3)">VC</div>` : ''}
+        ${isSwappedIn ? `<div style="position:absolute;top:-4px;left:-4px;width:18px;height:18px;border-radius:50%;background:#2563eb;color:#fff;font-size:9px;font-weight:800;display:flex;align-items:center;justify-content:center;border:1px solid rgba(0,0,0,0.3)" title="Backup — swapped in for a player not in Playing XI">🔁</div>` : ''}
       </div>
       <div style="margin-top:5px;background:rgba(0,0,0,0.55);padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700;color:#fff;white-space:nowrap;max-width:84px;overflow:hidden;text-overflow:ellipsis">${p.name}</div>
       <div style="margin-top:2px;font-size:10.5px;font-weight:700;color:${finalPts>0?'#4ade80':'rgba(255,255,255,0.6)'}">${finalPts} pts</div>
@@ -11347,6 +11498,25 @@ function renderDream11ViewTeam() {
       </div>
     </div>` : '').join('')}
   </div>
+
+  ${(t.backups && t.backups.length) ? `
+  <div class="section-title">🔁 Backup Players (${t.backups.length}/${D11_MAX_BACKUPS})</div>
+  <div class="empty-state" style="padding:8px 4px;font-size:11px;text-align:left;margin-bottom:8px">Free picks. If a main player above isn't in the confirmed Playing XI, a backup of the same role auto-swaps in — look for the 🔁 badge on the field.</div>
+  ${t.backups.map(bid => {
+    const p = d11m?.players.find(x => x.id === bid);
+    if (!p) return '';
+    const isUsed = t.replacements && Object.values(t.replacements).includes(bid);
+    return `
+    <div class="d11-player-row ${isUsed?'picked':''}">
+      <div class="d11-player-left">
+        ${p.photo ? `<img src="${p.photo}" style="width:30px;height:30px;border-radius:50%;object-fit:cover;flex-shrink:0" />` : ''}
+        <span class="d11-role-chip d11-role-${p.role}">${p.role}</span>
+        <div class="d11-player-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80;font-size:11px">✅</span>' : ''}</div>
+      </div>
+      <div style="font-size:11px;font-weight:700;color:${isUsed?'#60a5fa':'var(--dim)'}">${isUsed ? '🔁 In lineup' : 'Standby'}</div>
+    </div>`;
+  }).join('')}
+  ` : ''}
 
   <div class="section-title">Playing 11</div>
   ${t.picks.map(pid => {
@@ -15981,7 +16151,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "1.0.1";
+const APP_VERSION = "1.0.2";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
