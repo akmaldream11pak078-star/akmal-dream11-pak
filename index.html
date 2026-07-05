@@ -564,11 +564,22 @@ window.showBabarSplash = function(){
     window._fbGetIdToken = () => auth.currentUser ? auth.currentUser.getIdToken() : Promise.resolve(null);
     // Resolves true/false once Firebase Auth has told us whether a session exists.
     // Used on page load to silently restore a logged-in user across browser restarts.
+    // IMPORTANT: this has a safety timeout. onAuthStateChanged can occasionally
+    // never fire (flaky network, ad-blocker interfering with Firebase's auth
+    // network calls, brief Firebase outage) — without a timeout, initApp()'s
+    // `await` on this promise would hang forever, leaving the user stuck on
+    // the "Loading..." spinner indefinitely with no way to proceed. If the
+    // timeout wins, we fall back to null (treated as "no confirmed session"),
+    // which still lets the cached/local session already restored in Step 1
+    // carry the user through, or shows the login screen if there was none.
     window._fbAuthReadyPromise = new Promise((resolve) => {
+      let settled = false;
+      const finish = (val) => { if (settled) return; settled = true; resolve(val); };
       const unsub = onAuthStateChanged(auth, (user) => {
         unsub();
-        resolve(user); // null if not logged in, else the Firebase Auth user object
+        finish(user); // null if not logged in, else the Firebase Auth user object
       });
+      setTimeout(() => finish(null), 8000);
     });
   } catch(e) {
     console.warn("Firebase init failed — offline mode:", e);
