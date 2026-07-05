@@ -679,6 +679,8 @@ const MATCH_DELETE_PASSWORD = "Del1234"; // Required to delete any match (Predic
 // ── Dream11 Contest constants (separate from Prediction Mega/H2H) ──
 const D11_MEGA_ENTRY_FEE = 30; // Rs 30 entry fee to join Dream11 Mega Contest
 const D11_MEGA_COMPANY_SHARE = 0.10; // 10% of Dream11 mega pool goes to company, 90% split among winners
+const D11_MINI_MEGA_ENTRY_FEE = 10; // Rs 10 entry fee to join Dream11 Mini Mega Contest (same rules/brackets as Mega, cheaper entry)
+const D11_MINI_MEGA_COMPANY_SHARE = 0.10; // 10% of Dream11 mini mega pool goes to company, 90% split among winners
 const D11_H2H_ENTRY_FEE = 100; // Rs 100 per user for Dream11 H2H
 const D11_H2H_COMPANY_SHARE = 0.05; // 5% company cut, 95% to the winner
 const D11_CUSTOM_CONTEST_MAX_PLAYERS = 100; // Max players allowed in a user-created Dream11 contest
@@ -766,6 +768,7 @@ let deletedDream11Matches = {}; // Recycle bin: deleted Dream11 matches (restora
 let utTournaments = {}; // User-created tournaments (keyed by tournament id) — { id, code, name, ownerEmail, passwordHash, teams:{key:{teamName,flag,players:[]}}, matches:{matchId:{...}}, createdAt }
 let utTeams = {}; // User submissions of an 11-player Dream11-style team inside a UT match (keyed by submission id) — { id, tournamentId, matchId, userEmail, picks:[], captain, viceCaptain, totalPoints }
 let viewedProfileEmail = null; // email of the user being viewed via search
+let _viewProfileReturnTab = 'profile'; // which tab the "← Back" button on viewProfile should return to
 let compareProfileEmail = null; // email of the user being compared via H2H Stats Compare
 let currentUser = null;
 let tab = 'home';
@@ -2876,7 +2879,7 @@ function getUserD11MatchHistoryStats(email) {
   const matchIds = Array.from(new Set([
     ...Object.keys(dream11Matches).filter(mId => {
       const d11m = dream11Matches[mId];
-      return (d11m.freeParticipants||[]).includes(email) || (d11m.megaParticipants||[]).includes(email);
+      return (d11m.freeParticipants||[]).includes(email) || (d11m.megaParticipants||[]).includes(email) || (d11m.miniMegaParticipants||[]).includes(email);
     }),
     ...teamMatchIds.filter(mId => !!dream11Matches[mId])
   ]));
@@ -2891,6 +2894,7 @@ function getUserD11MatchHistoryStats(email) {
 
     const joinedFree = (d11m.freeParticipants||[]).includes(email);
     const joinedMega = (d11m.megaParticipants||[]).includes(email);
+    const joinedMiniMega = (d11m.miniMegaParticipants||[]).includes(email);
 
     function rankWithin(participantEmails) {
       const ranked = participantEmails
@@ -2905,23 +2909,24 @@ function getUserD11MatchHistoryStats(email) {
 
     const freeRank = joinedFree ? rankWithin(d11m.freeParticipants||[]) : null;
     const megaRank = joinedMega ? rankWithin(d11m.megaParticipants||[]) : null;
+    const miniMegaRank = joinedMiniMega ? rankWithin(d11m.miniMegaParticipants||[]) : null;
     // Fallback: if the user submitted a team but never explicitly joined a
-    // Free/Mega contest list (e.g. older data, or contest-join step skipped),
+    // Free/Mega/Mini Mega contest list (e.g. older data, or contest-join step skipped),
     // still rank them fairly against everyone who submitted a team for this match —
     // otherwise their win/loss can never be computed ("of 0" players).
     const allTeamEmails = Object.values(dream11Teams).filter(t => t.matchId === mId).map(t => t.userEmail);
-    const fallbackRank = (!joinedFree && !joinedMega && allTeamEmails.length > 0) ? rankWithin(allTeamEmails) : null;
+    const fallbackRank = (!joinedFree && !joinedMega && !joinedMiniMega && allTeamEmails.length > 0) ? rankWithin(allTeamEmails) : null;
 
-    const isWin = (freeRank?.isWin) || (megaRank?.isWin) || (fallbackRank?.isWin) || false;
-    const bestRank = [freeRank, megaRank, fallbackRank].filter(Boolean).sort((a,b)=>(a.rank||999)-(b.rank||999))[0];
+    const isWin = (freeRank?.isWin) || (megaRank?.isWin) || (miniMegaRank?.isWin) || (fallbackRank?.isWin) || false;
+    const bestRank = [freeRank, megaRank, miniMegaRank, fallbackRank].filter(Boolean).sort((a,b)=>(a.rank||999)-(b.rank||999))[0];
 
     return {
       matchId: mId,
       teamA: m.teamA, teamB: m.teamB, sport: m.sport, status: m.status,
       points: myPoints,
       scored: !!d11m.scored,
-      joinedFree, joinedMega,
-      freeRank, megaRank,
+      joinedFree, joinedMega, joinedMiniMega,
+      freeRank, megaRank, miniMegaRank,
       rank: bestRank?.rank || null,
       totalPlayers: bestRank?.total || 0,
       threshold: bestRank?.threshold || 5,
@@ -3851,6 +3856,7 @@ function renderHome() {
         ${fmtBadge ? `<div style="margin-bottom:6px">${fmtBadge}</div>` : ''}
         <div style="font-size:11.5px;color:var(--dim);margin-bottom:2px">👥 ${d11m.players.length} players pool ready</div>
         <div style="font-size:11.5px;color:#4ade80;margin-bottom:2px">🎯 ${megaJoinedCount} ${megaJoinedCount === 1 ? 'user' : 'users'} joined Mega Contest</div>
+        <div style="font-size:11.5px;color:#4ade80;margin-bottom:2px">🔸 ${(d11m.miniMegaParticipants||[]).length} ${(d11m.miniMegaParticipants||[]).length === 1 ? 'user' : 'users'} joined Mini Mega Contest</div>
         <div style="font-size:11.5px;color:#4ade80;margin-bottom:6px">🎁 ${freeJoinedCount} ${freeJoinedCount === 1 ? 'user' : 'users'} joined Free Contest</div>
         ${isCompletedCard
           ? `<div style="font-size:11px;color:var(--dim);margin-bottom:10px">🏁 Match completed</div>`
@@ -3873,6 +3879,9 @@ function renderHome() {
           }
           if ((d11m.megaParticipants||[]).includes(currentUser.email)) {
             badges.push(`<button style="flex:1;background:rgba(251,191,36,0.14);color:#fbbf24;border:1px solid rgba(251,191,36,0.3);padding:7px 8px;border-radius:9px;font-size:11px;font-weight:700;cursor:pointer" onclick="openD11ContestParticipants('${m.id}','mega')">🎯 Mega Contest</button>`);
+          }
+          if ((d11m.miniMegaParticipants||[]).includes(currentUser.email)) {
+            badges.push(`<button style="flex:1;background:rgba(96,165,250,0.14);color:#60a5fa;border:1px solid rgba(96,165,250,0.3);padding:7px 8px;border-radius:9px;font-size:11px;font-weight:700;cursor:pointer" onclick="openD11ContestParticipants('${m.id}','minimega')">🔸 Mini Mega</button>`);
           }
           Object.values(d11CustomContests)
             .filter(cc => cc.matchId === m.id && (cc.participants||[]).includes(currentUser.email))
@@ -3931,6 +3940,10 @@ function renderD11MyMatchesPage() {
     if ((d11m.megaParticipants||[]).includes(currentUser.email)) {
       const prize = d11m.megaPrizes?.[currentUser.email] || 0;
       rows.push({ icon:'🎯', color:'251,191,36', label:'Mega Contest', points:myPoints, prize, onClick:`openD11ContestParticipants('${matchId}','mega')` });
+    }
+    if ((d11m.miniMegaParticipants||[]).includes(currentUser.email)) {
+      const prize = d11m.miniMegaPrizes?.[currentUser.email] || 0;
+      rows.push({ icon:'🔸', color:'96,165,250', label:'Mini Mega Contest', points:myPoints, prize, onClick:`openD11ContestParticipants('${matchId}','minimega')` });
     }
     const myH2H = Object.values(d11h2hContests).find(c => c.matchId === matchId && (c.player1?.email===currentUser.email || c.player2?.email===currentUser.email));
     if (myH2H) {
@@ -4499,7 +4512,7 @@ function renderGlobalLeaderboard() {
     const dp = users[p.email]?.dpBase64;
     const av = dp ? '<img src="'+dp+'" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid '+(i===0?'#fbbf24':'rgba(255,255,255,0.12)')+';flex-shrink:0" />' : '<div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--orange));display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;flex-shrink:0;font-family:Rajdhani,sans-serif">'+(p.name||'?').charAt(0).toUpperCase()+'</div>';
     return `
-  <div class="lb-row" style="${p.email===currentUser.email?'border-color:var(--blue);background:rgba(37,99,235,0.08)':''}">
+  <div class="lb-row" style="${p.email===currentUser.email?'border-color:var(--blue);background:rgba(37,99,235,0.08)':'cursor:pointer'}" ${p.email!==currentUser.email?`onclick="viewedProfileEmail='${p.email}';_viewProfileReturnTab='leaderboard';tab='viewProfile';render();window.scrollTo(0,0)"`:''}>
     <div class="lb-rank ${i===0?'r1':i===1?'r2':i===2?'r3':''}">${i+1}</div>
     ${av}
     <div style="flex:1;min-width:0;margin-left:8px">
@@ -4680,6 +4693,7 @@ function searchUserProfile() {
   if (!match) return showNotif('No player found with that name or ID number', 'error');
 
   viewedProfileEmail = match[0];
+  _viewProfileReturnTab = 'profile';
   tab = 'viewProfile';
   render();
 }
@@ -4696,7 +4710,7 @@ function renderViewProfile() {
   const isSelf = email === currentUser.email;
 
   return `
-  <button class="btn-secondary mb14" style="width:auto;padding:9px 16px" onclick="goTab('profile')">← Back</button>
+  <button class="btn-secondary mb14" style="width:auto;padding:9px 16px" onclick="goTab(_viewProfileReturnTab)">← Back</button>
 
   <div class="card mb18" style="text-align:center">
     <div style="width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--orange));display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:700;margin:0 auto 12px;font-family:Rajdhani,sans-serif">${(u.name||'U').charAt(0).toUpperCase()}</div>
@@ -4945,6 +4959,9 @@ function renderHistory() {
     d11_mega_entry: { label: 'Dream11 Mega Entry', icon: '🏏', positive: false, sub: () => 'Dream11' },
     d11_mega_prize: { label: 'Dream11 Mega Prize', icon: '🏆', positive: true,  sub: () => 'Prize won' },
     d11_mega_refund:{ label: 'Dream11 Mega Refund', icon: '↩️', positive: true, sub: t => t.note || 'Refund' },
+    d11_mini_mega_entry: { label: 'Dream11 Mini Mega Entry', icon: '🎯', positive: false, sub: () => 'Dream11' },
+    d11_mini_mega_prize: { label: 'Dream11 Mini Mega Prize', icon: '🏆', positive: true,  sub: () => 'Prize won' },
+    d11_mini_mega_refund:{ label: 'Dream11 Mini Mega Refund', icon: '↩️', positive: true, sub: t => t.note || 'Refund' },
     ut_mega_entry:  { label: 'UT Mega Entry',  icon: '⚽', positive: false, sub: () => 'UT Contest' },
     ut_mega_prize:  { label: 'UT Mega Prize',  icon: '🏆', positive: true,  sub: () => 'Prize won' },
     ut_mega_refund: { label: 'UT Mega Refund', icon: '↩️', positive: true,  sub: t => t.note || 'Refund' },
@@ -8468,6 +8485,7 @@ async function d11FinalizeScoring() {
 
   // Auto-settle all Dream11 contests now that team totals are final
   await distributeD11MegaPrizes(d11ActiveMatchId);
+  await distributeD11MiniMegaPrizes(d11ActiveMatchId);
   await finalizeD11H2HContests(d11ActiveMatchId);
   await finalizeD11CustomContests(d11ActiveMatchId);
   await d11CheckTournamentsForMatch(d11ActiveMatchId);
@@ -8496,6 +8514,7 @@ async function d11RunAllPayouts(matchId) {
   showNotif('⏳ Payouts process ho rahe hain...', 'info');
 
   await distributeD11MegaPrizes(matchId);
+  await distributeD11MiniMegaPrizes(matchId);
   await finalizeD11H2HContests(matchId);
   await finalizeD11CustomContests(matchId);
   await d11CheckTournamentsForMatch(matchId);
@@ -8551,8 +8570,30 @@ async function d11ReScoreAndFinalize(matchId) {
     await _saveDream11MatchToFirestore(matchId, d11m);
   }
 
+  // Step 3b: Reverse old Mini Mega prizes (if already distributed)
+  if (d11m.miniMegaDistributed && d11m.miniMegaPrizes) {
+    for (const [email, oldPrize] of Object.entries(d11m.miniMegaPrizes)) {
+      const u = users[email];
+      if (u && oldPrize > 0) {
+        u.balance = Math.max(0, (u.balance || 0) - oldPrize);
+        u.transactions = u.transactions || [];
+        u.transactions.unshift({
+          id: uid(), type: 'admin_deduct', amount: oldPrize,
+          matchId, note: `Re-score: reverse old Mini Mega prize`,
+          date: getDateTime(), status: 'confirmed'
+        });
+        await _saveUserToFirestore(email, u);
+      }
+    }
+    d11m.miniMegaDistributed = false;
+    d11m.miniMegaPrizes = {};
+    d11m.miniMegaCancelled = false;
+    await _saveDream11MatchToFirestore(matchId, d11m);
+  }
+
   // Step 4: Re-distribute Mega prizes with new points
   await distributeD11MegaPrizes(matchId);
+  await distributeD11MiniMegaPrizes(matchId);
 
   // Step 5: Re-check tournaments
   await d11CheckTournamentsForMatch(matchId);
@@ -8900,6 +8941,7 @@ function d11UserHasJoinedAnyContest(matchId, email) {
   const d11m = dream11Matches[matchId];
   if (!d11m) return false;
   if ((d11m.megaParticipants||[]).includes(email)) return true;
+  if ((d11m.miniMegaParticipants||[]).includes(email)) return true;
   if ((d11m.freeParticipants||[]).includes(email)) return true;
   const inH2H = Object.values(d11h2hContests).some(c => c.matchId === matchId && (c.player1?.email===email || c.player2?.email===email));
   if (inH2H) return true;
@@ -9065,6 +9107,138 @@ async function distributeD11MegaPrizes(matchId) {
 
   d11m.megaPrizes = prizes;
   d11m.megaDistributed = true;
+  await _saveDream11MatchToFirestore(matchId, d11m);
+  try {
+    localStorage.setItem('pp_users_cache', JSON.stringify(users));
+    localStorage.setItem('pp_dream11_matches_cache', JSON.stringify(dream11Matches));
+  } catch(e){}
+}
+
+// ─── Dream11 Mini Mega Contest: same rules as Mega, cheaper Rs 10 entry ───
+async function joinD11MiniMegaContest(matchId) {
+  const d11m = dream11Matches[matchId];
+  if (!d11m) return showNotif('Match not found — please refresh', 'error');
+  if (isD11Locked(matchId)) return showNotif('This Dream11 contest is locked', 'error');
+
+  const u = users[currentUser.email];
+  if (!u) return;
+
+  if (!d11HasUserSubmittedTeam(matchId, currentUser.email)) {
+    return showNotif('Please submit your Dream11 team first!', 'error');
+  }
+  // Fast local check (UX only — not relied on for correctness)
+  if ((d11m.miniMegaParticipants||[]).includes(currentUser.email)) {
+    return showNotif('You have already joined the Dream11 Mini Mega Contest!', 'error');
+  }
+  if ((u.balance || 0) < D11_MINI_MEGA_ENTRY_FEE) {
+    return showNotif(`Minimum Rs ${D11_MINI_MEGA_ENTRY_FEE} balance is required to join the Dream11 Mini Mega Contest. Please deposit first.`, 'error');
+  }
+
+  // Guard against double-tap / spam-click firing this twice before re-render
+  const guardKey = `minimega_d11_${matchId}`;
+  if (_joinInFlight.has(guardKey)) return;
+  _joinInFlight.add(guardKey);
+
+  try {
+    const result = await _atomicJoinPaidContest({
+      matchId,
+      entryFeeAmount: D11_MINI_MEGA_ENTRY_FEE,
+      matchCollection: 'pp_dream11_matches',
+      participantsField: 'miniMegaParticipants',
+      poolField: 'miniMegaPool',
+      txType: 'd11_mini_mega_entry',
+      alreadyJoinedMsg: 'You have already joined the Dream11 Mini Mega Contest!'
+    });
+    if (!result) return;
+
+    u.balance = result.balance;
+    u.transactions = result.transactions;
+    currentUser.balance = result.balance;
+    currentUser.transactions = result.transactions;
+    dream11Matches[matchId] = { ...d11m, ...result.matchData };
+
+    try {
+      localStorage.setItem('pp_dream11_matches_cache', JSON.stringify(dream11Matches));
+      localStorage.setItem('pp_users_cache', JSON.stringify(users));
+    } catch(e){}
+
+    showNotif(`Dream11 Mini Mega Contest joined! Rs ${D11_MINI_MEGA_ENTRY_FEE} deducted 🏆`);
+    render();
+  } finally {
+    _joinInFlight.delete(guardKey);
+  }
+}
+
+// Mini Mega uses the exact same bracket shape/weights as Mega (per user request
+// "same rules as Mega Contest") — reuse getD11MegaBracket() directly, just at
+// a Rs 10 entry fee instead of Rs 30.
+async function distributeD11MiniMegaPrizes(matchId) {
+  const d11m = dream11Matches[matchId];
+  if (!d11m) return;
+  const parts = d11m.miniMegaParticipants || [];
+  if (parts.length === 0) return;
+  if (d11m.miniMegaDistributed) return;
+
+  // Rule: only 1 user joined → contest cancelled, full entry fee refunded
+  if (parts.length === 1) {
+    await _adminWalletRefund(parts[0], D11_MINI_MEGA_ENTRY_FEE, matchId, 'D11 Mini Mega Contest cancelled — only 1 joiner, full refund', 'd11_mini_mega_refund');
+    d11m.miniMegaPrizes = {};
+    d11m.miniMegaDistributed = true;
+    d11m.miniMegaCancelled = true;
+    await _saveDream11MatchToFirestore(matchId, d11m);
+    try {
+      localStorage.setItem('pp_users_cache', JSON.stringify(users));
+      localStorage.setItem('pp_dream11_matches_cache', JSON.stringify(dream11Matches));
+    } catch(e){}
+    return;
+  }
+
+  const bracket = getD11MegaBracket(parts.length);
+  if (!bracket) {
+    console.warn('D11 Mini Mega: joiner count outside defined brackets', parts.length);
+  }
+  const fullWeights = bracket ? bracket.weights : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].weights;
+
+  const bracketMax = bracket ? bracket.max : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].max;
+  const winnerRatio = fullWeights.length / bracketMax;
+  const winnerCount = Math.max(1, Math.min(parts.length, Math.round(parts.length * winnerRatio)));
+  const weightTable = winnerCount >= fullWeights.length
+    ? fullWeights.slice()
+    : Array.from({length: winnerCount}, (_,k) => fullWeights[Math.floor(k * (fullWeights.length / winnerCount))]);
+
+  const pool = d11m.miniMegaPool || (parts.length * D11_MINI_MEGA_ENTRY_FEE);
+  const distributable = Math.round(pool * (1 - D11_MINI_MEGA_COMPANY_SHARE));
+  const weightSum = weightTable.reduce((a,b) => a+b, 0);
+
+  const ranked = parts
+    .map(email => ({ email, team: d11GetUserTeam(matchId, email) }))
+    .filter(x => x.team)
+    .map(x => ({ email: x.email, points: x.team.totalPoints || 0 }))
+    .sort((a,b) => b.points - a.points);
+
+  const prizes = {};
+  let i = 0;
+  while (i < ranked.length && i < weightTable.length) {
+    let j = i;
+    while (j + 1 < ranked.length && ranked[j+1].points === ranked[i].points) j++;
+    const tieGroup = ranked.slice(i, j+1);
+    const tieEndIdx = Math.min(j, weightTable.length - 1);
+    const combinedWeight = weightTable.slice(i, tieEndIdx + 1).reduce((a,b) => a + b, 0);
+    const combinedPrize = Math.round(distributable * (combinedWeight / weightSum));
+    const share = Math.round(combinedPrize / tieGroup.length);
+    tieGroup.forEach(p => { if (share > 0) prizes[p.email] = share; });
+    i = j + 1;
+  }
+
+  const savePromises = [];
+  for (const [email, amount] of Object.entries(prizes)) {
+    if (amount <= 0) continue;
+    savePromises.push(_adminWalletPrize(email, amount, 'd11_mini_mega_prize', matchId, 'D11 Mini Mega'));
+  }
+  await Promise.all(savePromises);
+
+  d11m.miniMegaPrizes = prizes;
+  d11m.miniMegaDistributed = true;
   await _saveDream11MatchToFirestore(matchId, d11m);
   try {
     localStorage.setItem('pp_users_cache', JSON.stringify(users));
@@ -9882,8 +10056,10 @@ function shareD11MatchWhatsApp(matchId) {
   const format = m.format||'Cricket';
   const deadline = m.deadline ? pkDateTime(m.deadline) : '—';
   const megaCount = (d11m.megaParticipants||[]).length;
+  const miniMegaCount = (d11m.miniMegaParticipants||[]).length;
   const freeCount = (d11m.freeParticipants||[]).length;
   const megaFee = typeof D11_MEGA_ENTRY_FEE!=='undefined'?D11_MEGA_ENTRY_FEE:30;
+  const miniMegaFee = typeof D11_MINI_MEGA_ENTRY_FEE!=='undefined'?D11_MINI_MEGA_ENTRY_FEE:10;
   const h2hFee = typeof D11_H2H_ENTRY_FEE!=='undefined'?D11_H2H_ENTRY_FEE:20;
   const h2hWin = Math.round(h2hFee*2*0.9);
   const siteLink = typeof APP_URL!=='undefined'?APP_URL:'https://akmaldream11pak078-star.github.io/akmal-dream11-pak/';
@@ -9897,13 +10073,18 @@ function shareD11MatchWhatsApp(matchId) {
 ⏰ Deadline: *${deadline} PKT*
 
 ━━━━━━━━━━━━━━━━━━━━━━
-🏆 *TEEN TARAH KE CONTESTS!*
+🏆 *CHAAR TARAH KE CONTESTS!*
 ━━━━━━━━━━━━━━━━━━━━━━
 
 🎯 *MEGA CONTEST* — Rs ${megaFee} Entry
    💰 Jitne log join karein, utna bada Prize Pool!
    🥇 Top 3 players mein prize distribute hoga
    📊 ${megaCount} log abhi tak join kar chuke hain!
+
+🔸 *MINI MEGA CONTEST* — Rs ${miniMegaFee} Entry
+   💰 Mega jese hi rules, chhota entry fee!
+   🥇 Top players mein prize distribute hoga
+   📊 ${miniMegaCount} log abhi tak join kar chuke hain!
 
 🎁 *FREE CONTEST* — Bilkul FREE!
    ✅ Koi entry fee nahi — sirf apni team banao
@@ -9949,6 +10130,7 @@ function renderD11JoinContest() {
   const myTeam = d11GetUserTeam(matchId, currentUser.email);
   const locked = d11m.locked;
   const inMega = (d11m.megaParticipants||[]).includes(currentUser.email);
+  const inMiniMega = (d11m.miniMegaParticipants||[]).includes(currentUser.email);
   const inFree = (d11m.freeParticipants||[]).includes(currentUser.email);
   const myH2HContest = Object.values(d11h2hContests).find(c =>
     c.matchId === matchId && (c.player1?.email === currentUser.email || c.player2?.email === currentUser.email)
@@ -9990,6 +10172,13 @@ function renderD11JoinContest() {
         onClick:`openD11ContestParticipants('${matchId}','mega')`
       }));
     }
+    if (inMiniMega) {
+      const prize = d11m.miniMegaPrizes?.[currentUser.email] || 0;
+      rows.push(myContestRow({
+        icon:'🔸', color:'96,165,250', label:'Mini Mega Contest', prize,
+        onClick:`openD11ContestParticipants('${matchId}','minimega')`
+      }));
+    }
     if (inH2H) {
       const prize = (myH2HContest.status==='completed' && myH2HContest.winnerId===currentUser.email) ? (myH2HContest.winnerPrize||0) : 0;
       const extra = myH2HContest.status==='completed'
@@ -10019,6 +10208,7 @@ function renderD11JoinContest() {
 
     if (rows.length === 0) return '';
     const totalWon = (d11m.megaPrizes?.[currentUser.email]||0)
+      + (d11m.miniMegaPrizes?.[currentUser.email]||0)
       + ((myH2HContest?.status==='completed' && myH2HContest.winnerId===currentUser.email) ? (myH2HContest.winnerPrize||0) : 0)
       + (d11m.freeRewards?.[currentUser.email]||0)
       + myCustomContests.reduce((sum,cc) => sum + (cc.prizes?.[currentUser.email]||0), 0);
@@ -10047,6 +10237,22 @@ function renderD11JoinContest() {
         : locked
           ? `<span style="font-size:11px;color:var(--dim)">🔒 Closed</span>`
           : `<button class="btn-primary" style="width:auto;padding:9px 16px;font-size:12px" onclick="joinD11MegaContest('${matchId}')">Join Rs ${D11_MEGA_ENTRY_FEE}</button>`
+      }
+    </div>
+  </div>
+
+  <div class="card mb12" style="background:linear-gradient(135deg,rgba(96,165,250,0.1),rgba(37,99,235,0.05));border-color:rgba(96,165,250,0.25)">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <div style="font-weight:700;font-size:14px">🔸 Dream11 Mini Mega Contest</div>
+        <div style="font-size:11px;color:var(--dim);margin-top:2px">Entry Rs ${D11_MINI_MEGA_ENTRY_FEE} • ${(d11m.miniMegaParticipants||[]).length} joined • Pool Rs ${d11m.miniMegaPool||0}</div>
+        <div style="font-size:10.5px;color:var(--dim);margin-top:1px">Mega jese hi rules, sasta entry — 90% winners ko, 10% app fee</div>
+      </div>
+      ${inMiniMega
+        ? `<span style="font-size:11px;font-weight:700;color:#4ade80">✅ Joined</span>`
+        : locked
+          ? `<span style="font-size:11px;color:var(--dim)">🔒 Closed</span>`
+          : `<button class="btn-primary" style="width:auto;padding:9px 16px;font-size:12px;background:linear-gradient(135deg,#60a5fa,#2563eb)" onclick="joinD11MiniMegaContest('${matchId}')">Join Rs ${D11_MINI_MEGA_ENTRY_FEE}</button>`
       }
     </div>
   </div>
@@ -10167,6 +10373,37 @@ function renderD11ContestParticipants() {
         </div>
       </div>`;
     return `${backBtn}${matchHeader}${prizeBox}${renderUserList(megaParts, '🎯 Mega Contest Participants', 'var(--gold)')}`;
+  }
+
+  if (contestType === 'minimega') {
+    const miniParts = d11m.miniMegaParticipants||[];
+    const pool = d11m.miniMegaPool || (miniParts.length * D11_MINI_MEGA_ENTRY_FEE);
+    const dist = Math.round(pool * (1 - D11_MINI_MEGA_COMPANY_SHARE));
+    const comp = pool - dist;
+    function miniMegaPrizePreview() {
+      if (miniParts.length <= 1) return [];
+      const bracket = getD11MegaBracket(miniParts.length);
+      const fullW = bracket ? bracket.weights : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].weights;
+      const bMax = bracket ? bracket.max : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].max;
+      const wCount = Math.max(1, Math.min(miniParts.length, Math.round(miniParts.length * fullW.length / bMax)));
+      const wTable = wCount >= fullW.length ? fullW.slice() : Array.from({length:wCount},(_,k)=>fullW[Math.floor(k*(fullW.length/wCount))]);
+      const wSum = wTable.reduce((a,b)=>a+b,0);
+      return wTable.map((w,i)=>({rank:i+1, prize: Math.round(dist*(w/wSum))}));
+    }
+    const prizeRows = miniMegaPrizePreview();
+    const prizeBox = miniParts.length === 0 ? '' : miniParts.length === 1 ?
+      `<div class="card mb14" style="background:rgba(96,165,250,0.07);border-color:rgba(96,165,250,0.25)">
+        <div style="font-size:12px;font-weight:700;color:#60a5fa;margin-bottom:4px">💰 Prize Info</div>
+        <div style="font-size:11.5px;color:var(--dim)">Sirf 1 user join hai — agar aur koi join na kare toh Rs ${D11_MINI_MEGA_ENTRY_FEE} refund ho ga.</div>
+      </div>` :
+      `<div class="card mb14" style="background:rgba(96,165,250,0.07);border-color:rgba(96,165,250,0.25)">
+        <div style="font-size:12px;font-weight:700;color:#60a5fa;margin-bottom:6px">💰 Winning Distribution — ${miniParts.length} users joined</div>
+        <div style="font-size:11px;color:var(--dim);margin-bottom:8px">Total Pool: <b style="color:var(--text)">Rs ${pool}</b> &nbsp;·&nbsp; Aapko milegi: <b style="color:#4ade80">Rs ${dist}</b> &nbsp;·&nbsp; App fee: <b style="color:#f87171">Rs ${comp}</b></div>
+        <div style="display:flex;flex-wrap:wrap;gap:5px">
+          ${prizeRows.map((p,i)=>`<span style="font-size:11px;padding:4px 10px;border-radius:14px;background:rgba(96,165,250,0.12);color:#60a5fa">${i===0?'🥇':i===1?'🥈':i===2?'🥉':'🏅'} Rank ${p.rank}: Rs ${p.prize}</span>`).join('')}
+        </div>
+      </div>`;
+    return `${backBtn}${matchHeader}${prizeBox}${renderUserList(miniParts, '🔸 Mini Mega Contest Participants', '#60a5fa')}`;
   }
 
   if (contestType === 'free') {
@@ -10819,6 +11056,7 @@ function renderDream11Hub() {
       ${m.sport !== 'football' ? `<div style="margin-bottom:6px"><span class="match-sport-tag tag-cricket">${m.format==='ODI'?'🔵':m.format==='Test'?'🏛️':'⚡'} ${m.format||'T20'}</span></div>` : ''}
       <div style="font-size:11.5px;color:var(--dim);margin-bottom:4px">👥 ${d11m.players.length} players pool ready ${xiCount > 0 ? `· 🏏 ${xiCount} confirmed Playing XI` : ''}</div>
       <div style="font-size:11.5px;color:#4ade80;margin-bottom:2px">🎯 ${megaJoinedCount} ${megaJoinedCount === 1 ? 'user' : 'users'} joined Mega Contest</div>
+      <div style="font-size:11.5px;color:#4ade80;margin-bottom:2px">🔸 ${(d11m.miniMegaParticipants||[]).length} ${(d11m.miniMegaParticipants||[]).length === 1 ? 'user' : 'users'} joined Mini Mega Contest</div>
       <div style="font-size:11.5px;color:#4ade80;margin-bottom:4px">🎁 ${freeJoinedCount} ${freeJoinedCount === 1 ? 'user' : 'users'} joined Free Contest</div>
       ${deadlineStr ? `<div class="match-deadline" style="text-align:left;margin:0 0 4px">${dLocked ? '🔒 Deadline passed' : `⏰ Deadline: ${deadlineStr}`}</div>${!dLocked && m.deadline ? `<div class="d11-countdown" data-deadline="${m.deadline}" style="font-size:11px;font-weight:700;color:var(--orange);margin-bottom:10px">${d11FormatCountdown(m.deadline - Date.now())}</div>` : ''}` : ''}
       ${isLiveScoring && myTeam ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(220,38,38,0.08);border:1px solid rgba(220,38,38,0.25);border-radius:10px;padding:8px 10px">
@@ -10827,12 +11065,14 @@ function renderDream11Hub() {
       </div>` : ''}
       ${(() => {
         const uMega = (d11m.megaParticipants||[]).includes(currentUser.email);
+        const uMiniMega = (d11m.miniMegaParticipants||[]).includes(currentUser.email);
         const uFree = (d11m.freeParticipants||[]).includes(currentUser.email);
         const uH2H = hasUserJoinedD11H2H(m.id, currentUser.email);
         const uCustom = Object.values(d11CustomContests).filter(c => c.matchId === m.id && c.participants.includes(currentUser.email));
         const badges = [];
         const badgeBtn = (style, label, contestType, contestRef) => `<button style="${style};cursor:pointer" onclick="openD11ContestParticipants('${m.id}','${contestType}','${contestRef||''}')">${label}</button>`;
         if (uMega) badges.push(badgeBtn('background:rgba(251,191,36,0.18);color:#fbbf24;border:1px solid rgba(251,191,36,0.35);padding:3px 8px;border-radius:7px;font-size:10px;font-weight:700', '🎯 Mega', 'mega'));
+        if (uMiniMega) badges.push(badgeBtn('background:rgba(96,165,250,0.18);color:#60a5fa;border:1px solid rgba(96,165,250,0.35);padding:3px 8px;border-radius:7px;font-size:10px;font-weight:700', '🔸 Mini Mega', 'minimega'));
         if (uH2H) badges.push(badgeBtn('background:rgba(249,115,22,0.18);color:#fb923c;border:1px solid rgba(249,115,22,0.35);padding:3px 8px;border-radius:7px;font-size:10px;font-weight:700', '🥊 H2H', 'h2h'));
         if (uFree) badges.push(badgeBtn('background:rgba(34,197,94,0.18);color:#4ade80;border:1px solid rgba(34,197,94,0.35);padding:3px 8px;border-radius:7px;font-size:10px;font-weight:700', '🎁 Free', 'free'));
         uCustom.forEach(cc => badges.push(badgeBtn('background:rgba(168,85,247,0.18);color:#c084fc;border:1px solid rgba(168,85,247,0.35);padding:3px 8px;border-radius:7px;font-size:10px;font-weight:700', `🛠️ ${cc.code}`, 'custom', cc.id)));
@@ -12565,6 +12805,7 @@ function renderAdminD11ParticipantsPanel(matchId) {
   const d11m = dream11Matches[matchId];
   if (!m || !d11m) return '';
   const megaList = d11m.megaParticipants||[];
+  const miniMegaList = d11m.miniMegaParticipants||[];
   const freeList = d11m.freeParticipants||[];
   const h2hList = Object.values(d11h2hContests||{}).filter(c=>c.matchId===matchId);
   const customList = Object.values(d11CustomContests||{}).filter(c=>c.matchId===matchId);
@@ -12588,10 +12829,27 @@ function renderAdminD11ParticipantsPanel(matchId) {
   const pool = d11m.megaPool || (megaList.length * D11_MEGA_ENTRY_FEE);
   const dist = Math.round(pool*(1-D11_MEGA_COMPANY_SHARE));
 
-  function userRow(email, i, color, showPrize) {
+  function getMiniMegaPrizeRows() {
+    if (miniMegaList.length===0) return [];
+    if (miniMegaList.length===1) return [{rank:1, prize: D11_MINI_MEGA_ENTRY_FEE + ' (refund)'}];
+    const bracket = getD11MegaBracket(miniMegaList.length);
+    const fullW = bracket ? bracket.weights : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].weights;
+    const bMax = bracket ? bracket.max : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].max;
+    const wCount = Math.max(1, Math.min(miniMegaList.length, Math.round(miniMegaList.length * fullW.length / bMax)));
+    const wTable = wCount >= fullW.length ? fullW.slice() : Array.from({length:wCount},(_,k)=>fullW[Math.floor(k*(fullW.length/wCount))]);
+    const mmPool = d11m.miniMegaPool || (miniMegaList.length * D11_MINI_MEGA_ENTRY_FEE);
+    const mmDist = Math.round(mmPool * (1 - D11_MINI_MEGA_COMPANY_SHARE));
+    const wSum = wTable.reduce((a,b)=>a+b,0);
+    return wTable.map((w,i)=>({rank:i+1, prize: Math.round(mmDist*(w/wSum))}));
+  }
+  const miniMegaPrizeRows = getMiniMegaPrizeRows();
+  const miniMegaPool = d11m.miniMegaPool || (miniMegaList.length * D11_MINI_MEGA_ENTRY_FEE);
+  const miniMegaDist = Math.round(miniMegaPool*(1-D11_MINI_MEGA_COMPANY_SHARE));
+
+  function userRow(email, i, color, showPrize, prizeField) {
     const u = users[email];
     const team = Object.values(dream11Teams).find(t=>t.matchId===matchId&&t.userEmail===email);
-    const prize = showPrize && d11m.megaPrizes?.[email];
+    const prize = showPrize && (d11m[prizeField||'megaPrizes']?.[email]);
     return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
       <div style="width:24px;height:24px;border-radius:50%;background:rgba(${color},0.2);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:rgb(${color});flex-shrink:0">${i+1}</div>
       <div style="flex:1;min-width:0">
@@ -12610,6 +12868,7 @@ function renderAdminD11ParticipantsPanel(matchId) {
     </div>
     <div class="admin-tab-row" style="margin-bottom:10px">
       <button class="admin-tab ${tab==='mega'?'active':''}" onclick="d11AdminParticipantsTab='mega';render()">🎯 Mega (${megaList.length})</button>
+      <button class="admin-tab ${tab==='minimega'?'active':''}" onclick="d11AdminParticipantsTab='minimega';render()">🔸 Mini Mega (${miniMegaList.length})</button>
       <button class="admin-tab ${tab==='free'?'active':''}" onclick="d11AdminParticipantsTab='free';render()">🎁 Free (${freeList.length})</button>
       <button class="admin-tab ${tab==='h2h'?'active':''}" onclick="d11AdminParticipantsTab='h2h';render()">⚔️ H2H (${h2hList.length})</button>
       ${customList.length>0?`<button class="admin-tab ${tab==='custom'?'active':''}" onclick="d11AdminParticipantsTab='custom';render()">🏆 Custom (${customList.length})</button>`:''}
@@ -12620,7 +12879,14 @@ function renderAdminD11ParticipantsPanel(matchId) {
         <div style="color:var(--dim)">Total: <b style="color:var(--text)">Rs ${pool}</b> &nbsp;·&nbsp; Distribute (90%): <b style="color:#4ade80">Rs ${dist}</b> &nbsp;·&nbsp; Company (10%): <b style="color:#f87171">Rs ${pool-dist}</b></div>
         ${prizeRows.length>0?`<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px">${prizeRows.map(p=>`<span style="font-size:10.5px;background:rgba(251,191,36,0.12);color:#fbbf24;padding:3px 8px;border-radius:12px">Rank ${p.rank}: Rs ${p.prize}</span>`).join('')}</div>`:''}
       </div>
-      ${megaList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Kisi ne join nahi kiya</div>`:megaList.map((e,i)=>userRow(e,i,'251,191,36',true)).join('')}
+      ${megaList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Kisi ne join nahi kiya</div>`:megaList.map((e,i)=>userRow(e,i,'251,191,36',true,'megaPrizes')).join('')}
+    `:tab==='minimega'?`
+      <div style="background:rgba(96,165,250,0.08);border:1px solid rgba(96,165,250,0.2);border-radius:10px;padding:10px;margin-bottom:10px;font-size:11.5px">
+        <div style="color:#60a5fa;font-weight:700;margin-bottom:4px">💰 Prize Pool — ${miniMegaList.length} joiners</div>
+        <div style="color:var(--dim)">Total: <b style="color:var(--text)">Rs ${miniMegaPool}</b> &nbsp;·&nbsp; Distribute (90%): <b style="color:#4ade80">Rs ${miniMegaDist}</b> &nbsp;·&nbsp; Company (10%): <b style="color:#f87171">Rs ${miniMegaPool-miniMegaDist}</b></div>
+        ${miniMegaPrizeRows.length>0?`<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px">${miniMegaPrizeRows.map(p=>`<span style="font-size:10.5px;background:rgba(96,165,250,0.12);color:#60a5fa;padding:3px 8px;border-radius:12px">Rank ${p.rank}: Rs ${p.prize}</span>`).join('')}</div>`:''}
+      </div>
+      ${miniMegaList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Kisi ne join nahi kiya</div>`:miniMegaList.map((e,i)=>userRow(e,i,'96,165,250',true,'miniMegaPrizes')).join('')}
     `:tab==='free'?`
       <div style="background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.2);border-radius:10px;padding:8px 10px;margin-bottom:10px;font-size:11px;color:#4ade80">🎁 Free Contest — Admin manually rewards winners</div>
       ${freeList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Kisi ne join nahi kiya</div>`:freeList.map((e,i)=>userRow(e,i,'74,222,128',false)).join('')}
@@ -17103,7 +17369,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "1.1.2";
+const APP_VERSION = "1.2.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
