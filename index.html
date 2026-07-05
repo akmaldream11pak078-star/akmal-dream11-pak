@@ -3698,6 +3698,8 @@ function render() {
     </div>
     ${renderBottomNav()}
     ${masterTeamsPhotoSearchTarget ? renderMasterTeamsPhotoSearchModal() : ''}
+    ${renderDpActionMenu()}
+    ${renderDpUrlPastePanel()}
   `;
 }
 
@@ -3811,68 +3813,185 @@ function renderHome() {
     </div>
   </div>
 
-  ${(() => {
-    // Show published Dream11 matches on home screen as individual cards
-    const publishedD11 = Object.values(matches).filter(m => {
-      const d11m = dream11Matches[m.id];
-      return d11m && d11m.published && d11m.players.length >= D11_TEAM_SIZE && !d11m.scored;
-    });
-    if (publishedD11.length === 0) return `<div class="section-title" style="margin-bottom:10px">🎮 Dream11 Contests</div><div class="empty-state"><div class="empty-icon">🎮</div>No active Dream11 contests right now.<br/>Check back soon, or visit the Dream11 tab!</div>`;
-    return `<div class="section-title" style="margin-bottom:10px">🎮 Dream11 Contests</div>
-    ${publishedD11.map(m => {
-      const d11m = dream11Matches[m.id];
-      const myTeam = Object.values(dream11Teams).find(t => t.matchId === m.id && t.userEmail === currentUser.email);
-      const dLocked = isD11Locked(m.id);
-      const deadlineStr = m.deadline ? pkDateTime(m.deadline) : '';
-      const fmtBadge = m.format ? `<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:8px;background:rgba(251,191,36,0.12);border:1px solid rgba(251,191,36,0.3);color:#fbbf24;margin-right:6px">🏏 ${m.format}</span>` : '';
-      const megaJoinedCount = (d11m.megaParticipants||[]).length;
-      const freeJoinedCount = (d11m.freeParticipants||[]).length;
-      return `<div class="card mb14" style="border-color:rgba(192,132,252,0.4);background:linear-gradient(135deg,rgba(192,132,252,0.08),rgba(37,99,235,0.05))">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-          <div class="match-teams" style="gap:8px">
-            <span class="team-name" style="font-size:14px">${m.teamA||'TBD'}</span>
-            <span class="vs-badge" style="font-size:10px;padding:2px 8px">VS</span>
-            <span class="team-name" style="font-size:14px">${m.teamB||'TBD'}</span>
-          </div>
-          <div style="display:flex;align-items:center;gap:6px">
-            ${dLocked ? `<span class="match-status status-live">LOCKED</span>` : `<span class="match-status status-upcoming">OPEN</span>`}
-            <button onclick="shareD11MatchWhatsApp('${m.id}')" title="WhatsApp share" style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#25D366,#1ea952);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;box-shadow:0 2px 8px rgba(37,211,102,0.4)">📲</button>
-          </div>
-        </div>
-        ${fmtBadge ? `<div style="margin-bottom:6px">${fmtBadge}</div>` : ''}
-        <div style="font-size:11.5px;color:#4ade80;margin-bottom:2px">🎯 ${megaJoinedCount} ${megaJoinedCount === 1 ? 'user' : 'users'} joined Mega Contest</div>
-        <div style="font-size:11.5px;color:#4ade80;margin-bottom:6px">🎁 ${freeJoinedCount} ${freeJoinedCount === 1 ? 'user' : 'users'} joined Free Contest</div>
-        ${deadlineStr && !dLocked ? `<div style="font-size:11px;color:var(--orange);margin-bottom:10px">⏰ Deadline: ${deadlineStr}</div>` : ''}
-        ${myTeam
-          ? `<button class="btn-secondary btn-block" style="font-size:12px;padding:9px" onclick="openDream11ViewTeam('${myTeam.id}')">👁 My Team ${myTeam.totalPoints?'· '+myTeam.totalPoints+' pts':''}</button>`
-          : !dLocked
-            ? `<button class="btn-primary btn-block" style="font-size:12px;padding:9px;background:linear-gradient(135deg,#a855f7,#7c3aed)" onclick="openDream11Match('${m.id}')">🎮 Build My Dream11 Team</button>`
-            : `<div style="text-align:center;font-size:12px;color:var(--dim);padding:8px">🔒 Contest locked — joining closed</div>`
-        }
-        ${(() => {
-          const badges = [];
-          if ((d11m.freeParticipants||[]).includes(currentUser.email)) {
-            badges.push(`<button style="flex:1;background:rgba(34,197,94,0.14);color:#4ade80;border:1px solid rgba(34,197,94,0.3);padding:7px 8px;border-radius:9px;font-size:11px;font-weight:700;cursor:pointer" onclick="openD11ContestParticipants('${m.id}','free')">🎁 Free Contest</button>`);
-          }
-          if ((d11m.megaParticipants||[]).includes(currentUser.email)) {
-            badges.push(`<button style="flex:1;background:rgba(251,191,36,0.14);color:#fbbf24;border:1px solid rgba(251,191,36,0.3);padding:7px 8px;border-radius:9px;font-size:11px;font-weight:700;cursor:pointer" onclick="openD11ContestParticipants('${m.id}','mega')">🎯 Mega Contest</button>`);
-          }
-          Object.values(d11CustomContests)
-            .filter(cc => cc.matchId === m.id && (cc.participants||[]).includes(currentUser.email))
-            .forEach(cc => badges.push(`<button style="flex:1;background:rgba(168,85,247,0.14);color:#c084fc;border:1px solid rgba(168,85,247,0.3);padding:7px 8px;border-radius:9px;font-size:11px;font-weight:700;cursor:pointer" onclick="openD11ContestParticipants('${m.id}','custom','${cc.id}')">🛠️ ${cc.code}</button>`));
-          if (badges.length === 0) return '';
-          return `<div style="margin-top:8px">
-            <div style="font-size:10.5px;color:var(--dim);font-weight:700;margin-bottom:6px">🎟️ MY CONTESTS JOINED</div>
-            <div style="display:flex;flex-wrap:wrap;gap:6px">${badges.join('')}</div>
-          </div>`;
-        })()}
-      </div>`;
-    }).join('')}`;
-  })()}
+  ${renderD11HomeMatchesSection()}
 
   <button class="btn-secondary btn-block mb14" onclick="goTab('dream11')">🎮 Go to Dream11 Hub →</button>
 
   <a href="https://akmaldream11pak078-star.github.io/akmal-dream11-pak/base.apk" download style="display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;border-radius:12px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;font-weight:700;font-size:14px;text-decoration:none;margin-bottom:14px;box-shadow:0 4px 14px rgba(34,197,94,0.35)">📲 Android App Download Karo (APK)</a>
+  `;
+}
+
+// ── Home screen: "My Matches" split into Upcoming / Live / Completed —
+// shows ONLY matches the user has actually joined a contest in (Mega/Free/
+// H2H/Custom), not every published match. Completed matches show the full
+// per-contest points + winning amount breakdown.
+function renderD11HomeMatchesSection() {
+  const eligible = Object.values(matches).filter(m => {
+    const d11m = dream11Matches[m.id];
+    return d11m && d11m.published && d11m.players.length >= D11_TEAM_SIZE;
+  });
+  const myMatches = eligible.filter(m => d11UserHasJoinedAnyContest(m.id, currentUser.email));
+
+  // Upcoming & Live show ALL available published matches (so users can
+  // discover and join new contests) — only Completed is filtered down to
+  // matches the user actually joined (that's their personal results/history).
+  const upcoming = eligible.filter(m => !isD11Locked(m.id) && !dream11Matches[m.id]?.scored);
+  const live = eligible.filter(m => isD11Locked(m.id) && !dream11Matches[m.id]?.scored);
+  const completed = myMatches.filter(m => dream11Matches[m.id]?.scored);
+
+  function contestRows(matchId) {
+    const d11m = dream11Matches[matchId];
+    const myTeam = d11GetUserTeam(matchId, currentUser.email);
+    const myPoints = myTeam?.totalPoints || 0;
+    const rows = [];
+
+    if ((d11m.megaParticipants||[]).includes(currentUser.email)) {
+      const prize = d11m.megaPrizes?.[currentUser.email] || 0;
+      rows.push({ icon:'🎯', color:'251,191,36', label:'Mega Contest', points:myPoints, prize, onClick:`openD11ContestParticipants('${matchId}','mega')` });
+    }
+    const myH2H = Object.values(d11h2hContests).find(c => c.matchId === matchId && (c.player1?.email===currentUser.email || c.player2?.email===currentUser.email));
+    if (myH2H) {
+      const won = myH2H.status==='completed' && myH2H.winnerId===currentUser.email;
+      const prize = won ? (myH2H.winnerPrize||0) : 0;
+      const extra = myH2H.status==='completed' ? (won?'🏆 Won':myH2H.winnerId?'❌ Lost':'🤝 Draw') : (myH2H.status||'open');
+      rows.push({ icon:'🥊', color:'249,115,22', label:'H2H Contest', points:myPoints, prize, extra, onClick:`openD11ContestParticipants('${matchId}','h2h')` });
+    }
+    if ((d11m.freeParticipants||[]).includes(currentUser.email)) {
+      const prize = d11m.freeRewards?.[currentUser.email] || 0;
+      rows.push({ icon:'🎁', color:'34,197,94', label:'Free Contest', points:myPoints, prize, onClick:`openD11ContestParticipants('${matchId}','free')` });
+    }
+    Object.values(d11CustomContests).filter(cc => cc.matchId===matchId && (cc.participants||[]).includes(currentUser.email)).forEach(cc => {
+      const prize = cc.prizes?.[currentUser.email] || 0;
+      rows.push({ icon:'🛠️', color:'168,85,247', label:`Custom: ${cc.code}`, points:myPoints, prize, extra: cc.cancelled?'Cancelled · refunded':`Rs ${cc.entryFee||0} entry`, onClick:`openD11ContestParticipants('${matchId}','custom','${cc.id}')` });
+    });
+    return rows;
+  }
+
+  function renderUpcomingCard(m) {
+    const d11m = dream11Matches[m.id];
+    const myTeam = d11GetUserTeam(m.id, currentUser.email);
+    const dLocked = isD11Locked(m.id);
+    const deadlineStr = m.deadline ? pkDateTime(m.deadline) : '';
+    const xiCount = (d11m.players||[]).filter(p => p.isPlayingXI).length;
+    const megaJoinedCount = (d11m.megaParticipants||[]).length;
+    const freeJoinedCount = (d11m.freeParticipants||[]).length;
+    return `
+    <div class="card mb14">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div class="match-teams" style="gap:8px">
+          <span class="team-name" style="font-size:14px">${m.teamA||'TBD'}</span>
+          <span class="vs-badge" style="font-size:10px;padding:2px 8px">VS</span>
+          <span class="team-name" style="font-size:14px">${m.teamB||'TBD'}</span>
+        </div>
+        ${dLocked ? `<span class="match-status status-live">LOCKED</span>` : `<span class="match-status status-upcoming">OPEN</span>`}
+      </div>
+      ${m.seriesName ? `<div style="font-size:11px;font-weight:700;color:#c084fc;margin-bottom:6px">🏆 ${m.seriesName}</div>` : ''}
+      ${m.sport !== 'football' ? `<div style="margin-bottom:6px"><span class="match-sport-tag tag-cricket">${m.format==='ODI'?'🔵':m.format==='Test'?'🏛️':'⚡'} ${m.format||'T20'}</span></div>` : ''}
+      <div style="font-size:11.5px;color:var(--dim);margin-bottom:4px">👥 ${(d11m.players||[]).length} players pool ready ${xiCount > 0 ? `· 🏏 ${xiCount} confirmed Playing XI` : ''}</div>
+      <div style="font-size:11.5px;color:#4ade80;margin-bottom:2px">🎯 ${megaJoinedCount} ${megaJoinedCount === 1 ? 'user' : 'users'} joined Mega Contest</div>
+      <div style="font-size:11.5px;color:#4ade80;margin-bottom:4px">🎁 ${freeJoinedCount} ${freeJoinedCount === 1 ? 'user' : 'users'} joined Free Contest</div>
+      ${deadlineStr ? `<div class="match-deadline" style="text-align:left;margin:0 0 4px">${dLocked ? '🔒 Deadline passed' : `⏰ Deadline: ${deadlineStr}`}</div>${!dLocked && m.deadline ? `<div class="d11-countdown" data-deadline="${m.deadline}" style="font-size:11px;font-weight:700;color:var(--orange);margin-bottom:10px">${d11FormatCountdown(m.deadline - Date.now())}</div>` : ''}` : ''}
+      ${(() => {
+        const rows = contestRows(m.id);
+        if (rows.length === 0) return '';
+        const badges = rows.map(r => `<button style="background:rgba(${r.color},0.18);color:rgb(${r.color});border:1px solid rgba(${r.color},0.35);padding:3px 8px;border-radius:7px;font-size:10px;font-weight:700;cursor:pointer" onclick="${r.onClick}">${r.icon} ${r.label}</button>`);
+        return `<div style="margin-bottom:8px"><div style="font-size:10px;color:var(--dim);font-weight:600;margin-bottom:5px">✅ You have joined these contests — tap to see who else joined:</div><div style="display:flex;flex-wrap:wrap;gap:5px">${badges.join('')}</div></div>`;
+      })()}
+      <div style="display:flex;gap:8px">
+        ${myTeam ? `
+          <button class="btn-secondary" style="flex:1;font-size:12px;padding:10px" onclick="openDream11ViewTeam('${myTeam.id}')">👁 My Team ${myTeam.totalPoints?'· '+myTeam.totalPoints+' pts':''}</button>
+          ${!dLocked ? `<button class="btn-primary" style="flex:1;font-size:12px;padding:10px" onclick="openDream11Match('${m.id}')">✏️ Edit Team</button>` : ''}
+        ` : !dLocked ? `
+          <button class="btn-primary btn-block" style="font-size:12px;padding:10px" onclick="openDream11Match('${m.id}')">🎮 Build My Team</button>
+        ` : `<div class="empty-state" style="padding:10px;font-size:12px">Contest is locked, joining is closed now</div>`}
+      </div>
+      ${!dLocked ? `<button class="btn-primary btn-block mb0" style="font-size:12px;padding:10px;margin-top:8px;background:linear-gradient(135deg,#f59e0b,#ea580c)" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">🏟️ Join Mega / H2H / Custom Contest</button>` : ''}
+    </div>`;
+  }
+
+  function renderLiveCard(m) {
+    const d11m = dream11Matches[m.id];
+    const myTeam = d11GetUserTeam(m.id, currentUser.email);
+    const isLiveScoring = !d11m.scored && !!d11m.lastLiveUpdateAt;
+    const xiCount = (d11m.players||[]).filter(p => p.isPlayingXI).length;
+    const megaJoinedCount = (d11m.megaParticipants||[]).length;
+    const freeJoinedCount = (d11m.freeParticipants||[]).length;
+    return `
+    <div class="card mb14">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div class="match-teams" style="gap:8px">
+          <span class="team-name" style="font-size:14px">${m.teamA||'TBD'}</span>
+          <span class="vs-badge" style="font-size:10px;padding:2px 8px">VS</span>
+          <span class="team-name" style="font-size:14px">${m.teamB||'TBD'}</span>
+        </div>
+        <span class="match-status status-live">🔴 LIVE</span>
+      </div>
+      ${m.seriesName ? `<div style="font-size:11px;font-weight:700;color:#c084fc;margin-bottom:6px">🏆 ${m.seriesName}</div>` : ''}
+      ${m.sport !== 'football' ? `<div style="margin-bottom:6px"><span class="match-sport-tag tag-cricket">${m.format==='ODI'?'🔵':m.format==='Test'?'🏛️':'⚡'} ${m.format||'T20'}</span></div>` : ''}
+      <div style="font-size:11.5px;color:var(--dim);margin-bottom:4px">👥 ${(d11m.players||[]).length} players pool ready ${xiCount > 0 ? `· 🏏 ${xiCount} confirmed Playing XI` : ''}</div>
+      <div style="font-size:11.5px;color:#4ade80;margin-bottom:2px">🎯 ${megaJoinedCount} ${megaJoinedCount === 1 ? 'user' : 'users'} joined Mega Contest</div>
+      <div style="font-size:11.5px;color:#4ade80;margin-bottom:4px">🎁 ${freeJoinedCount} ${freeJoinedCount === 1 ? 'user' : 'users'} joined Free Contest</div>
+      <div class="match-deadline" style="text-align:left;margin:0 0 4px">🔒 Deadline passed</div>
+      <div style="font-size:11.5px;color:var(--dim);margin-bottom:10px">Contest is locked, joining is closed now</div>
+      ${isLiveScoring && myTeam ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(220,38,38,0.08);border:1px solid rgba(220,38,38,0.25);border-radius:10px;padding:8px 10px">
+        <span style="font-size:11px;color:#f87171;flex:1">🔴 Live points updating — ${d11m.lastLiveUpdateAt}</span>
+        <span style="font-family:Rajdhani,sans-serif;font-weight:800;font-size:16px;color:var(--gold)">${myTeam.totalPoints||0} pts</span>
+      </div>` : myTeam ? `<button class="btn-secondary btn-block mb8" style="font-size:12px;padding:10px" onclick="openDream11ViewTeam('${myTeam.id}')">👁 My Team${myTeam.totalPoints?' · '+myTeam.totalPoints+' pts':''}</button>` : ''}
+      ${(() => {
+        const rows = contestRows(m.id);
+        if (rows.length === 0) return '';
+        const badges = rows.map(r => `<button style="background:rgba(${r.color},0.18);color:rgb(${r.color});border:1px solid rgba(${r.color},0.35);padding:3px 8px;border-radius:7px;font-size:10px;font-weight:700;cursor:pointer" onclick="${r.onClick}">${r.icon} ${r.label}</button>`);
+        return `<div style="margin-bottom:8px"><div style="font-size:10px;color:var(--dim);font-weight:600;margin-bottom:5px">✅ You have joined these contests — tap to see who else joined:</div><div style="display:flex;flex-wrap:wrap;gap:5px">${badges.join('')}</div></div>`;
+      })()}
+      <button class="btn-secondary btn-block mb0" style="font-size:12px;padding:10px" onclick="openDream11Leaderboard('${m.id}')">🏅 View Live Leaderboard</button>
+      ${m.scorecardText ? `<button class="btn-primary btn-block mb0" style="background:linear-gradient(135deg,#0f766e,#0d9488);font-size:12px;padding:10px;margin-top:8px" onclick="openD11ScorecardPage('${m.id}')">📋 Full Batting & Bowling Scorecard Dekho →</button>` : ''}
+    </div>`;
+  }
+
+  function renderMatchCard(m, mode) {
+    // mode: 'completed' only now — 'upcoming' → renderUpcomingCard, 'live' → renderLiveCard
+    const d11m = dream11Matches[m.id];
+    const myTeam = d11GetUserTeam(m.id, currentUser.email);
+    const rows = contestRows(m.id);
+    const totalWon = rows.reduce((sum,r) => sum + (r.prize||0), 0);
+    const statusTag = `<span class="match-status status-completed">COMPLETED</span>`;
+
+    return `<div class="card mb10" style="border-color:rgba(96,165,250,0.3);background:rgba(96,165,250,0.04)">
+      <div onclick="openCompletedMatchDetail('${m.id}','home')" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div class="match-teams" style="gap:8px">
+          <span class="team-name" style="font-size:13px">${m.teamA||'TBD'}</span>
+          <span class="vs-badge" style="font-size:9px;padding:2px 7px">VS</span>
+          <span class="team-name" style="font-size:13px">${m.teamB||'TBD'}</span>
+        </div>
+        ${statusTag}
+      </div>
+      ${rows.map(r => `<div onclick="${r.onClick}" style="cursor:pointer;display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:9px;background:rgba(${r.color},0.08);border:1px solid rgba(${r.color},0.22);margin-bottom:5px">
+        <div style="width:26px;height:26px;border-radius:8px;background:rgba(${r.color},0.16);display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0">${r.icon}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:11.5px;font-weight:700">${r.label}</div>
+          ${mode==='completed' ? `<div style="font-size:10px;color:var(--dim)">${r.points} pts${r.extra?' · '+r.extra:''}</div>` : `<div style="font-size:10px;color:var(--dim)">${r.extra||'Joined'}</div>`}
+        </div>
+        ${mode==='completed' ? (r.prize>0 ? `<div style="font-size:11.5px;font-weight:700;color:#4ade80">+Rs ${r.prize}</div>` : `<div style="font-size:9.5px;color:var(--dim)">⏳ Pending</div>`) : ''}
+      </div>`).join('')}
+      ${mode==='completed' && totalWon>0 ? `<div style="text-align:right;font-size:11.5px;font-weight:800;color:#4ade80;margin-top:4px">Total: +Rs ${totalWon}</div>` : ''}
+      ${mode==='completed' ? `<button class="btn-secondary btn-block" style="margin-top:8px;font-size:11.5px;padding:9px" onclick="openCompletedMatchDetail('${m.id}','home')">🎯 Full Match Result Dekho →</button>` : ''}
+    </div>`;
+  }
+
+  const activeSubTab = window._homeD11Tab || 'upcoming';
+  return `
+  <div class="section-title" style="margin-bottom:10px">🎮 Dream11 Contests</div>
+  <div class="admin-tab-row" style="margin-bottom:12px">
+    <button class="admin-tab ${activeSubTab==='upcoming'?'active':''}" onclick="window._homeD11Tab='upcoming';render()">🕒 Upcoming (${upcoming.length})</button>
+    <button class="admin-tab ${activeSubTab==='live'?'active':''}" onclick="window._homeD11Tab='live';render()">🔴 Live (${live.length})</button>
+    <button class="admin-tab ${activeSubTab==='completed'?'active':''}" onclick="window._homeD11Tab='completed';render()">🏁 Completed (${completed.length})</button>
+  </div>
+  ${activeSubTab==='upcoming'
+    ? (upcoming.length===0 ? `<div class="empty-state"><div class="empty-icon">🎮</div>Koi upcoming Dream11 contest available nahi hai abhi.<br/>Jald hi naye matches aayenge!</div>` : upcoming.map(m => renderUpcomingCard(m)).join(''))
+    : activeSubTab==='live'
+    ? (live.length===0 ? `<div class="empty-state"><div class="empty-icon">🔴</div>Abhi koi match live nahi hai.</div>` : live.map(m => renderLiveCard(m)).join(''))
+    : (completed.length===0 ? `<div class="empty-state"><div class="empty-icon">🏁</div>Koi completed joined match nahi.</div>` : completed.map(m => renderMatchCard(m,'completed')).join(''))
+  }
   `;
 }
 
@@ -10678,10 +10797,6 @@ function renderDream11Hub() {
     return `<button class="btn-secondary btn-block mb14" style="background:rgba(74,222,128,0.1);border-color:rgba(74,222,128,0.3);color:#4ade80" onclick="tab='dream11Completed';render();window.scrollTo(0,0)">🏁 Completed Matches${completedCount > 0 ? ` (${completedCount})` : ''}</button>`;
   })()}
   ${(() => {
-    const myJoined = eligible.filter(m => d11UserHasJoinedAnyContest(m.id, currentUser.email));
-    return `<button class="btn-secondary btn-block mb14" style="background:rgba(96,165,250,0.1);border-color:rgba(96,165,250,0.3);color:#60a5fa" onclick="goTab('home');render();window.scrollTo(0,0)">🗂️ My Matches — Home Tab pe dekhein${myJoined.length > 0 ? ` (${myJoined.length})` : ''}</button>`;
-  })()}
-  ${(() => {
     const visible = eligible.filter(m => {
       const d11m = dream11Matches[m.id];
       return d11m && d11m.published && d11m.players.length >= D11_TEAM_SIZE && !d11m.scored;
@@ -10987,7 +11102,7 @@ function d11AdminPlayerRow(p, m) {
   return `
   <div class="d11-player-row">
     <div class="d11-player-left" style="gap:8px">
-      <div style="position:relative;flex-shrink:0" onclick="d11TriggerPhotoUpload('${p.id}')" title="Tap to set player photo">
+      <div style="position:relative;flex-shrink:0" onclick="d11OpenPhotoMenu('${p.id}','${(p.name||'').replace(/'/g,"\\'")}')" title="Tap to set player photo">
         ${playerAvatarHtml(p.photo, p.name, 34)}
         <div style="position:absolute;bottom:-2px;right:-2px;width:14px;height:14px;border-radius:50%;background:#2563eb;display:flex;align-items:center;justify-content:center;font-size:9px;cursor:pointer">📷</div>
       </div>
@@ -16409,7 +16524,7 @@ function utPoolPlayerRow(p, m) {
   return `
   <div class="d11-player-row">
     <div class="d11-player-left" style="gap:8px">
-      <div style="position:relative;flex-shrink:0" onclick="utTriggerPhotoUpload('${p.id}')" title="Tap to set player photo" style="cursor:pointer">
+      <div style="position:relative;flex-shrink:0;cursor:pointer" onclick="utOpenPhotoMenu('${p.id}','${(p.name||'').replace(/'/g,"\\'")}')" title="Tap to set player photo">
         ${playerAvatarHtml(p.photo, p.name, 34)}
         <div style="position:absolute;bottom:-2px;right:-2px;width:14px;height:14px;border-radius:50%;background:#f97316;display:flex;align-items:center;justify-content:center;font-size:9px;cursor:pointer">📷</div>
       </div>
@@ -16940,6 +17055,114 @@ function playerAvatarHtml(photo, name, size) {
 function d11TriggerPhotoUpload(playerId) { _dpTarget = { type: 'd11', playerId }; document.getElementById('player-dp-input').click(); }
 function utTriggerPhotoUpload(playerId) { _dpTarget = { type: 'ut', playerId }; document.getElementById('player-dp-input').click(); }
 
+// ── Photo action menu: tapping a player's avatar now offers a choice
+// between uploading a file and searching Google Images for a picture,
+// since there's no way to embed a live image-search API safely inside a
+// client-side app (would need to expose a paid API key in the browser).
+// Instead we open a Google Images search for the player's name in a new
+// tab; the admin finds a good photo there, long-presses/right-clicks it to
+// copy the image address, then pastes that URL into the small panel this
+// opens back in the app — which fetches it and sets it as the DP.
+let _dpUrlTarget = null; // { type: 'd11'|'ut', playerId, playerName } — player currently being set via URL paste
+let _dpUrlPasteValue = '';
+
+function d11OpenPhotoMenu(playerId, playerName) { _dpActionMenu = { type: 'd11', playerId, playerName }; render(); }
+function utOpenPhotoMenu(playerId, playerName) { _dpActionMenu = { type: 'ut', playerId, playerName }; render(); }
+let _dpActionMenu = null; // { type, playerId, playerName } — small popup menu currently open, or null
+
+function _dpMenuUpload() {
+  if (!_dpActionMenu) return;
+  const { type, playerId } = _dpActionMenu;
+  _dpActionMenu = null;
+  _dpTarget = { type, playerId };
+  render();
+  document.getElementById('player-dp-input').click();
+}
+function _dpMenuSearchGoogle() {
+  if (!_dpActionMenu) return;
+  const { type, playerId, playerName } = _dpActionMenu;
+  const q = encodeURIComponent((playerName||'') + ' cricketer photo');
+  window.open('https://www.google.com/search?tbm=isch&q=' + q, '_blank');
+  _dpUrlTarget = { type, playerId, playerName };
+  _dpUrlPasteValue = '';
+  _dpActionMenu = null;
+  render();
+}
+function _dpMenuClose() { _dpActionMenu = null; render(); }
+function _dpUrlPasteClose() { _dpUrlTarget = null; _dpUrlPasteValue = ''; render(); }
+function _dpUrlPasteUpdate(val) { _dpUrlPasteValue = val; }
+
+async function _dpUrlPasteApply() {
+  if (!_dpUrlTarget || !_dpUrlPasteValue.trim()) { showNotif('Pehle image ka URL paste karein', 'error'); return; }
+  const url = _dpUrlPasteValue.trim();
+  showNotif('⏳ Image load ho rahi hai...', 'info');
+  try {
+    // Load the image via a plain <img> tag (not fetch) so this works even
+    // for hosts that don't send CORS headers for fetch/XHR — canvas export
+    // still works for same-origin-safe hosts; if the host blocks canvas
+    // export we fall back to storing the URL directly as the photo.
+    const img = await new Promise((resolve, reject) => {
+      const im = new Image();
+      im.crossOrigin = 'anonymous';
+      im.onload = () => resolve(im);
+      im.onerror = () => reject(new Error('load failed'));
+      im.src = url;
+      setTimeout(() => reject(new Error('timeout')), 12000);
+    });
+    let finalPhoto = url;
+    try {
+      const canvas = document.createElement('canvas');
+      const maxSide = 140;
+      const ratio = Math.min(maxSide / img.width, maxSide / img.height, 1);
+      canvas.width = Math.round(img.width * ratio);
+      canvas.height = Math.round(img.height * ratio);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      finalPhoto = canvas.toDataURL('image/jpeg', 0.78); // will throw if canvas is tainted (no CORS)
+    } catch (canvasErr) {
+      // Host doesn't allow canvas export (no CORS) — just store the direct
+      // URL as the photo. It'll still display fine via <img src>, just
+      // won't be resized/compressed or survive if the source URL ever dies.
+      finalPhoto = url;
+    }
+    _applyPlayerDp(_dpUrlTarget.type, _dpUrlTarget.playerId, finalPhoto);
+    _dpUrlTarget = null;
+    _dpUrlPasteValue = '';
+  } catch (e) {
+    showNotif('❌ Image load nahi ho saki — URL check karein (right-click image → "Copy image address")', 'error');
+  }
+}
+
+function renderDpActionMenu() {
+  if (!_dpActionMenu) return '';
+  return `
+  <div style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9998;display:flex;align-items:center;justify-content:center;padding:20px" onclick="_dpMenuClose()">
+    <div class="card" style="max-width:340px;width:100%" onclick="event.stopPropagation()">
+      <div style="font-size:13px;font-weight:700;margin-bottom:12px">📸 ${_dpActionMenu.playerName} ki photo set karein</div>
+      <button class="btn-secondary btn-block mb8" style="font-size:12.5px;padding:11px" onclick="_dpMenuUpload()">📁 Gallery/Camera se Upload</button>
+      <button class="btn-primary btn-block" style="font-size:12.5px;padding:11px;background:linear-gradient(135deg,#4285F4,#1a73e8)" onclick="_dpMenuSearchGoogle()">🔍 Google Images pe Search Karein</button>
+      <button class="btn-secondary btn-block" style="margin-top:8px;font-size:11.5px;padding:9px" onclick="_dpMenuClose()">Cancel</button>
+    </div>
+  </div>`;
+}
+
+function renderDpUrlPastePanel() {
+  if (!_dpUrlTarget) return '';
+  return `
+  <div style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9998;display:flex;align-items:center;justify-content:center;padding:20px" onclick="_dpUrlPasteClose()">
+    <div class="card" style="max-width:380px;width:100%" onclick="event.stopPropagation()">
+      <div style="font-size:13px;font-weight:700;margin-bottom:8px">🔗 ${_dpUrlTarget.playerName} — Image URL Paste Karein</div>
+      <div style="font-size:11.5px;color:var(--dim);margin-bottom:10px;line-height:1.6">
+        Google Images tab mein jo photo pasand aaye, us par <b style="color:var(--text)">long-press karein → "Copy image address"</b> (ya right-click → "Copy image address" computer par), phir yahan paste karein.
+      </div>
+      <textarea class="input" style="min-height:70px;font-size:11.5px;resize:vertical" placeholder="https://..." oninput="_dpUrlPasteUpdate(this.value)">${(_dpUrlPasteValue||'').replace(/</g,'&lt;')}</textarea>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="btn-secondary" style="flex:1" onclick="_dpUrlPasteClose()">Cancel</button>
+        <button class="btn-primary" style="flex:1;background:linear-gradient(135deg,#16a34a,#15803d)" onclick="_dpUrlPasteApply()">✅ Set as Photo</button>
+      </div>
+    </div>
+  </div>`;
+}
+
 function _onPlayerDpChange(input) {
   const file = input.files[0];
   if (!file || !_dpTarget) return;
@@ -16994,7 +17217,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "1.0.7";
+const APP_VERSION = "1.0.8";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
