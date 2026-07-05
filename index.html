@@ -3866,9 +3866,15 @@ function renderHome() {
         ${isCompletedCard
           ? `<button class="btn-secondary btn-block" style="font-size:12px;padding:9px" onclick="openCompletedMatchDetail('${m.id}','home')">🏅 View Live Leaderboard</button>`
           : myTeam
-            ? `<button class="btn-secondary btn-block" style="font-size:12px;padding:9px" onclick="openDream11ViewTeam('${myTeam.id}')">👁 My Team ${myTeam.totalPoints?'· '+myTeam.totalPoints+' pts':''}</button>`
+            ? `<div style="display:flex;gap:8px">
+                 <button class="btn-secondary" style="flex:1;font-size:12px;padding:9px" onclick="openDream11ViewTeam('${myTeam.id}')">👁 My Team ${myTeam.totalPoints?'· '+myTeam.totalPoints+' pts':''}</button>
+                 <button class="btn-secondary" style="flex:1;font-size:12px;padding:9px" onclick="openDream11Leaderboard('${m.id}')">🏅 Leaderboard</button>
+               </div>`
             : !dLocked
-              ? `<button class="btn-primary btn-block" style="font-size:12px;padding:9px;background:linear-gradient(135deg,#a855f7,#7c3aed)" onclick="openDream11Match('${m.id}')">🎮 Build My Team</button>`
+              ? `<div style="display:flex;gap:8px">
+                   <button class="btn-primary" style="flex:1;font-size:12px;padding:9px;background:linear-gradient(135deg,#a855f7,#7c3aed)" onclick="openDream11Match('${m.id}')">🎮 Build My Team</button>
+                   <button class="btn-secondary" style="flex:1;font-size:12px;padding:9px" onclick="openDream11Leaderboard('${m.id}')">🏅 Leaderboard</button>
+                 </div>`
               : `<div style="text-align:center;font-size:12px;color:var(--dim);padding:8px">🔒 Contest locked — joining closed</div>`
         }
         ${!isCompletedCard && !dLocked ? `<button class="btn-orange btn-block" style="font-size:12px;padding:9px;margin-top:8px" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">🎪 Join Mega / H2H / Custom Contest</button>` : ''}
@@ -11487,7 +11493,7 @@ function renderDream11AdminScoring() {
   <div class="card mb14" style="border-color:rgba(99,102,241,0.4);margin-top:14px">
     <div class="section-title" style="margin-bottom:6px">📊 Match Result & Full Scorecard</div>
     <div style="font-size:11.5px;color:#60a5fa;margin-bottom:14px;line-height:1.6;background:rgba(37,99,235,0.08);padding:8px 12px;border-radius:9px">
-      💡 <strong>Smart Auto-Fill:</strong> Sirf scorecard paste karo — score aur result automatically fill ho jaayega!
+      💡 <strong>Smart Auto-Fill:</strong> Sirf scorecard paste karo — score aur result automatically fill ho jaayega! Aur jab "Save" karoge, jitne players scorecard mein khele hain wo Playing XI mein automatically confirm ho jayenge, aur jin users ne backup select kar rakha tha unki team automatically update ho jayegi.
     </div>
 
     <label class="label">📋 Full Scorecard Paste Karo (Cricbuzz / ESPNcricinfo se)</label>
@@ -11563,6 +11569,78 @@ function d11AutoParseScorecard(matchId) {
   });
 }
 
+// ── Auto-confirm Playing XI from pasted scorecard text ──────────────
+// When admin pastes the full match scorecard (which naturally lists every
+// player who actually played — usually 22 names across both teams' batting
+// + bowling tables), extract those names and mark the matching players in
+// the Dream11 pool as confirmed Playing XI — without any manual tick-box
+// work. Immediately triggers the existing backup auto-replace logic so any
+// user who picked a bench player (not in this pasted lineup) and had a
+// backup queued gets swapped over automatically.
+// Matching is name-based (case-insensitive, ignores captain/wk/nickname
+// suffixes like "(c)", "(wk)"), so it works even if the scorecard's exact
+// spelling/spacing differs slightly from how admin typed the player pool.
+function d11NormalizePlayerName(name) {
+  return (name || '')
+    .toLowerCase()
+    .replace(/\(.*?\)/g, '')      // drop "(c)", "(wk)", "(vc)" etc.
+    .replace(/[^a-z\s]/g, ' ')    // drop punctuation/periods
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function d11ExtractPlayerNamesFromScorecard(text) {
+  if (!text) return [];
+  const lines = text.split('\n').map(l => l.trim());
+  const numRe = /^-?\d+(\.\d+)?$/;
+  const dismissalRe = /^(not\s*out|batting|c\s+.+\s+b\s+.+|c\s*&\s*b\s+.+|b\s+[a-z].*|lbw\s+b\s+.+|st\s+.+\s+b\s+.+|run\s*out\s*\(.+\)|retired.*|absent.*)$/i;
+  const skipLineRe = /^(batter|batsman|bowler|dismissal|r|b|4s|6s|sr|o|m|w|nb|wd|eco|extras|total|yet to bat|did not bat|fall of wickets|powerplay)$/i;
+  const scoreLineRe = /^\d{1,3}[\/\-]\d{1,2}\s*\(/;
+  const names = [];
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l || skipLineRe.test(l) || numRe.test(l) || dismissalRe.test(l) || scoreLineRe.test(l)) continue;
+    if (/^\d+(st|nd|rd|th)\s*inn/i.test(l) || /overs?,?\s*rr/i.test(l)) continue;
+    // A name line in either the pipe-table format or the raw columnar paste
+    // is any non-numeric, non-label line that isn't obviously a team/section
+    // header. Keep it simple and permissive — over-collecting a stray line
+    // just means it won't match any pool player and gets silently ignored.
+    let candidate = l.replace(/^\|/, '').replace(/\|$/, '').split('|')[0].trim();
+    if (!candidate || numRe.test(candidate) || dismissalRe.test(candidate) || skipLineRe.test(candidate)) continue;
+    if (candidate.length < 3 || candidate.length > 40) continue;
+    names.push(candidate);
+  }
+  return names;
+}
+
+function d11AutoConfirmPlayingXIFromScorecard(matchId, scorecardText) {
+  const d11m = dream11Matches[matchId];
+  if (!d11m || !scorecardText) return { matchedCount: 0, totalNames: 0 };
+
+  const rawNames = d11ExtractPlayerNamesFromScorecard(scorecardText);
+  const normalizedFound = new Set(rawNames.map(d11NormalizePlayerName).filter(Boolean));
+
+  let matchedCount = 0;
+  (d11m.players || []).forEach(p => {
+    const norm = d11NormalizePlayerName(p.name);
+    if (!norm) return;
+    // Exact normalized match, or one contains the other (handles minor
+    // spelling/spacing differences like "M Rathnayake" vs "Milan Priyanath Rathnayake").
+    const isMatch = normalizedFound.has(norm) ||
+      Array.from(normalizedFound).some(fn => fn.length > 4 && norm.length > 4 && (fn.includes(norm) || norm.includes(fn)));
+    if (isMatch && !p.isPlayingXI) {
+      p.isPlayingXI = true;
+      matchedCount++;
+    }
+  });
+
+  if (matchedCount > 0) {
+    _saveDream11MatchToFirestore(matchId, d11m);
+    d11ApplyBackupReplacements(matchId);
+  }
+  return { matchedCount, totalNames: rawNames.length };
+}
+
 async function d11SaveMatchScorecard(matchId) {
   const m = matches[matchId];
   if (!m) return;
@@ -11588,7 +11666,17 @@ async function d11SaveMatchScorecard(matchId) {
       cache[matchId] = m;
       localStorage.setItem('pp_matches_cache', JSON.stringify(cache));
     } catch(e) {}
-    showNotif('✅ Result & Scorecard saved! Score ab show ho raha hai.');
+
+    // Auto-confirm Playing XI from the pasted scorecard (the ~22 names who
+    // actually batted/bowled), then auto-swap any user's bench pick for
+    // their queued backup — same as if admin had manually ticked each player.
+    let xiMsg = '';
+    if (scorecardText && dream11Matches[matchId]) {
+      const { matchedCount } = d11AutoConfirmPlayingXIFromScorecard(matchId, scorecardText);
+      if (matchedCount > 0) xiMsg = ` · 🏏 ${matchedCount} players auto-confirmed Playing XI, backups applied`;
+    }
+
+    showNotif(`✅ Result & Scorecard saved! Score ab show ho raha hai.${xiMsg}`);
   } catch(e) {
     console.error('Scorecard save error:', e);
     showNotif('⚠️ Save mein error aaya — dobara try karo.', 'error');
@@ -17369,7 +17457,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.3.1";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
