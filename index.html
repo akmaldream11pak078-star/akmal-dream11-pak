@@ -5983,10 +5983,10 @@ function d11StripMd(str) {
 function d11ConvertColumnarToMarkdown(text) {
   if (!text || text.includes('|')) return text; // already has tables (or empty) — nothing to do
 
-  const rawLines = text.split('\n').map(l => l.trim());
+  const rawLines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
   const isBlank = (l) => l.length === 0;
   const numRe = /^-?\d+(\.\d+)?$/;
-  const dismissalRe = /^(not\s*out|c\s+.+\s+b\s+.+|c\s*&\s*b\s+.+|b\s+[a-z].*|lbw\s+b\s+.+|st\s+.+\s+b\s+.+|run\s*out\s*\(.+\)|retired.*|absent.*)$/i;
+  const dismissalRe = /^(not\s*out|batting|c\s+.+\s+b\s+.+|c\s*&\s*b\s+.+|b\s+[a-z].*|lbw\s+b\s+.+|st\s+.+\s+b\s+.+|run\s*out\s*\(.+\)|retired.*|absent.*)$/i;
   const battingHeaderRe = /^(batter|batsman)$/i;
   const bowlingHeaderRe = /^bowler$/i;
   const battingColLabels = /^(dismissal|r|b|4s|6s|sr)$/i;
@@ -6011,8 +6011,17 @@ function d11ConvertColumnarToMarkdown(text) {
       while (i < rawLines.length) {
         const l = rawLines[i];
         if (isBlank(l) || teamScoreLineRe.test(l) || battingHeaderRe.test(l) || bowlingHeaderRe.test(l) ||
-            /^(extras|total|did not bat|fall of wickets)$/i.test(l)) break;
+            /^(extras|total|did not bat|fall of wickets|powerplay)$/i.test(l) ||
+            /^\d+(st|nd|rd|th)\s*inn(ings)?\b/i.test(l) || /\b\d+(st|nd|rd|th)\s*inn\b/i.test(l)) break;
         if (numRe.test(l) || dismissalRe.test(l)) { i++; continue; } // stray, shouldn't happen at row start
+        // A name-like line is only a real row if at least one number follows it
+        // (skipping over an optional dismissal line for batting). Anything else
+        // — like an innings header ("WI (1st Inn)", "West Indies 1st Innings")
+        // sitting between two tables — has no numbers after it and must not be
+        // consumed as a player row.
+        let peek = i + 1;
+        if (isBatting && peek < rawLines.length && (dismissalRe.test(rawLines[peek]) || /^(retired|absent)/i.test(rawLines[peek]))) peek++;
+        if (peek >= rawLines.length || !numRe.test(rawLines[peek])) break;
         const name = l; i++;
         if (isBatting) {
           let dismissal = '';
@@ -6020,7 +6029,7 @@ function d11ConvertColumnarToMarkdown(text) {
           const nums = [];
           while (i < rawLines.length && numRe.test(rawLines[i]) && nums.length < 5) { nums.push(rawLines[i]); i++; }
           const [r='0', b='0', f4='0', f6='0', sr=''] = nums;
-          rows.push([name, dismissal || 'not out', r, b, f4, f6, sr || (b!=='0'?((parseFloat(r)/parseFloat(b))*100).toFixed(2):'0.00')]);
+          rows.push([name, (dismissal.toLowerCase() === 'batting' ? 'not out' : dismissal) || 'not out', r, b, f4, f6, sr || (b!=='0'?((parseFloat(r)/parseFloat(b))*100).toFixed(2):'0.00')]);
         } else {
           const nums = [];
           while (i < rawLines.length && numRe.test(rawLines[i]) && nums.length < 7) { nums.push(rawLines[i]); i++; }
@@ -17094,7 +17103,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "1.1.1";
+const APP_VERSION = "1.1.2";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
