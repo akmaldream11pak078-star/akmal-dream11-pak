@@ -95,6 +95,18 @@
   html[data-theme="light"] [style*="border:1px solid rgba(255,255,255,0."] {
     border-color: rgba(15,23,42,0.12) !important;
   }
+  /* Pastel accent text colors (green/red/blue/gold/purple) were picked to
+     pop against the dark navy background — on white they're too pale/low-
+     contrast (this is the "Deposit"/"Withdraw"/"Free Contest" washed-out
+     look). Swap each for a deeper, more saturated shade of the same hue in
+     Light Mode only; Dark Mode is completely unaffected. */
+  html[data-theme="light"] [style*="color:#4ade80"] { color:#15803d !important; }
+  html[data-theme="light"] [style*="color:#f87171"] { color:#b91c1c !important; }
+  html[data-theme="light"] [style*="color:#60a5fa"] { color:#1d4ed8 !important; }
+  html[data-theme="light"] [style*="color:#fbbf24"] { color:#a16207 !important; }
+  html[data-theme="light"] [style*="color:#facc15"] { color:#a16207 !important; }
+  html[data-theme="light"] [style*="color:#c084fc"] { color:#7e22ce !important; }
+  html[data-theme="light"] [style*="color:#818cf8"] { color:#4338ca !important; }
   * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html,body { width:100%; height:100%; overscroll-behavior:none; }
   body {
@@ -17575,7 +17587,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "1.4.2";
+const APP_VERSION = "1.4.3";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
