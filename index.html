@@ -11,6 +11,20 @@
 <meta http-equiv="Content-Security-Policy" content="default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;">
 <meta name="description" content="PredictionPro — Cricket & Football Prediction Contests | Win Points, Climb the Leaderboard">
 <title>Akmal Dream 11 Pak 🇵🇰</title>
+<script>
+  // Apply Light/Dark Mode BEFORE the stylesheet paints anything, so the user
+  // never sees a flash of the wrong theme while the rest of app.js boots up.
+  // Default is Light Mode for first-time users; 'dark' is only set once the
+  // user explicitly switches via the Profile toggle (see toggleAppTheme()).
+  (function() {
+    try {
+      var saved = localStorage.getItem('pp_app_theme');
+      if (saved !== 'dark') document.documentElement.setAttribute('data-theme', 'light');
+    } catch(e) {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+  })();
+</script>
 <link rel="manifest" href="manifest.json">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -20,6 +34,66 @@
     --orange:#f97316; --green:#16a34a; --red:#dc2626; --gold:#fbbf24;
     --card:rgba(255,255,255,0.045); --card-b:rgba(255,255,255,0.09);
     --text:#e7edf7; --dim:#7e8db0; --dim2:#506084;
+    --scrollbar-thumb: rgba(255,255,255,0.15);
+    --input-bg: rgba(255,255,255,0.04);
+    --header-bg: rgba(10,22,40,0.85);
+    --nav-bg: rgba(10,22,40,0.92);
+    --app-bg-1: rgba(37,99,235,0.18);
+    --app-bg-2: rgba(249,115,22,0.10);
+    --app-bg-3-start: #0a1628;
+    --app-bg-3-end: #0c1b33;
+  }
+  /* ── Light Mode ──
+     Toggled via document.documentElement[data-theme="light"] (see toggleAppTheme()).
+     Overrides the core palette variables; the rest of the app already reads
+     colors from these variables (backgrounds, text, borders, inputs, cards),
+     so switching them here re-themes the vast majority of the UI in one place.
+     A handful of small hardcoded accent colors (specific colored badges/pills
+     scattered through individual render functions) are intentionally left
+     untouched for now — they're accent colors that read fine on both themes. */
+  html[data-theme="light"] {
+    --navy:#eef1f7; --navy2:#e3e8f2; --blue:#2563eb; --blue-l:#2563eb;
+    --orange:#ea580c; --green:#16a34a; --red:#dc2626; --gold:#b45309;
+    --card:#ffffff; --card-b:rgba(15,23,42,0.12);
+    --text:#0f172a; --dim:#475569; --dim2:#94a3b8;
+    --scrollbar-thumb: rgba(15,23,42,0.2);
+    --input-bg: #f1f5f9;
+    --header-bg: rgba(255,255,255,0.94);
+    --nav-bg: rgba(255,255,255,0.96);
+    --app-bg-1: rgba(37,99,235,0.06);
+    --app-bg-2: rgba(249,115,22,0.045);
+    --app-bg-3-start: #eef1f7;
+    --app-bg-3-end: #e6eaf3;
+    --card-shadow: 0 1px 3px rgba(15,23,42,0.06), 0 1px 2px rgba(15,23,42,0.08);
+  }
+  html[data-theme="light"] .card { box-shadow: var(--card-shadow); }
+  html[data-theme="light"] #header,
+  html[data-theme="light"] #bottom-nav { box-shadow: 0 1px 8px rgba(15,23,42,0.05); }
+  html[data-theme="light"] .btn-secondary { box-shadow: var(--card-shadow); }
+  /* A lot of inner sub-cards/badges throughout the app use a translucent
+     WHITE overlay (rgba(255,255,255,0.0X)) to sit slightly lighter than the
+     dark navy background behind them. On a light background that same
+     white-on-white overlay becomes nearly invisible — this is the main
+     cause of everything looking "washed out" in Light Mode. Repaint those
+     specific white-overlay tints as a visible light-gray-on-white tint with
+     a real border instead, since these are inline styles spread across many
+     render functions and re-writing each one individually isn't practical. */
+  html[data-theme="light"] [style*="rgba(255,255,255,0.03)"],
+  html[data-theme="light"] [style*="rgba(255,255,255,0.04)"],
+  html[data-theme="light"] [style*="rgba(255,255,255,0.05)"],
+  html[data-theme="light"] [style*="rgba(255,255,255,0.06)"],
+  html[data-theme="light"] [style*="rgba(255,255,255,0.07)"],
+  html[data-theme="light"] [style*="rgba(255,255,255,0.08)"] {
+    background-color: #eef2f8 !important;
+    border-color: rgba(15,23,42,0.12) !important;
+  }
+  /* Same problem for plain border/divider lines using a translucent white
+     (row separators, list dividers etc.) — invisible against a light page,
+     repaint as a visible light-gray hairline instead. */
+  html[data-theme="light"] [style*="border-bottom:1px solid rgba(255,255,255,0."],
+  html[data-theme="light"] [style*="border-top:1px solid rgba(255,255,255,0."],
+  html[data-theme="light"] [style*="border:1px solid rgba(255,255,255,0."] {
+    border-color: rgba(15,23,42,0.12) !important;
   }
   * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html,body { width:100%; height:100%; overscroll-behavior:none; }
@@ -30,9 +104,9 @@
   #app {
     min-height:100vh;
     background:
-      radial-gradient(circle at 15% 0%, rgba(37,99,235,0.18), transparent 45%),
-      radial-gradient(circle at 90% 15%, rgba(249,115,22,0.10), transparent 40%),
-      linear-gradient(180deg, #0a1628 0%, #0c1b33 100%);
+      radial-gradient(circle at 15% 0%, var(--app-bg-1), transparent 45%),
+      radial-gradient(circle at 90% 15%, var(--app-bg-2), transparent 40%),
+      linear-gradient(180deg, var(--app-bg-3-start) 0%, var(--app-bg-3-end) 100%);
     padding-bottom:86px;
   }
   .display { font-family:Rajdhani,sans-serif; font-weight:700; letter-spacing:0.3px; }
@@ -44,7 +118,7 @@
   /* ── Header ── */
   #header {
     position:sticky; top:0; z-index:50; backdrop-filter:blur(18px);
-    background:rgba(10,22,40,0.85); border-bottom:1px solid rgba(255,255,255,0.06);
+    background:var(--header-bg); border-bottom:1px solid var(--card-b);
     padding:14px 18px; display:flex; align-items:center; justify-content:space-between;
   }
   .logo-wrap { display:flex; align-items:center; gap:10px; }
@@ -85,7 +159,7 @@
   /* ── Horizontal scroll row for match cards ── */
   .hscroll-row { display:flex; gap:12px; overflow-x:auto; -webkit-overflow-scrolling:touch; padding-bottom:6px; margin-bottom:14px; scroll-snap-type:x proximity; }
   .hscroll-row::-webkit-scrollbar { height:5px; }
-  .hscroll-row::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.15); border-radius:10px; }
+  .hscroll-row::-webkit-scrollbar-thumb { background:var(--scrollbar-thumb); border-radius:10px; }
   .hscroll-card { flex:0 0 auto; width:84%; max-width:320px; scroll-snap-align:start; }
   .hscroll-card .card { height:100%; }
 
@@ -100,7 +174,7 @@
   .btn-orange { background:linear-gradient(135deg,var(--orange),#ea580c); box-shadow:0 6px 18px rgba(249,115,22,0.35); }
   .btn-secondary {
     width:100%; padding:13px; border:1px solid var(--card-b); border-radius:14px; font-size:14px;
-    font-weight:600; color:var(--text); background:rgba(255,255,255,0.04);
+    font-weight:600; color:var(--text); background:var(--input-bg);
   }
   .btn-block { width:100%; }
   .btn-disabled { opacity:0.4; pointer-events:none; }
@@ -109,7 +183,7 @@
   .label { font-size:12px; font-weight:600; color:var(--dim); margin-bottom:7px; display:block; }
   .input {
     width:100%; padding:13px 15px; border-radius:12px; border:1px solid var(--card-b);
-    background:rgba(255,255,255,0.04); color:var(--text); font-size:14.5px; font-family:inherit;
+    background:var(--input-bg); color:var(--text); font-size:14.5px; font-family:inherit;
   }
   .input:focus { outline:none; border-color:rgba(37,99,235,0.5); }
   .input::placeholder { color:var(--dim2); }
@@ -119,8 +193,8 @@
   /* ── Bottom Nav ── */
   #bottom-nav {
     position:fixed; bottom:0; left:0; right:0; z-index:50;
-    background:rgba(10,22,40,0.92); backdrop-filter:blur(18px);
-    border-top:1px solid rgba(255,255,255,0.07);
+    background:var(--nav-bg); backdrop-filter:blur(18px);
+    border-top:1px solid var(--card-b);
     display:flex; justify-content:space-around; padding:7px 1px 10px;
   }
   .nav-item { display:flex; flex-direction:column; align-items:center; gap:2px; flex:1; opacity:0.42; transition:opacity 0.2s; position:relative; min-width:0; }
@@ -945,6 +1019,37 @@ function getDateTime() {
   return `${date} ${hours}:${mins}`;
 }
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
+
+// ── Light / Dark Mode ──────────────────────────────────────────────
+// Preference is stored per-device in localStorage (not tied to the user
+// account), so it persists across app restarts on this device.
+const APP_THEME_STORAGE_KEY = 'pp_app_theme'; // 'light' | 'dark'
+
+function applySavedAppTheme() {
+  let saved = null;
+  try { saved = localStorage.getItem(APP_THEME_STORAGE_KEY); } catch(e) {}
+  // Default to Light Mode for first-time users (no saved preference yet).
+  if (saved === 'dark') {
+    document.documentElement.removeAttribute('data-theme');
+  } else {
+    document.documentElement.setAttribute('data-theme', 'light');
+  }
+}
+
+function getCurrentAppTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+}
+
+function toggleAppTheme() {
+  const next = getCurrentAppTheme() === 'light' ? 'dark' : 'light';
+  if (next === 'light') {
+    document.documentElement.setAttribute('data-theme', 'light');
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+  }
+  try { localStorage.setItem(APP_THEME_STORAGE_KEY, next); } catch(e) {}
+  render();
+}
 function isAdmin() { return currentUser && currentUser.email === OWNER_EMAIL; }
 
 async function _sha256(text) {
@@ -3807,7 +3912,7 @@ function renderHome() {
     <div style="display:flex;justify-content:space-between;align-items:center">
       <div>
         <div style="font-size:12px;color:var(--dim);font-weight:600">Wallet Balance</div>
-        <div class="display" style="font-size:26px;color:#fff;margin-top:2px">Rs ${(u.balance||0).toFixed(2)}</div>
+        <div class="display" style="font-size:26px;color:var(--text);margin-top:2px">Rs ${(u.balance||0).toFixed(2)}</div>
       </div>
       <div style="display:flex;gap:8px">
         <button onclick="goTab('deposit')" style="background:rgba(22,163,74,0.15);border:1px solid rgba(22,163,74,0.35);color:#4ade80;padding:9px 14px;border-radius:10px;font-size:12px;font-weight:700">⬇ Deposit</button>
@@ -4556,6 +4661,16 @@ function renderProfile() {
     <div style="margin-top:10px"><span class="pill pill-points">🏅 Rank #${myRank||'-'}</span></div>
   </div>
 
+  <div class="card mb14" style="display:flex;align-items:center;justify-content:space-between">
+    <div>
+      <div style="font-size:13px;font-weight:700">${getCurrentAppTheme()==='light' ? '☀️ Light Mode' : '🌙 Dark Mode'}</div>
+      <div style="font-size:11px;color:var(--dim);margin-top:2px">Apna pasandeeda look chuno</div>
+    </div>
+    <button onclick="toggleAppTheme()" style="width:52px;height:30px;border-radius:16px;border:none;cursor:pointer;position:relative;background:${getCurrentAppTheme()==='light'?'#e2e8f0':'#2563eb'};transition:background 0.2s">
+      <span style="position:absolute;top:3px;left:${getCurrentAppTheme()==='light'?'3px':'25px'};width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 2px 4px rgba(0,0,0,0.25);transition:left 0.2s;display:flex;align-items:center;justify-content:center;font-size:12px">${getCurrentAppTheme()==='light'?'☀️':'🌙'}</span>
+    </button>
+  </div>
+
   <div class="card mb14" style="background:rgba(37,99,235,0.06);border-color:rgba(37,99,235,0.2)">
     <div style="font-size:12px;font-weight:700;color:var(--dim);margin-bottom:8px">🔍 FIND ANOTHER PLAYER</div>
     <div style="display:flex;gap:8px">
@@ -4569,7 +4684,7 @@ function renderProfile() {
     <div class="stat-box"><div class="stat-val" style="color:var(--gold)">${(u.points||0) + d11Stats.history.reduce((s,h)=>s+(h.points||0),0)}</div><div class="stat-lbl">Total Points</div></div>
     <div class="stat-box"><div class="stat-val" style="color:var(--blue-l)">${d11Stats.totalPlayed}</div><div class="stat-lbl">Contests Joined</div></div>
     <div class="stat-box"><div class="stat-val" style="color:#facc15">${d11Stats.winRatio}%</div><div class="stat-lbl">Win Ratio</div></div>
-    <div class="stat-box"><div class="stat-val" style="color:#fff">Rs ${(u.balance||0).toFixed(0)}</div><div class="stat-lbl">Wallet Balance</div></div>
+    <div class="stat-box"><div class="stat-val" style="color:var(--text)">Rs ${(u.balance||0).toFixed(0)}</div><div class="stat-lbl">Wallet Balance</div></div>
   </div>
 
   <div class="card mb14">
@@ -4872,7 +4987,7 @@ function renderWithdraw() {
 
   <div class="card mb18" style="text-align:center;background:rgba(37,99,235,0.08);border-color:rgba(37,99,235,0.25)">
     <div style="font-size:12px;color:var(--dim);font-weight:600">AVAILABLE BALANCE</div>
-    <div class="display" style="font-size:30px;color:#fff;margin-top:4px">Rs ${(u.balance||0).toFixed(2)}</div>
+    <div class="display" style="font-size:30px;color:var(--text);margin-top:4px">Rs ${(u.balance||0).toFixed(2)}</div>
   </div>
 
   <div class="card mb14" style="background:rgba(220,38,38,0.06);border-color:rgba(220,38,38,0.2)">
@@ -5040,7 +5155,7 @@ function renderReferral() {
   <div class="card mb18" style="text-align:center;background:linear-gradient(135deg,rgba(37,99,235,0.13),rgba(249,115,22,0.08));border-color:rgba(37,99,235,0.3)">
     <div style="font-size:12px;color:var(--dim);font-weight:600">YOUR REFERRAL CODE</div>
     <div class="display" style="font-size:30px;color:var(--orange);margin-top:6px;letter-spacing:2px">${u.referralCode}</div>
-    <button onclick="navigator.clipboard.writeText('${u.referralCode}').then(()=>showNotif('Code copied!'))" style="margin-top:10px;background:rgba(255,255,255,0.08);border:1px solid var(--card-b);color:#fff;padding:9px 18px;border-radius:10px;font-size:12px;font-weight:700">📋 Copy Code</button>
+    <button onclick="navigator.clipboard.writeText('${u.referralCode}').then(()=>showNotif('Code copied!'))" style="margin-top:10px;background:rgba(255,255,255,0.08);border:1px solid var(--card-b);color:var(--text);padding:9px 18px;border-radius:10px;font-size:12px;font-weight:700">📋 Copy Code</button>
   </div>
 
   <button class="btn-primary mb14" style="background:linear-gradient(135deg,#25D366,#1ea952)" onclick="shareReferralWhatsApp()">📲 Share on WhatsApp</button>
@@ -5871,8 +5986,8 @@ function renderCompletedMatchDetail() {
       </div>
 
       ${(m.scoreA || m.scoreB) ? `
-      <div style="background:rgba(0,0,0,0.2);border-radius:10px;padding:12px 14px;margin-bottom:10px">
-        <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.07)">
+      <div style="background:var(--input-bg);border:1px solid var(--card-b);border-radius:10px;padding:12px 14px;margin-bottom:10px">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--card-b)">
           <div style="display:flex;align-items:center;gap:8px">
             <span style="font-size:18px">${flagA}</span>
             <span style="font-weight:700;font-size:14px">${m.teamA||'TBD'}</span>
@@ -6101,12 +6216,12 @@ function d11RenderScorecardText(text) {
       const cells = line.split('|').slice(1,-1).map(c => d11StripMd(c));
       const isHeader = tableRows.length === 0;
       const tag = isHeader ? 'th' : 'td';
-      const rowBg = isHeader ? 'background:rgba(37,99,235,0.22);' : (tableRows.length%2===0 ? 'background:rgba(255,255,255,0.025)' : '');
+      const rowBg = isHeader ? 'background:rgba(37,99,235,0.22);' : (tableRows.length%2===0 ? 'background:var(--input-bg)' : '');
       html += `<tr style="${rowBg}">${cells.map((c,ci) => {
         const align = (ci > 0 && !isHeader) ? 'center' : 'left';
-        const color = isHeader ? '#94a3b8' : ci===0 ? 'var(--text)' : '#cbd5e1';
+        const color = isHeader ? 'var(--dim)' : ci===0 ? 'var(--text)' : 'var(--dim)';
         const fw = (isHeader || ci===0) ? '700' : '400';
-        return `<${tag} style="padding:6px 7px;border-bottom:1px solid rgba(255,255,255,0.06);color:${color};font-weight:${fw};text-align:${align};white-space:nowrap">${c}</${tag}>`;
+        return `<${tag} style="padding:6px 7px;border-bottom:1px solid var(--card-b);color:${color};font-weight:${fw};text-align:${align};white-space:nowrap">${c}</${tag}>`;
       }).join('')}</tr>`;
       tableRows.push(cells);
     } else {
@@ -6132,7 +6247,7 @@ function d11RenderScorecardText(text) {
     }
   }
   if (inTable) html += '</table></div>';
-  return `<div style="background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:12px;margin-bottom:10px">${html}</div>`;
+  return `<div style="background:var(--input-bg);border:1px solid var(--card-b);border-radius:12px;padding:12px;margin-bottom:10px">${html}</div>`;
 }
 
 // ── Admin: player pool management ──
@@ -9704,7 +9819,7 @@ async function d11GlobalJoinByCode() {
   }
 
   if (resultEl) resultEl.innerHTML = `
-    <div style="background:rgba(0,0,0,0.25);border-radius:10px;padding:12px;border:1px solid rgba(192,132,252,0.25)">
+    <div style="background:var(--input-bg);border-radius:10px;padding:12px;border:1px solid rgba(192,132,252,0.25)">
       <div style="font-weight:700;font-size:13px;color:#c084fc;margin-bottom:4px">🏆 ${code}</div>
       <div style="font-size:12px;color:var(--text);margin-bottom:2px">${m?.teamA||'?'} vs ${m?.teamB||'?'}</div>
       <div style="font-size:11px;color:var(--dim)">Created by: ${creatorName} · Entry: Rs ${cc.entryFee} · ${cc.participants.length}/${D11_CUSTOM_CONTEST_MAX_PLAYERS} joined · Pool: Rs ${cc.pool}</div>
@@ -10980,7 +11095,7 @@ function renderDream11Hub() {
           ${d11m?.published ? `<span class="match-status" style="background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.35)">🟢 PUBLISHED — visible to users</span>` : `<span class="match-status" style="background:rgba(234,179,8,0.15);color:#facc15;border:1px solid rgba(234,179,8,0.35)">🔒 NOT PUBLISHED — hidden from users</span>`}
         </div>
         <div style="font-size:11.5px;color:var(--dim);margin-bottom:6px">👥 ${playerCount} players · 🏏 ${xiCount} XI confirmed · 📋 ${teamCount} teams</div>
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(0,0,0,0.2);border-radius:8px;padding:8px 10px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:var(--input-bg);border-radius:8px;padding:8px 10px">
           <span style="font-size:11px;color:var(--orange);flex:1">⏰ Deadline: ${deadlineStr}${dLocked && !d11m?.locked ? ' (auto-locked)' : ''}</span>
           <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11EditDeadline('${m.id}')">✏️ Change</button>
         </div>
@@ -11141,8 +11256,8 @@ function renderDream11CompletedMatches() {
         <div style="font-weight:700;font-size:14px">${flagA} ${m.teamA||'TBD'} vs ${flagB} ${m.teamB||'TBD'}</div>
         <span class="match-status status-completed">RESULT OUT</span>
       </div>
-      <div style="background:rgba(0,0,0,0.2);border-radius:9px;padding:10px 12px;margin-bottom:8px">
-        <div style="display:flex;align-items:center;justify-content:space-between;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,0.07)">
+      <div style="background:var(--input-bg);border-radius:9px;padding:10px 12px;margin-bottom:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding-bottom:6px;border-bottom:1px solid var(--card-b)">
           <span style="font-size:13px;font-weight:700">${flagA} ${m.teamA||'TBD'}</span>
           <span style="font-family:Rajdhani,sans-serif;font-weight:700;font-size:15px;color:var(--gold)">${scoreADisplay}</span>
         </div>
@@ -11499,7 +11614,7 @@ function renderDream11AdminScoring() {
     <label class="label">📋 Full Scorecard Paste Karo (Cricbuzz / ESPNcricinfo se)</label>
     <textarea class="input mb10" id="d11-scorecard-input" rows="10" style="font-family:monospace;font-size:11.5px;line-height:1.6;resize:vertical;white-space:pre" placeholder="Yahan puri batting aur bowling scorecard paste karo...&#10;&#10;Score aur result automatically detect ho jaayega!" oninput="d11AutoParseScorecard('${d11ActiveMatchId}')">${(m.scorecardText||'').replace(/</g,'&lt;')}</textarea>
 
-    <div style="background:rgba(0,0,0,0.2);border-radius:10px;padding:12px;margin-bottom:12px">
+    <div style="background:var(--input-bg);border-radius:10px;padding:12px;margin-bottom:12px">
       <div style="font-size:11px;color:var(--dim);font-weight:700;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px">Auto-Detected Summary</div>
 
       <label class="label">🏏 ${m.teamA||'Team A'} Score</label>
@@ -13026,6 +13141,7 @@ function renderAdminD11MatchesList() {
     const dLocked = isD11Locked(m.id);
     const deadlineStr = m.deadline ? pkDateTime(m.deadline) : 'Set nahi';
     const megaC = (d11m?.megaParticipants||[]).length;
+    const miniMegaC = (d11m?.miniMegaParticipants||[]).length;
     const freeC = (d11m?.freeParticipants||[]).length;
     const h2hC = Object.values(d11h2hContests||{}).filter(c=>c.matchId===m.id).length;
     const custC = Object.values(d11CustomContests||{}).filter(c=>c.matchId===m.id).length;
@@ -13049,6 +13165,7 @@ function renderAdminD11MatchesList() {
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px">
         <span style="font-size:11px;padding:3px 9px;border-radius:20px;cursor:pointer;${megaC>0?'background:rgba(251,191,36,0.12);color:#fbbf24;border:1px solid rgba(251,191,36,0.3)':'background:rgba(255,255,255,0.04);color:var(--dim)'}" onclick="openAdminD11Participants('${m.id}','mega')">🎯 Mega: ${megaC}</span>
+        <span style="font-size:11px;padding:3px 9px;border-radius:20px;cursor:pointer;${miniMegaC>0?'background:rgba(96,165,250,0.12);color:#60a5fa;border:1px solid rgba(96,165,250,0.3)':'background:rgba(255,255,255,0.04);color:var(--dim)'}" onclick="openAdminD11Participants('${m.id}','minimega')">🔸 Mini Mega: ${miniMegaC}</span>
         <span style="font-size:11px;padding:3px 9px;border-radius:20px;cursor:pointer;${freeC>0?'background:rgba(34,197,94,0.12);color:#4ade80;border:1px solid rgba(34,197,94,0.3)':'background:rgba(255,255,255,0.04);color:var(--dim)'}" onclick="openAdminD11Participants('${m.id}','free')">🎁 Free: ${freeC}</span>
         <span style="font-size:11px;padding:3px 9px;border-radius:20px;cursor:pointer;${h2hC>0?'background:rgba(249,115,22,0.12);color:#fb923c;border:1px solid rgba(249,115,22,0.3)':'background:rgba(255,255,255,0.04);color:var(--dim)'}" onclick="openAdminD11Participants('${m.id}','h2h')">⚔️ H2H: ${h2hC}</span>
         ${custC>0?`<span style="font-size:11px;padding:3px 9px;border-radius:20px;cursor:pointer;background:rgba(139,92,246,0.12);color:#a78bfa;border:1px solid rgba(139,92,246,0.3)" onclick="openAdminD11Participants('${m.id}','custom')">🏆 Custom: ${custC}</span>`:''}
@@ -14356,7 +14473,7 @@ function renderAdminPending(pendingDep, pendingWd) {
     <div style="background:rgba(255,255,255,0.05);border:1px solid var(--card-b);border-radius:10px;padding:10px;margin-bottom:10px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
         <span style="font-size:11px;color:var(--dim)">Account Name</span>
-        <span style="font-weight:700;font-size:13px;color:#fff">${t.accountName}</span>
+        <span style="font-weight:700;font-size:13px;color:var(--text)">${t.accountName}</span>
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center">
         <span style="font-size:11px;color:var(--dim)">Account Number</span>
@@ -17222,6 +17339,7 @@ async function initApp() {
   // Step 1: Load cache instantly → render right away (feels instant)
   loadLocalCache();
   loadSession(); // optimistic instant paint from localStorage (legacy/cache only)
+  applySavedAppTheme(); // apply saved Light/Dark Mode preference before first paint
   if (currentUser && users[currentUser.email]) {
     currentUser = { ...users[currentUser.email], email: currentUser.email };
   }
@@ -17457,7 +17575,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "1.3.1";
+const APP_VERSION = "1.4.2";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
