@@ -3981,7 +3981,8 @@ function renderHome() {
             ? `<div style="font-size:11px;color:var(--orange);margin-bottom:10px">🔒 Deadline passed</div>`
             : deadlineStr ? `<div style="font-size:11px;color:var(--orange);margin-bottom:2px">⏰ Deadline: ${deadlineStr}</div>${m.deadline ? `<div class="d11-countdown" data-deadline="${m.deadline}" style="font-size:11px;font-weight:700;color:var(--orange);margin-bottom:10px">${d11FormatCountdown(m.deadline - Date.now())}</div>` : ''}` : ''}
         ${isCompletedCard
-          ? `<button class="btn-secondary btn-block" style="font-size:12px;padding:9px" onclick="openCompletedMatchDetail('${m.id}','home')">🏅 View Live Leaderboard</button>`
+          ? `<button class="btn-secondary btn-block mb10" style="font-size:12px;padding:9px" onclick="openCompletedMatchDetail('${m.id}','home')">🏅 View Live Leaderboard</button>
+             <button class="btn-block" style="font-size:12px;padding:9px;border:none;border-radius:10px;background:linear-gradient(135deg,#25D366,#1ea952);color:#fff;font-weight:700;cursor:pointer" onclick="d11ShareResultPdfWhatsApp('${m.id}', event)">📲 Share Result Image on WhatsApp</button>`
           : myTeam
             ? `<div style="display:flex;gap:8px">
                  <button class="btn-secondary" style="flex:1;font-size:12px;padding:9px" onclick="openDream11ViewTeam('${myTeam.id}')">👁 My Team ${myTeam.totalPoints?'· '+myTeam.totalPoints+' pts':''}</button>
@@ -10324,6 +10325,242 @@ function shareD11CustomContestWhatsApp(ccId) {
   const entryText = cc.entryFee > 0 ? `\u{1F4B0} Entry Fee: Rs ${cc.entryFee}` : '\u{1F193} Free to Join';
   const msg = `\u{1F3C6} *Dream11 Contest Invite!*\n\nMaine apna Dream11 contest banaya hai \u2014 join karo!\n\n${entryText}\n\n\u{1F511} Contest Code: *${cc.code}*\n\n\u{1F517} Official Website:\n${APP_URL}\n\n_Website per signup/login karo, contest code daalo aur apni Dream11 team banao!_`;
   window.open('https://wa.me/?text=' + encodeURIComponent(msg), '_blank');
+}
+
+// ── Completed Match Result IMAGE — drawn client-side on a <canvas>, shows
+// the Top Leaderboard (rank + points) and the current user's own team
+// breakdown for a completed Dream11 match. Uses navigator.share() (Web
+// Share API Level 2, file sharing) so the image goes straight into the
+// WhatsApp share sheet in a single tap on supporting mobile browsers —
+// falls back to a plain download + WhatsApp-text flow everywhere else. ──
+function _d11ResultImageFileName(m) {
+  const teamA = (m?.teamA||'TeamA').replace(/[^a-z0-9]/gi,'');
+  const teamB = (m?.teamB||'TeamB').replace(/[^a-z0-9]/gi,'');
+  return `Dream11_Result_${teamA}_vs_${teamB}.png`;
+}
+
+async function d11GenerateResultImageBlob(matchId) {
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m) { showNotif('Match not found', 'error'); return null; }
+
+  const W = 900;           // canvas width (px) — scaled 2x for crisp text on share/download
+  const PAD = 36;
+  const teams = Object.values(dream11Teams).filter(t => t.matchId === matchId).sort((a,b)=>(b.totalPoints||0)-(a.totalPoints||0));
+  const myTeam = Object.values(dream11Teams).find(t => t.matchId === matchId && t.userEmail === currentUser.email);
+  const picked = myTeam ? myTeam.picks.map(pid => d11m.players.find(x=>x.id===pid)).filter(Boolean) : [];
+  const topN = teams.slice(0, 15);
+
+  // ── Measure required height first (mirrors the draw pass below) ──
+  let y = 0;
+  y += 190; // header banner
+  y += 90;  // match title block
+  if (myTeam) y += 70 + picked.length*40 + 30;
+  y += 70 + topN.length*46 + 40; // leaderboard heading + rows + footer
+
+  const H = Math.max(y, 500);
+  const scale = 2; // render at 2x for a crisp, share-quality image
+  const canvas = document.createElement('canvas');
+  canvas.width = W * scale;
+  canvas.height = H * scale;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(scale, scale);
+
+  // Colors
+  const dark = '#0f172a', gold = '#fbbf24', green = '#22c55e', dim = '#64748b', blue = '#2563eb', lightBg = '#f8fafc', cardBg='#ffffff';
+
+  // Background
+  ctx.fillStyle = lightBg;
+  ctx.fillRect(0, 0, W, H);
+
+  // ── Header banner ──
+  ctx.fillStyle = dark;
+  ctx.fillRect(0, 0, W, 150);
+  ctx.fillStyle = gold;
+  ctx.fillRect(0, 146, W, 6);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '800 34px Arial, sans-serif';
+  ctx.fillText('🏏 AKMAL DREAM 11 PAK', PAD, 58);
+  ctx.fillStyle = gold;
+  ctx.font = '700 20px Arial, sans-serif';
+  ctx.fillText('Match Result & Leaderboard', PAD, 92);
+  ctx.fillStyle = '#cbd5e1';
+  ctx.font = '400 15px Arial, sans-serif';
+  ctx.fillText(`Generated: ${pkDateTime(Date.now())} PKT`, PAD, 120);
+
+  y = 190;
+
+  // ── Match title ──
+  ctx.textAlign = 'center';
+  ctx.fillStyle = dark;
+  ctx.font = '800 30px Arial, sans-serif';
+  const teamA = m.teamA||'Team A', teamB = m.teamB||'Team B';
+  ctx.fillText(`${teamA}  vs  ${teamB}`, W/2, y);
+  y += 32;
+  ctx.fillStyle = dim;
+  ctx.font = '400 17px Arial, sans-serif';
+  ctx.fillText(`${m.format||'T20'}${m.seriesName?' · '+m.seriesName:''}`, W/2, y);
+  y += 28;
+  if (m.resultText) {
+    ctx.fillStyle = green;
+    ctx.font = '700 17px Arial, sans-serif';
+    ctx.fillText(m.resultText, W/2, y);
+    y += 22;
+  }
+  ctx.strokeStyle = '#e2e8f0';
+  ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W-PAD, y); ctx.stroke();
+  y += 34;
+
+  // ── My Team Result ──
+  if (myTeam) {
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#f3f4f6';
+    _roundRect(ctx, PAD, y-24, W-PAD*2, 44, 8); ctx.fill();
+    ctx.fillStyle = dark;
+    ctx.font = '700 19px Arial, sans-serif';
+    ctx.fillText('👤 My Team Result', PAD+14, y+4);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = gold;
+    ctx.font = '800 19px Arial, sans-serif';
+    ctx.fillText(`${myTeam.totalPoints||0} pts`, W-PAD-14, y+4);
+    y += 46;
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = dim;
+    ctx.font = '700 13px Arial, sans-serif';
+    ctx.fillText('PLAYER', PAD+14, y);
+    ctx.fillText('ROLE', PAD+430, y);
+    ctx.textAlign = 'right';
+    ctx.fillText('BASE', PAD+560, y);
+    ctx.fillText('MULT', PAD+660, y);
+    ctx.fillText('FINAL', W-PAD-14, y);
+    y += 8;
+    ctx.strokeStyle = '#e5e7eb';
+    ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W-PAD, y); ctx.stroke();
+    y += 22;
+
+    picked.forEach(p => {
+      const isC = myTeam.captain === p.id, isVC = myTeam.viceCaptain === p.id;
+      const mult = isC ? 2 : isVC ? 1.5 : 1;
+      const finalPts = Math.round((p.points||0) * mult);
+      const tag = isC ? ' (C)' : isVC ? ' (VC)' : '';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = dark;
+      ctx.font = '600 15px Arial, sans-serif';
+      ctx.fillText((p.name||'—') + tag, PAD+14, y);
+      ctx.fillStyle = dim;
+      ctx.font = '400 13px Arial, sans-serif';
+      ctx.fillText(p.role||'—', PAD+430, y);
+      ctx.textAlign = 'right';
+      ctx.fillText(String(p.points||0), PAD+560, y);
+      ctx.fillText(mult+'x', PAD+660, y);
+      ctx.fillStyle = finalPts>0 ? green : dim;
+      ctx.font = '700 15px Arial, sans-serif';
+      ctx.fillText(String(finalPts), W-PAD-14, y);
+      y += 40;
+    });
+    y += 6;
+    ctx.strokeStyle = '#e2e8f0';
+    ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W-PAD, y); ctx.stroke();
+    y += 36;
+  }
+
+  // ── Top Leaderboard ──
+  ctx.textAlign = 'left';
+  ctx.fillStyle = dark;
+  ctx.font = '800 22px Arial, sans-serif';
+  ctx.fillText(`🏅 Top Leaderboard (${teams.length} teams)`, PAD, y);
+  y += 30;
+
+  ctx.fillStyle = dim;
+  ctx.font = '700 13px Arial, sans-serif';
+  ctx.fillText('RANK', PAD+14, y);
+  ctx.fillText('PLAYER', PAD+90, y);
+  ctx.textAlign = 'right';
+  ctx.fillText('POINTS', W-PAD-14, y);
+  y += 8;
+  ctx.strokeStyle = '#e5e7eb';
+  ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W-PAD, y); ctx.stroke();
+  y += 26;
+
+  topN.forEach((t, i) => {
+    const u = users[t.userEmail];
+    const isMe = t.userEmail === currentUser.email;
+    if (i === 0) { ctx.fillStyle = '#fff7e0'; ctx.fillRect(PAD, y-22, W-PAD*2, 34); }
+    else if (isMe) { ctx.fillStyle = '#eff6ff'; ctx.fillRect(PAD, y-22, W-PAD*2, 34); }
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = i===0?gold:i===1?'#94a3b8':i===2?'#d97706':dark;
+    ctx.font = i<3 ? '800 17px Arial, sans-serif' : '600 16px Arial, sans-serif';
+    ctx.fillText(`#${i+1}`, PAD+14, y);
+    ctx.fillStyle = dark;
+    ctx.font = '600 16px Arial, sans-serif';
+    ctx.fillText(`${u?.name||'Unknown'}${isMe?' (You)':''}`, PAD+90, y);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = isMe ? blue : dark;
+    ctx.font = '800 17px Arial, sans-serif';
+    ctx.fillText(String(t.totalPoints||0), W-PAD-14, y);
+    y += 46;
+  });
+
+  // ── Footer ──
+  ctx.textAlign = 'center';
+  ctx.fillStyle = dim;
+  ctx.font = '400 13px Arial, sans-serif';
+  ctx.fillText('Akmal Dream 11 Pak — ' + (typeof APP_URL!=='undefined'?APP_URL:''), W/2, H-16);
+
+  return await new Promise(resolve => canvas.toBlob(resolve, 'image/png', 0.95));
+}
+
+function _roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r);
+  ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r);
+  ctx.arcTo(x, y, x+w, y, r);
+  ctx.closePath();
+}
+
+async function d11ShareResultPdfWhatsApp(matchId, evt) {
+  const m = matches[matchId];
+  const btn = (evt || window.event)?.currentTarget;
+  if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+  try {
+    const blob = await d11GenerateResultImageBlob(matchId);
+    if (!blob) return;
+    const fileName = _d11ResultImageFileName(m);
+    const teamA = m?.teamA||'Team A', teamB = m?.teamB||'Team B';
+    const shareText = `🏏 ${teamA} vs ${teamB} — Match Result! 🏁`;
+    const file = new File([blob], fileName, { type: 'image/png' });
+
+    // Preferred path: Web Share API Level 2 (file sharing) — puts the image
+    // directly into the native share sheet (WhatsApp shows up as one tap).
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: shareText, text: shareText });
+      showNotif('📤 Shared!');
+      return;
+    }
+
+    // Fallback (desktop / unsupported browsers): download the image, then
+    // open WhatsApp Web with a text message so the user can attach it manually.
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fileName;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    showNotif('🖼️ Image downloaded! Opening WhatsApp — attach the image from your Downloads/Gallery to send it 📲');
+    const msg = `${shareText}\n\nDekho leaderboard aur apni team ke points — image attach hai! 🖼️\n\n🌐 ${typeof APP_URL!=='undefined'?APP_URL:''}\n\n_Akmal Dream 11 Pak_ 🇵🇰🏆`;
+    setTimeout(() => { window.open('https://wa.me/?text=' + encodeURIComponent(msg), '_blank'); }, 400);
+  } catch(e) {
+    if (e?.name !== 'AbortError') { // user cancelling the native share sheet is not an error
+      console.error(e);
+      showNotif('Could not generate the result image — please try again', 'error');
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+  }
 }
 
 // ── Screen shown right after a user submits their Dream11 team —
@@ -17647,7 +17884,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "1.5.0";
+const APP_VERSION = "1.6.1";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
