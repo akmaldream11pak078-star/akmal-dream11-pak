@@ -5287,77 +5287,109 @@ function d11SyncPlayerToTeamSquad(teamName, playerName, role) {
 
 // Fixed cricket scoring rules (auto-calculated from raw stats)
 // ── Dream11 Scoring — per format ──
+// ── My11Circle Official Fantasy Points System (New system, effective 17 Apr 2025) ──
+// Source: https://www.my11circle.com/points-system.html
 const D11_SCORING = {
   T20: {
     label: 'T20',
     perRun: 1,
-    boundary4Bonus: 1,
-    boundary6Bonus: 2,
-    half50Bonus: 8,
-    century100Bonus: 16,
+    boundary4Bonus: 4,
+    boundary6Bonus: 6,
+    runMilestones: [ { min:25, pts:4 }, { min:50, pts:8 }, { min:75, pts:12 }, { min:100, pts:16 } ],
     duckPenalty: -2,
-    // Strike Rate bonus/penalty (min 10 balls faced)
-    srBonus:    { above170: 6,  above150: 4,  above130: 2 },
-    srPenalty:  { below60: -6,  below70: -4,  below80: -2 },
+    srMinRuns: 20,
     srMinBalls: 10,
-    perWicket: 25,
-    threeWicketBonus: 8,
-    fiveWicketBonus: 16,
-    maidenOverBonus: 8,
-    // Economy Rate bonus/penalty (min 2 overs)
-    erBonus:    { below5: 6,   below6: 4,   below7: 2 },
-    erPenalty:  { above12: -6, above11: -4, above10: -2 },
+    srBands: [
+      { max:50,        pts:-6 },
+      { max:60,        pts:-4 },
+      { max:70,        pts:-2 },
+      { max:130,       pts:0  },
+      { max:150,       pts:2  },
+      { max:170,       pts:4  },
+      { max:Infinity,  pts:6  }
+    ],
+    perWicket: 30,
+    lbwBowledBonus: 8,
+    maidenOverBonus: 12,
+    wicketHaulBonus: [ { min:5, pts:12 }, { min:4, pts:8 }, { min:3, pts:4 } ],
     erMinOvers: 2,
+    erBands: [
+      { max:5,        pts:6  },
+      { max:6,        pts:4  },
+      { max:7,        pts:2  },
+      { max:10,       pts:0  },
+      { max:11,       pts:-2 },
+      { max:12,       pts:-4 },
+      { max:Infinity, pts:-6 }
+    ],
     perCatch: 8,
+    catch3Bonus: 4,
     perStumping: 12,
-    perRunOut: 12
+    perRunOutDirect: 12,
+    perRunOutIndirect: 6,
+    playingXIBonus: 4
   },
   ODI: {
     label: 'ODI',
     perRun: 1,
-    boundary4Bonus: 1,
-    boundary6Bonus: 2,
-    half50Bonus: 4,
-    century100Bonus: 8,
+    boundary4Bonus: 4,
+    boundary6Bonus: 6,
+    runMilestones: [ { min:25, pts:4 }, { min:50, pts:8 }, { min:75, pts:12 }, { min:100, pts:16 }, { min:125, pts:20 }, { min:150, pts:24 } ],
     duckPenalty: -3,
-    srBonus:    { above140: 6,  above120: 4,  above100: 2 },
-    srPenalty:  { below40: -6,  below50: -4,  below60: -2 },
-    srMinBalls: 20,
-    perWicket: 25,
-    threeWicketBonus: 4,
-    fiveWicketBonus: 8,
+    srMinRuns: 20,
+    srMinBalls: 10,
+    srBands: [
+      { max:30,        pts:-6 },
+      { max:40,        pts:-4 },
+      { max:50,        pts:-2 },
+      { max:100,       pts:0  },
+      { max:120,       pts:2  },
+      { max:140,       pts:4  },
+      { max:Infinity,  pts:6  }
+    ],
+    perWicket: 30,
+    lbwBowledBonus: 8,
     maidenOverBonus: 4,
-    erBonus:    { below2_5: 6,  below3_5: 4,  below4_5: 2 },
-    erPenalty:  { above9: -6,   above8: -4,   above7: -2 },
-    erMinOvers: 4,
+    wicketHaulBonus: [ { min:6, pts:12 }, { min:5, pts:8 }, { min:4, pts:4 } ],
+    erMinOvers: 5,
+    erBands: [
+      { max:2.5,      pts:6  },
+      { max:3.5,      pts:4  },
+      { max:4.5,      pts:2  },
+      { max:7,        pts:0  },
+      { max:8,        pts:-2 },
+      { max:9,        pts:-4 },
+      { max:Infinity, pts:-6 }
+    ],
     perCatch: 8,
+    catch3Bonus: 4,
     perStumping: 12,
-    perRunOut: 12
+    perRunOutDirect: 12,
+    perRunOutIndirect: 6,
+    playingXIBonus: 4
   },
   Test: {
     label: 'Test',
     perRun: 1,
-    boundary4Bonus: 1,
-    boundary6Bonus: 2,
-    half50Bonus: 4,
-    century100Bonus: 8,
+    boundary4Bonus: 4,
+    boundary6Bonus: 6,
+    runMilestones: [ { min:25, pts:4 }, { min:50, pts:8 }, { min:75, pts:12 }, { min:100, pts:16 }, { min:125, pts:20 }, { min:150, pts:24 } ],
     duckPenalty: -4,
-    srBonus:    {},  // No SR bonus/penalty in Test
-    srPenalty:  {},
-    srMinBalls: 999,
-    perWicket: 16,
-    threeWicketBonus: 4,
-    fiveWicketBonus: 8,
-    maidenOverBonus: 4,
-    erBonus:    {},  // No ER bonus/penalty in Test
-    erPenalty:  {},
+    srBands: null,
+    srMinRuns: null,
+    srMinBalls: null,
+    perWicket: 20,
+    lbwBowledBonus: 8,
+    maidenOverBonus: 0,
+    wicketHaulBonus: [ { min:6, pts:12 }, { min:5, pts:8 }, { min:4, pts:4 } ],
     erMinOvers: 999,
+    erBands: null,
     perCatch: 8,
+    catch3Bonus: 0,
     perStumping: 12,
-    perRunOut: 12,
-    // Test bonuses
-    halfCenturyBatBonus: 4,  // included in half50Bonus
-    tenWicketMatchBonus: 8   // 10 wickets in a match
+    perRunOutDirect: 12,
+    perRunOutIndirect: 6,
+    playingXIBonus: 4
   }
 };
 
@@ -5369,39 +5401,26 @@ function getD11Scoring(matchId) {
 
 function renderD11PointsTable(fmt) {
   const s = D11_SCORING[fmt] || D11_SCORING.T20;
-  const row = (label, val, neg) => `<div style="color:var(--dim)">${label}</div><div style="color:${neg?'#f87171':'#4ade80'};font-weight:700">${neg?'':'+'}${val} pts</div>`;
+  const row = (label, val, neg) => `<div style="color:var(--dim)">${label}</div><div style="color:${neg||val<0?'#f87171':'#4ade80'};font-weight:700">${(!neg&&val>=0)?'+':''}${val} pts</div>`;
   const hdr = (label) => `<div style="color:var(--dim);font-weight:700;padding:6px 0;border-top:1px solid rgba(255,255,255,0.07);grid-column:1/-1">${label}</div>`;
 
-  const srRows = s.srMinBalls < 999 ? `
-    ${hdr('⚡ STRIKE RATE (min ${s.srMinBalls} balls)')}
-    ${s.srBonus.above170 ? row('SR > 170', s.srBonus.above170) : ''}
-    ${s.srBonus.above150 ? row('SR > 150', s.srBonus.above150) : ''}
-    ${s.srBonus.above130 ? row('SR > 130', s.srBonus.above130) : ''}
-    ${s.srBonus.above140 ? row('SR > 140', s.srBonus.above140) : ''}
-    ${s.srBonus.above120 ? row('SR > 120', s.srBonus.above120) : ''}
-    ${s.srBonus.above100 ? row('SR > 100', s.srBonus.above100) : ''}
-    ${s.srPenalty.below60 ? row('SR < 60', s.srPenalty.below60, true) : ''}
-    ${s.srPenalty.below70 ? row('SR < 70', s.srPenalty.below70, true) : ''}
-    ${s.srPenalty.below80 ? row('SR < 80', s.srPenalty.below80, true) : ''}
-    ${s.srPenalty.below40 ? row('SR < 40', s.srPenalty.below40, true) : ''}
-    ${s.srPenalty.below50 ? row('SR < 50', s.srPenalty.below50, true) : ''}
+  const milestoneRows = (s.runMilestones||[]).map(m => row(`${m.min} Runs Bonus`, m.pts)).join('');
+
+  const srLabelFor = (i, bands) => {
+    if (i === 0) return `Less than ${bands[0].max}`;
+    if (i === bands.length - 1) return `${bands[i-1].max} and above`;
+    return `${bands[i-1].max} to ${bands[i].max}`;
+  };
+  const srRows = s.srBands ? `
+    ${hdr(`⚡ STRIKE RATE (min ${s.srMinRuns} runs OR ${s.srMinBalls} balls)`)}
+    ${s.srBands.map((b,i) => row(srLabelFor(i, s.srBands), b.pts)).join('')}
   ` : `${hdr('⚡ STRIKE RATE')}<div style="grid-column:1/-1;color:var(--dim);font-size:11px">No SR bonus/penalty in Test cricket</div>`;
 
-  const erMinLabel = s.erMinOvers < 999 ? `min ${s.erMinOvers} overs` : '';
-  const erRows = s.erMinOvers < 999 ? `
-    ${hdr(`📊 ECONOMY RATE (${erMinLabel})`)}
-    ${s.erBonus.below5 ? row('ER < 5', s.erBonus.below5) : ''}
-    ${s.erBonus.below6 ? row('ER < 6', s.erBonus.below6) : ''}
-    ${s.erBonus.below7 ? row('ER < 7', s.erBonus.below7) : ''}
-    ${s.erBonus.below2_5 ? row('ER < 2.5', s.erBonus.below2_5) : ''}
-    ${s.erBonus.below3_5 ? row('ER < 3.5', s.erBonus.below3_5) : ''}
-    ${s.erBonus.below4_5 ? row('ER < 4.5', s.erBonus.below4_5) : ''}
-    ${s.erPenalty.above12 ? row('ER > 12', s.erPenalty.above12, true) : ''}
-    ${s.erPenalty.above11 ? row('ER > 11', s.erPenalty.above11, true) : ''}
-    ${s.erPenalty.above10 ? row('ER > 10', s.erPenalty.above10, true) : ''}
-    ${s.erPenalty.above9 ? row('ER > 9', s.erPenalty.above9, true) : ''}
-    ${s.erPenalty.above8 ? row('ER > 8', s.erPenalty.above8, true) : ''}
-    ${s.erPenalty.above7 ? row('ER > 7', s.erPenalty.above7, true) : ''}
+  const wicketHaulRows = (s.wicketHaulBonus||[]).slice().sort((a,b)=>a.min-b.min).map(w => row(`${w.min}-Wicket Haul Bonus`, w.pts)).join('');
+
+  const erRows = s.erBands ? `
+    ${hdr(`📊 ECONOMY RATE (min ${s.erMinOvers} overs)`)}
+    ${s.erBands.map((b,i) => row(srLabelFor(i, s.erBands), b.pts)).join('')}
   ` : `${hdr('📊 ECONOMY RATE')}<div style="grid-column:1/-1;color:var(--dim);font-size:11px">No ER bonus/penalty in Test cricket</div>`;
 
   return `<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px">
@@ -5409,24 +5428,27 @@ function renderD11PointsTable(fmt) {
     ${row('Per Run', s.perRun)}
     ${row('4 Boundary Bonus', s.boundary4Bonus)}
     ${row('6 Boundary Bonus', s.boundary6Bonus)}
-    ${row('Half Century (50+)', s.half50Bonus)}
-    ${row('Century (100+)', s.century100Bonus)}
-    ${row('Duck (0 & out)', Math.abs(s.duckPenalty), true)}
+    ${milestoneRows}
+    ${row('Dismissal for Duck (excl. bowlers)', s.duckPenalty, true)}
     ${srRows}
     ${hdr('🎳 BOWLING')}
-    ${row('Per Wicket', s.perWicket)}
-    ${row('3-Wicket Haul Bonus', s.threeWicketBonus)}
-    ${row('5-Wicket Haul Bonus', s.fiveWicketBonus)}
-    ${row('Maiden Over', s.maidenOverBonus)}
+    ${row('Wicket (except run-out)', s.perWicket)}
+    ${s.maidenOverBonus ? row('Maiden Over Bonus', s.maidenOverBonus) : ''}
+    ${row('LBW / Bowled Bonus', s.lbwBowledBonus)}
+    ${wicketHaulRows}
     ${erRows}
     ${hdr('🧤 FIELDING')}
     ${row('Catch', s.perCatch)}
+    ${s.catch3Bonus ? row('3 Catch Bonus', s.catch3Bonus) : ''}
     ${row('Stumping', s.perStumping)}
-    ${row('Run-out', s.perRunOut)}
-    ${hdr('👑 CAPTAIN / VC')}
-    <div style="color:var(--dim)">Captain</div><div style="color:var(--gold);font-weight:700">2× points</div>
-    <div style="color:var(--dim)">Vice-Captain</div><div style="color:#60a5fa;font-weight:700">1.5× points</div>
-  </div>`;
+    ${row('Run-out (Direct)', s.perRunOutDirect)}
+    ${row('Run-out (Multiple players)', s.perRunOutIndirect)}
+    ${hdr('👑 OTHERS')}
+    <div style="color:var(--dim)">Playing XI Bonus</div><div style="color:#4ade80;font-weight:700">+${s.playingXIBonus} pts</div>
+    <div style="color:var(--dim)">Captain Multiplier</div><div style="color:var(--gold);font-weight:700">2× points</div>
+    <div style="color:var(--dim)">Vice-Captain Multiplier</div><div style="color:#60a5fa;font-weight:700">1.5× points</div>
+  </div>
+  <div style="margin-top:10px;font-size:10.5px;color:var(--dim);line-height:1.5">⭐ My11Circle official points system (updated 17 Apr 2025) · Super over points not calculated</div>`;
 }
 
 function calcDream11PlayerPoints(stats, matchId) {
@@ -5444,60 +5466,64 @@ function calcDream11PlayerPoints(stats, matchId) {
   const isOut = !!stats.isOut;
   const ballsFaced = Number(stats.ballsFaced)||0;
   const oversBowled = Number(stats.oversBowled)||0;
+  const isPlayingXI = stats.isPlayingXI !== false; // default true if not tracked
+
+  // Playing XI bonus (My11Circle: +4 for making the Playing XI)
+  if (isPlayingXI) pts += s.playingXIBonus || 0;
 
   // Batting
   pts += runs * s.perRun;
   pts += fours * s.boundary4Bonus;
   pts += sixes * s.boundary6Bonus;
-  if (runs >= 100) pts += s.century100Bonus;
-  else if (runs >= 50) pts += s.half50Bonus;
+  // Run milestones — only the HIGHEST milestone reached counts (no stacking)
+  if (s.runMilestones && s.runMilestones.length) {
+    let best = 0;
+    s.runMilestones.forEach(m => { if (runs >= m.min && m.pts > best) best = m.pts; });
+    pts += best;
+  }
   if (runs === 0 && isOut && ballsFaced > 0) pts += s.duckPenalty;
 
-  // Strike Rate (only if enough balls faced)
-  if (ballsFaced >= s.srMinBalls) {
+  // Strike Rate (only if min runs OR min balls met, per My11Circle rule)
+  if (s.srBands && (runs >= s.srMinRuns || ballsFaced >= s.srMinBalls) && ballsFaced > 0) {
     const sr = (runs / ballsFaced) * 100;
-    if (s.srBonus.above170 && sr > 170) pts += s.srBonus.above170;
-    else if (s.srBonus.above150 && sr > 150) pts += s.srBonus.above150;
-    else if (s.srBonus.above130 && sr > 130) pts += s.srBonus.above130;
-    else if (s.srBonus.above140 && sr > 140) pts += s.srBonus.above140;
-    else if (s.srBonus.above120 && sr > 120) pts += s.srBonus.above120;
-    else if (s.srBonus.above100 && sr > 100) pts += s.srBonus.above100;
-    if (s.srPenalty.below60 && sr < 60) pts += s.srPenalty.below60;
-    else if (s.srPenalty.below70 && sr < 70) pts += s.srPenalty.below70;
-    else if (s.srPenalty.below80 && sr < 80) pts += s.srPenalty.below80;
-    else if (s.srPenalty.below40 && sr < 40) pts += s.srPenalty.below40;
-    else if (s.srPenalty.below50 && sr < 50) pts += s.srPenalty.below50;
+    for (const band of s.srBands) {
+      if (sr < band.max) { pts += band.pts; break; }
+    }
   }
 
   // Bowling
   pts += wickets * s.perWicket;
-  if (wickets >= 5) pts += s.fiveWicketBonus;
-  else if (wickets >= 3) pts += s.threeWicketBonus;
-  pts += maidens * s.maidenOverBonus;
+  // Wicket haul bonus — only the HIGHEST haul reached counts (no stacking)
+  if (s.wicketHaulBonus && s.wicketHaulBonus.length) {
+    let best = 0;
+    s.wicketHaulBonus.forEach(w => { if (wickets >= w.min && w.pts > best) best = w.pts; });
+    pts += best;
+  }
+  pts += maidens * (s.maidenOverBonus || 0);
+  // LBW/Bowled dismissal bonus — admin enters count of wickets taken via LBW or Bowled
+  const lbwBowled = Number(stats.lbwBowled)||0;
+  pts += lbwBowled * (s.lbwBowledBonus || 0);
+  // Note: dot-ball bonus requires ball-by-ball data that this app does not
+  // currently track per player, so it is not applied here even though it
+  // is part of the official My11Circle system (see Points System info card).
 
   // Economy Rate (only if enough overs bowled)
   const overs = oversBowled;
-  if (overs >= s.erMinOvers) {
+  if (s.erBands && overs >= s.erMinOvers) {
     const runsGiven = Number(stats.runsGiven)||0;
     const er = runsGiven / overs;
-    if (s.erBonus.below5 && er < 5) pts += s.erBonus.below5;
-    else if (s.erBonus.below6 && er < 6) pts += s.erBonus.below6;
-    else if (s.erBonus.below7 && er < 7) pts += s.erBonus.below7;
-    else if (s.erBonus.below2_5 && er < 2.5) pts += s.erBonus.below2_5;
-    else if (s.erBonus.below3_5 && er < 3.5) pts += s.erBonus.below3_5;
-    else if (s.erBonus.below4_5 && er < 4.5) pts += s.erBonus.below4_5;
-    if (s.erPenalty.above12 && er > 12) pts += s.erPenalty.above12;
-    else if (s.erPenalty.above11 && er > 11) pts += s.erPenalty.above11;
-    else if (s.erPenalty.above10 && er > 10) pts += s.erPenalty.above10;
-    else if (s.erPenalty.above9 && er > 9) pts += s.erPenalty.above9;
-    else if (s.erPenalty.above8 && er > 8) pts += s.erPenalty.above8;
-    else if (s.erPenalty.above7 && er > 7) pts += s.erPenalty.above7;
+    for (const band of s.erBands) {
+      if (er < band.max) { pts += band.pts; break; }
+    }
   }
 
   // Fielding
   pts += catches * s.perCatch;
+  if (s.catch3Bonus && catches >= 3) pts += s.catch3Bonus;
   pts += stumpings * s.perStumping;
-  pts += runOuts * s.perRunOut;
+  // Run-outs: this app doesn't distinguish direct vs multi-player run-outs,
+  // so all tracked run-outs use the Direct rate.
+  pts += runOuts * s.perRunOutDirect;
 
   return Math.round(pts);
 }
@@ -5930,6 +5956,41 @@ function d11EditDeadline(matchId) {
   _saveMatchToFirestore(matchId, m);
   render();
   showNotif('✅ Deadline updated: ' + pkDateTimeYear(parsed));
+}
+
+// ── Admin: change a Dream11 match's cricket format (T20/ODI/Test) even after
+// the match has been published. Works whether or not the match is scored —
+// changing format re-runs the scoring formula for every player already
+// entered, since T20/ODI/Test each use different points values (see
+// D11_SCORING). Safe to use any time; does NOT touch players, teams, or
+// publish/lock state, only the format tag + recalculated points. ──
+function d11EditFormat(matchId) {
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m) return;
+  const current = m.format || 'T20';
+  const options = ['T20', 'ODI', 'Test'];
+  const nextIdx = (options.indexOf(current) + 1) % options.length;
+  const suggested = options[nextIdx];
+  const newVal = prompt(`Match Format — type T20, ODI, or Test:\nCurrent: ${current}`, suggested);
+  if (!newVal) return;
+  const clean = options.find(o => o.toLowerCase() === newVal.trim().toLowerCase());
+  if (!clean) { showNotif('Invalid format — type exactly T20, ODI, or Test', 'error'); return; }
+  if (clean === current) { showNotif('Format unchanged'); return; }
+  if (!confirm(`Change format from ${current} to ${clean}?\n\nThis will recalculate every player's fantasy points using ${clean} scoring rules (per-run/wicket bonuses, milestones, SR/ER bands etc. all differ by format).`)) return;
+  m.format = clean;
+  _saveMatchToFirestore(matchId, m);
+  if (d11m) {
+    // Recalculate every player's points under the new format's scoring rules
+    (d11m.players || []).forEach(p => {
+      if (p.stats) p.points = calcDream11PlayerPoints(p.stats, matchId);
+    });
+    recalcDream11MatchPoints(d11m);
+    _saveDream11MatchToFirestore(matchId, d11m);
+    d11RefreshLiveTeamPoints(matchId);
+  }
+  render();
+  showNotif(`✅ Format changed to ${clean} — all points recalculated`);
 }
 
 function openDream11Match(matchId) {
@@ -7420,7 +7481,7 @@ function d11SaveStatsForPlayer(playerId) {
     isOut: isOutEl ? isOutEl.checked : false,
     wickets: get('wickets'), maidens: get('maidens'),
     catches: get('catches'), stumpings: get('stumpings'), runOuts: get('runOuts'),
-    oversBowled: get('oversBowled'), runsGiven: get('runsGiven')
+    oversBowled: get('oversBowled'), runsGiven: get('runsGiven'), lbwBowled: get('lbwBowled')
   };
   p.points = calcDream11PlayerPoints(p.stats, d11ActiveMatchId);
   const s = p.stats;
@@ -7451,7 +7512,7 @@ function utSaveStatsForPlayer(playerId) {
     isOut: isOutEl ? isOutEl.checked : false,
     wickets: get('wickets'), maidens: get('maidens'),
     catches: get('catches'), stumpings: get('stumpings'), runOuts: get('runOuts'),
-    oversBowled: get('oversBowled'), runsGiven: get('runsGiven')
+    oversBowled: get('oversBowled'), runsGiven: get('runsGiven'), lbwBowled: get('lbwBowled')
   };
   p.points = calcUtPlayerPoints(p.stats, m.id);
   _utRecalcAndSaveTeams(m);
@@ -7479,7 +7540,7 @@ function utQuickSaveAllStats() {
       isOut: isOutEl ? isOutEl.checked : false,
       wickets: gn('wickets'), maidens: gn('maidens'),
       catches: gn('catches'), stumpings: gn('stumpings'), runOuts: gn('runOuts'),
-      oversBowled: gn('overs'), runsGiven: gn('runsGiven')
+      oversBowled: gn('overs'), runsGiven: gn('runsGiven'), lbwBowled: gn('lbwb')
     };
     p.points = calcUtPlayerPoints(p.stats, mid);
   });
@@ -7518,6 +7579,7 @@ function utScoringRow(p) {
       <div><label class="label" style="font-size:10px">Catches</label><input class="input" style="padding:9px" type="number" min="0" id="ut-stat-${p.id}-catches" value="${s.catches??''}" /></div>
       <div><label class="label" style="font-size:10px">Stumpings</label><input class="input" style="padding:9px" type="number" min="0" id="ut-stat-${p.id}-stumpings" value="${s.stumpings??''}" /></div>
       <div><label class="label" style="font-size:10px">Run-outs</label><input class="input" style="padding:9px" type="number" min="0" id="ut-stat-${p.id}-runOuts" value="${s.runOuts??''}" /></div>
+      <div><label class="label" style="font-size:10px">LBW/Bowled Wkts</label><input class="input" style="padding:9px" type="number" min="0" id="ut-stat-${p.id}-lbwBowled" value="${s.lbwBowled??''}" /></div>
     </div>
     <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dim);margin-bottom:10px">
       <input type="checkbox" id="ut-stat-${p.id}-isOut" ${s.isOut?'checked':''} style="width:16px;height:16px" /> Player got out (for duck/0-run check)
@@ -7549,7 +7611,7 @@ function d11GridReadRow(playerId) {
     isOut: outEl ? outEl.checked : false,
     wickets: get('wkts'), maidens: get('maidens'),
     catches: get('catches'), stumpings: get('stump'), runOuts: get('runouts'),
-    oversBowled: getFloat('overs'), runsGiven: get('runsgiven')
+    oversBowled: getFloat('overs'), runsGiven: get('runsgiven'), lbwBowled: get('lbwb')
   };
 }
 
@@ -7694,12 +7756,17 @@ function _d11ParseColumnarScorecard(text) {
   // A pure-number line (int or decimal) — used to detect bowling rows (O M R W NB WD ECO, all numeric)
   const numRe = /^-?\d+(\.\d+)?$/;
 
+  const lbwBowledCredits = {}; // bowler name (lowercase) -> count of LBW/Bowled wickets
+
   const extractFielding = (dismissal) => {
     if (!dismissal) return;
     const stMatch = dismissal.match(/^st\s+(.+?)\s+b\s+/i);
     const runOutMatch = dismissal.match(/run\s*out\s*\(([^)]+)\)/i);
     const catchAndBowlMatch = /^c\s*&\s*b\s+(.+)$/i.test(dismissal.trim());
     const catchMatch = !catchAndBowlMatch && dismissal.match(/^c\s+(.+?)\s+b\s+/i);
+    // "lbw b BOWLER" (LBW) or plain "b BOWLER" (Bowled) — NOT "c X b Y", "st X b Y", "c & b Y"
+    const lbwMatch = dismissal.match(/^lbw\s+b\s+(.+)$/i);
+    const bowledMatch = !lbwMatch && dismissal.match(/^b\s+(.+)$/i);
     if (stMatch) {
       fieldingRows.push({ name: stMatch[1].trim(), catches: 0, stumpings: 1, runOuts: 0 });
     } else if (runOutMatch) {
@@ -7711,6 +7778,12 @@ function _d11ParseColumnarScorecard(text) {
       if (bowlerName) fieldingRows.push({ name: bowlerName, catches: 1, stumpings: 0, runOuts: 0 });
     } else if (catchMatch) {
       fieldingRows.push({ name: catchMatch[1].trim(), catches: 1, stumpings: 0, runOuts: 0 });
+    } else if (lbwMatch) {
+      const bowlerName = lbwMatch[1].trim().toLowerCase();
+      lbwBowledCredits[bowlerName] = (lbwBowledCredits[bowlerName] || 0) + 1;
+    } else if (bowledMatch) {
+      const bowlerName = bowledMatch[1].trim().toLowerCase();
+      lbwBowledCredits[bowlerName] = (lbwBowledCredits[bowlerName] || 0) + 1;
     }
   };
 
@@ -7782,7 +7855,8 @@ function _d11ParseColumnarScorecard(text) {
       const nums = [];
       while (i < lines.length && numRe.test(lines[i]) && nums.length < 7) { nums.push(flt(lines[i])); i++; }
       const [o=0, m=0, r=0, w=0] = nums; // NB/WD/ECO (indices 4,5,6) not needed for points
-      bowlingRows.push({ name, oversBowled: o, maidens: num(String(m)), runsGiven: num(String(r)), wickets: num(String(w)) });
+      const lbwBowled = lbwBowledCredits[name.toLowerCase()] || 0;
+      bowlingRows.push({ name, oversBowled: o, maidens: num(String(m)), runsGiven: num(String(r)), wickets: num(String(w)), lbwBowled });
       continue;
     }
 
@@ -8011,7 +8085,7 @@ function _d11ApplyParsedRows(battingRows, bowlingRows, fieldingRows) {
     const p = findPlayer(row.name);
     if (!p) { unmatched.push(row.name); return; }
     const prev = p.stats || {};
-    p.stats = { ...prev, wickets: row.wickets||0, maidens: row.maidens||0, oversBowled: row.oversBowled||0, runsGiven: row.runsGiven||0 };
+    p.stats = { ...prev, wickets: row.wickets||0, maidens: row.maidens||0, oversBowled: row.oversBowled||0, runsGiven: row.runsGiven||0, lbwBowled: row.lbwBowled||0 };
     matchedPlayerIds.add(p.id);
   });
   // Fielding (catches/stumpings/run-outs) comes from this same scan/source as a fresh,
@@ -8044,7 +8118,7 @@ function _d11ApplyParsedRows(battingRows, bowlingRows, fieldingRows) {
       runs: s.runs||0, ballsFaced: s.ballsFaced||0, fours: s.fours||0, sixes: s.sixes||0,
       isOut: !!s.isOut, wickets: s.wickets||0, maidens: s.maidens||0,
       catches: s.catches||0, stumpings: s.stumpings||0, runOuts: s.runOuts||0,
-      oversBowled: s.oversBowled||0, runsGiven: s.runsGiven||0
+      oversBowled: s.oversBowled||0, runsGiven: s.runsGiven||0, lbwBowled: s.lbwBowled||0
     };
     p.points = calcDream11PlayerPoints(p.stats, d11ActiveMatchId);
   });
@@ -8268,7 +8342,7 @@ function _d11BuildReviewRows(battingRows, bowlingRows, fieldingRows) {
         matched: !!p,
         runs: 0, ballsFaced: 0, fours: 0, sixes: 0, isOut: false,
         wickets: 0, maidens: 0, oversBowled: 0, runsGiven: 0,
-        catches: 0, stumpings: 0, runOuts: 0
+        catches: 0, stumpings: 0, runOuts: 0, lbwBowled: 0
       };
       order.push(key);
     }
@@ -8281,7 +8355,7 @@ function _d11BuildReviewRows(battingRows, bowlingRows, fieldingRows) {
   });
   (bowlingRows||[]).forEach(row => {
     const r = touch(row.name);
-    r.wickets = row.wickets||0; r.maidens = row.maidens||0; r.oversBowled = row.oversBowled||0; r.runsGiven = row.runsGiven||0;
+    r.wickets = row.wickets||0; r.maidens = row.maidens||0; r.oversBowled = row.oversBowled||0; r.runsGiven = row.runsGiven||0; r.lbwBowled = row.lbwBowled||0;
   });
   (fieldingRows||[]).forEach(row => {
     const r = touch(row.name);
@@ -8326,7 +8400,7 @@ function d11ReviewConfirmApply() {
   d11ScanReview.rows.forEach(row => {
     const name = row.displayName;
     battingRows.push({ name, runs: row.runs||0, ballsFaced: row.ballsFaced||0, fours: row.fours||0, sixes: row.sixes||0, isOut: !!row.isOut });
-    bowlingRows.push({ name, wickets: row.wickets||0, maidens: row.maidens||0, oversBowled: row.oversBowled||0, runsGiven: row.runsGiven||0 });
+    bowlingRows.push({ name, wickets: row.wickets||0, maidens: row.maidens||0, oversBowled: row.oversBowled||0, runsGiven: row.runsGiven||0, lbwBowled: row.lbwBowled||0 });
     fieldingRows.push({ name, catches: row.catches||0, stumpings: row.stumpings||0, runOuts: row.runOuts||0 });
   });
 
@@ -11111,6 +11185,10 @@ function renderDream11Hub() {
           <span style="font-size:11px;color:var(--orange);flex:1">⏰ Deadline: ${deadlineStr}${dLocked && !d11m?.locked ? ' (auto-locked)' : ''}</span>
           <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11EditDeadline('${m.id}')">✏️ Change</button>
         </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:var(--input-bg);border-radius:8px;padding:8px 10px">
+          <span style="font-size:11px;color:#fbbf24;flex:1">🏏 Format: ${m.format||'T20'}</span>
+          <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11EditFormat('${m.id}')">✏️ Change</button>
+        </div>
         <button class="btn-primary btn-block" style="font-size:12px;padding:10px;margin-bottom:8px;background:${d11m?.published ? 'linear-gradient(135deg,#dc2626,#b91c1c)' : 'linear-gradient(135deg,#16a34a,#15803d)'}" onclick="d11TogglePublish('${m.id}')">${d11m?.published ? '🚫 Unpublish (hide from users)' : '🚀 Publish (show to users)'}</button>
         <div style="display:flex;gap:8px">
           <button class="btn-secondary" style="flex:1;font-size:12px;padding:10px" onclick="openDream11Match('${m.id}')">⚙️ Manage Pool</button>
@@ -12232,6 +12310,7 @@ function renderD11ScanReview() {
           <div><label class="label" style="font-size:9.5px">Overs</label><input class="input" style="padding:7px" type="number" step="0.1" value="${r.oversBowled}" oninput="d11ReviewUpdateField(${idx},'oversBowled',this.value)" /></div>
           <div><label class="label" style="font-size:9.5px">Maidens</label><input class="input" style="padding:7px" type="number" value="${r.maidens}" oninput="d11ReviewUpdateField(${idx},'maidens',this.value)" /></div>
           <div><label class="label" style="font-size:9.5px">Runs Given</label><input class="input" style="padding:7px" type="number" value="${r.runsGiven}" oninput="d11ReviewUpdateField(${idx},'runsGiven',this.value)" /></div>
+          <div><label class="label" style="font-size:9.5px;color:var(--gold)">LBW/Bwld</label><input class="input" style="padding:7px" type="number" value="${r.lbwBowled||0}" oninput="d11ReviewUpdateField(${idx},'lbwBowled',this.value)" /></div>
           <div><label class="label" style="font-size:9.5px">Catches</label><input class="input" style="padding:7px" type="number" value="${r.catches}" oninput="d11ReviewUpdateField(${idx},'catches',this.value)" /></div>
           <div><label class="label" style="font-size:9.5px">Stumpings</label><input class="input" style="padding:7px" type="number" value="${r.stumpings}" oninput="d11ReviewUpdateField(${idx},'stumpings',this.value)" /></div>
           <div><label class="label" style="font-size:9.5px">Run-outs</label><input class="input" style="padding:7px" type="number" value="${r.runOuts}" oninput="d11ReviewUpdateField(${idx},'runOuts',this.value)" /></div>
@@ -12281,6 +12360,7 @@ function renderUtScanReview() {
           <div><label class="label" style="font-size:9.5px">Overs</label><input class="input" style="padding:7px" type="number" step="0.1" value="${r.oversBowled}" oninput="utReviewUpdateField(${idx},'oversBowled',this.value)" /></div>
           <div><label class="label" style="font-size:9.5px">Maidens</label><input class="input" style="padding:7px" type="number" value="${r.maidens}" oninput="utReviewUpdateField(${idx},'maidens',this.value)" /></div>
           <div><label class="label" style="font-size:9.5px">Runs Given</label><input class="input" style="padding:7px" type="number" value="${r.runsGiven}" oninput="utReviewUpdateField(${idx},'runsGiven',this.value)" /></div>
+          <div><label class="label" style="font-size:9.5px;color:var(--gold)">LBW/Bwld</label><input class="input" style="padding:7px" type="number" value="${r.lbwBowled||0}" oninput="utReviewUpdateField(${idx},'lbwBowled',this.value)" /></div>
           <div><label class="label" style="font-size:9.5px">Catches</label><input class="input" style="padding:7px" type="number" value="${r.catches}" oninput="utReviewUpdateField(${idx},'catches',this.value)" /></div>
           <div><label class="label" style="font-size:9.5px">Stumpings</label><input class="input" style="padding:7px" type="number" value="${r.stumpings}" oninput="utReviewUpdateField(${idx},'stumpings',this.value)" /></div>
           <div><label class="label" style="font-size:9.5px">Run-outs</label><input class="input" style="padding:7px" type="number" value="${r.runOuts}" oninput="utReviewUpdateField(${idx},'runOuts',this.value)" /></div>
@@ -12483,6 +12563,7 @@ function d11GridRow(p) {
       ${cell('catches','Ct',s.catches)}
       ${cell('stump','St',s.stumpings)}
       ${cell('runouts','RO',s.runOuts)}
+      ${cell('lbwb','LBW/Bwld',s.lbwBowled)}
     </div>
     <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dim);margin-top:8px">
       <input type="checkbox" id="d11g-${p.id}-isOut" ${s.isOut?'checked':''} style="width:14px;height:14px" onchange="d11GridPreviewRow('${p.id}')" /> Out (for duck check)
@@ -12514,6 +12595,7 @@ function d11ScoringRow(p) {
       <div><label class="label" style="font-size:10px">Catches</label><input class="input" style="padding:9px" type="number" min="0" id="d11-stat-${p.id}-catches" value="${s.catches??''}" /></div>
       <div><label class="label" style="font-size:10px">Stumpings</label><input class="input" style="padding:9px" type="number" min="0" id="d11-stat-${p.id}-stumpings" value="${s.stumpings??''}" /></div>
       <div><label class="label" style="font-size:10px">Run-outs</label><input class="input" style="padding:9px" type="number" min="0" id="d11-stat-${p.id}-runOuts" value="${s.runOuts??''}" /></div>
+      <div><label class="label" style="font-size:10px">LBW/Bowled Wkts</label><input class="input" style="padding:9px" type="number" min="0" id="d11-stat-${p.id}-lbwBowled" value="${s.lbwBowled??''}" /></div>
     </div>
     <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dim);margin-bottom:10px">
       <input type="checkbox" id="d11-stat-${p.id}-isOut" ${s.isOut?'checked':''} style="width:16px;height:16px" /> Player got out (for duck/0-run check)
@@ -12910,14 +12992,20 @@ function renderDream11ViewTeam() {
     const isOut = s.isOut;
     // Batting pts
     let bPts = runs*sc2.perRun + fours*sc2.boundary4Bonus + sixes*sc2.boundary6Bonus;
-    if (runs>=100) bPts+=sc2.century100Bonus; else if(runs>=50) bPts+=sc2.half50Bonus;
+    bPts += (sc2.runMilestones||[]).reduce((best,mm)=>runs>=mm.min&&mm.pts>best?mm.pts:best,0);
     if (runs===0&&isOut&&balls>0) bPts+=sc2.duckPenalty;
-    if (balls>=sc2.srMinBalls){const sr=(runs/balls)*100;if(sc2.srBonus.above170&&sr>170)bPts+=sc2.srBonus.above170;else if(sc2.srBonus.above150&&sr>150)bPts+=sc2.srBonus.above150;else if(sc2.srBonus.above130&&sr>130)bPts+=sc2.srBonus.above130;if(sc2.srPenalty.below60&&sr<60)bPts+=sc2.srPenalty.below60;else if(sc2.srPenalty.below70&&sr<70)bPts+=sc2.srPenalty.below70;else if(sc2.srPenalty.below80&&sr<80)bPts+=sc2.srPenalty.below80;}
+    if (sc2.srBands && balls>0 && (runs>=sc2.srMinRuns||balls>=sc2.srMinBalls)) {
+      const sr=(runs/balls)*100;
+      for (const band of sc2.srBands) { if (sr < band.max) { bPts += band.pts; break; } }
+    }
     // Bowling pts
-    let wPts = wkts*sc2.perWicket + (wkts>=5?sc2.fiveWicketBonus:wkts>=3?sc2.threeWicketBonus:0) + maidens*sc2.maidenOverBonus;
-    if(overs>=sc2.erMinOvers){const er=rg/overs;if(sc2.erBonus.below5&&er<5)wPts+=sc2.erBonus.below5;else if(sc2.erBonus.below6&&er<6)wPts+=sc2.erBonus.below6;else if(sc2.erBonus.below7&&er<7)wPts+=sc2.erBonus.below7;if(sc2.erPenalty.above10&&er>10)wPts+=sc2.erPenalty.above10;else if(sc2.erPenalty.above11&&er>11)wPts+=sc2.erPenalty.above11;else if(sc2.erPenalty.above12&&er>12)wPts+=sc2.erPenalty.above12;}
+    let wPts = wkts*sc2.perWicket + (sc2.wicketHaulBonus||[]).reduce((best,w)=>wkts>=w.min&&w.pts>best?w.pts:best,0) + maidens*(sc2.maidenOverBonus||0) + (Number(s.lbwBowled)||0)*(sc2.lbwBowledBonus||0);
+    if (sc2.erBands && overs>=sc2.erMinOvers) {
+      const er=rg/overs;
+      for (const band of sc2.erBands) { if (er < band.max) { wPts += band.pts; break; } }
+    }
     // Fielding pts
-    const fPts = catches*sc2.perCatch + stumpings*sc2.perStumping + runOuts*sc2.perRunOut;
+    const fPts = catches*sc2.perCatch + ((sc2.catch3Bonus&&catches>=3)?sc2.catch3Bonus:0) + stumpings*sc2.perStumping + runOuts*sc2.perRunOutDirect;
     const hasStats = (p.points||0) > 0 || runs>0 || wkts>0 || catches>0 || stumpings>0 || runOuts>0;
     return `
     <div class="d11-player-row">
@@ -14082,7 +14170,8 @@ function d11QuickSaveAllStats(matchId) {
       runs: get('runs'), ballsFaced: get('balls'), fours: get('fours'), sixes: get('sixes'),
       isOut: isOutEl ? isOutEl.checked : false,
       wickets: get('wickets'), oversBowled: get('overs'), runsGiven: get('runsGiven'),
-      maidens: get('maidens'), catches: get('catches'), stumpings: get('stumpings'), runOuts: get('runOuts')
+      maidens: get('maidens'), catches: get('catches'), stumpings: get('stumpings'), runOuts: get('runOuts'),
+      lbwBowled: get('lbwb')
     };
     p.points = calcDream11PlayerPoints(p.stats, matchId);
     count++;
@@ -14109,20 +14198,10 @@ function renderD11QuickScoreTable() {
   const calcSRDisplay = (s) => {
     const runs = Number(s.runs)||0;
     const balls = Number(s.ballsFaced)||0;
-    if (balls < sc.srMinBalls) return { label: '—', pts: 0, color: 'var(--dim)' };
+    if (!sc.srBands || balls <= 0 || (runs < sc.srMinRuns && balls < sc.srMinBalls)) return { label: '—', pts: 0, color: 'var(--dim)' };
     const sr = (runs / balls) * 100;
     let pts = 0;
-    if (sc.srBonus.above170 && sr > 170) pts = sc.srBonus.above170;
-    else if (sc.srBonus.above150 && sr > 150) pts = sc.srBonus.above150;
-    else if (sc.srBonus.above140 && sr > 140) pts = sc.srBonus.above140;
-    else if (sc.srBonus.above130 && sr > 130) pts = sc.srBonus.above130;
-    else if (sc.srBonus.above120 && sr > 120) pts = sc.srBonus.above120;
-    else if (sc.srBonus.above100 && sr > 100) pts = sc.srBonus.above100;
-    if (sc.srPenalty.below40 && sr < 40) pts = sc.srPenalty.below40;
-    else if (sc.srPenalty.below50 && sr < 50) pts = sc.srPenalty.below50;
-    else if (sc.srPenalty.below60 && sr < 60) pts = sc.srPenalty.below60;
-    else if (sc.srPenalty.below70 && sr < 70) pts = sc.srPenalty.below70;
-    else if (sc.srPenalty.below80 && sr < 80) pts = sc.srPenalty.below80;
+    for (const band of sc.srBands) { if (sr < band.max) { pts = band.pts; break; } }
     const color = pts > 0 ? '#4ade80' : pts < 0 ? '#f87171' : 'var(--dim)';
     return { label: sr.toFixed(1), pts, color };
   };
@@ -14131,21 +14210,10 @@ function renderD11QuickScoreTable() {
   const calcERDisplay = (s) => {
     const overs = Number(s.oversBowled)||0;
     const rg = Number(s.runsGiven)||0;
-    if (overs < sc.erMinOvers) return { label: '—', pts: 0, color: 'var(--dim)' };
+    if (!sc.erBands || overs < sc.erMinOvers) return { label: '—', pts: 0, color: 'var(--dim)' };
     const er = rg / overs;
     let pts = 0;
-    if (sc.erBonus.below2_5 && er < 2.5) pts = sc.erBonus.below2_5;
-    else if (sc.erBonus.below3_5 && er < 3.5) pts = sc.erBonus.below3_5;
-    else if (sc.erBonus.below4_5 && er < 4.5) pts = sc.erBonus.below4_5;
-    else if (sc.erBonus.below5 && er < 5) pts = sc.erBonus.below5;
-    else if (sc.erBonus.below6 && er < 6) pts = sc.erBonus.below6;
-    else if (sc.erBonus.below7 && er < 7) pts = sc.erBonus.below7;
-    if (sc.erPenalty.above7 && er > 7) pts = sc.erPenalty.above7;
-    if (sc.erPenalty.above8 && er > 8) pts = sc.erPenalty.above8;
-    if (sc.erPenalty.above9 && er > 9) pts = sc.erPenalty.above9;
-    if (sc.erPenalty.above10 && er > 10) pts = sc.erPenalty.above10;
-    if (sc.erPenalty.above11 && er > 11) pts = sc.erPenalty.above11;
-    if (sc.erPenalty.above12 && er > 12) pts = sc.erPenalty.above12;
+    for (const band of sc.erBands) { if (er < band.max) { pts = band.pts; break; } }
     const color = pts > 0 ? '#4ade80' : pts < 0 ? '#f87171' : 'var(--dim)';
     return { label: er.toFixed(2), pts, color };
   };
@@ -14176,6 +14244,7 @@ function renderD11QuickScoreTable() {
       <td style="padding:4px 3px">${inp(`${pid}-catches`, s.catches, 40)}</td>
       <td style="padding:4px 3px"><input type="number" min="0" id="${pid}-stumpings" value="${s.stumpings??''}" placeholder="0" style="width:36px;background:rgba(96,165,250,0.08);border:1px solid rgba(96,165,250,0.25);border-radius:6px;color:var(--text);padding:5px 4px;font-size:11px;text-align:center" title="Stumpings"/></td>
       <td style="padding:4px 3px"><input type="number" min="0" id="${pid}-runOuts" value="${s.runOuts??''}" placeholder="0" style="width:36px;background:rgba(251,146,60,0.08);border:1px solid rgba(251,146,60,0.25);border-radius:6px;color:var(--text);padding:5px 4px;font-size:11px;text-align:center" title="Run Outs"/></td>
+      <td style="padding:4px 3px"><input type="number" min="0" id="${pid}-lbwb" value="${s.lbwBowled??''}" placeholder="0" style="width:36px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.3);border-radius:6px;color:var(--text);padding:5px 4px;font-size:11px;text-align:center" title="LBW/Bowled Wickets"/></td>
       <td style="padding:4px 3px"><input type="checkbox" id="${pid}-isOut" ${s.isOut?'checked':''} style="width:16px;height:16px;accent-color:var(--orange)" title="Out?"/></td>
       <td style="padding:4px 5px;text-align:center">
         <div style="font-size:10px;font-weight:700;color:${sr.color}">${sr.label}</div>
@@ -14211,9 +14280,9 @@ function renderD11QuickScoreTable() {
           const srD = calcSRDisplay(s);
           const srLabel = balls>0 ? ((runs/balls)*100).toFixed(1) : '—';
           const batPts = runs*sc.perRun + fours*sc.boundary4Bonus + sixes*sc.boundary6Bonus
-            + (runs>=100?sc.century100Bonus:runs>=50?sc.half50Bonus:0)
+            + (sc.runMilestones||[]).reduce((best,m)=> runs>=m.min&&m.pts>best?m.pts:best, 0)
             + (runs===0&&isOut&&balls>0?sc.duckPenalty:0) + srD.pts;
-          const fieldPts = (Number(s.catches)||0)*sc.perCatch + (Number(s.stumpings)||0)*sc.perStumping + (Number(s.runOuts)||0)*sc.perRunOut;
+          const fieldPts = (Number(s.catches)||0)*sc.perCatch + ((sc.catch3Bonus&&(Number(s.catches)||0)>=3)?sc.catch3Bonus:0) + (Number(s.stumpings)||0)*sc.perStumping + (Number(s.runOuts)||0)*sc.perRunOutDirect;
           return `
           <div style="display:grid;grid-template-columns:1fr 38px 38px 30px 30px 54px 58px;padding:8px 12px;border-top:1px solid rgba(255,255,255,0.05);align-items:center">
             <div>
@@ -14261,8 +14330,8 @@ function renderD11QuickScoreTable() {
           const rg = Number(s.runsGiven)||0; const wkts = Number(s.wickets)||0;
           const erD = calcERDisplay(s);
           const erLabel = overs>0 ? (rg/overs).toFixed(2) : '—';
-          const bowlPts = wkts*sc.perWicket + (wkts>=5?sc.fiveWicketBonus:wkts>=3?sc.threeWicketBonus:0) + maidens*sc.maidenOverBonus + erD.pts;
-          const fieldPts = (Number(s.catches)||0)*sc.perCatch + (Number(s.stumpings)||0)*sc.perStumping + (Number(s.runOuts)||0)*sc.perRunOut;
+          const bowlPts = wkts*sc.perWicket + (sc.wicketHaulBonus||[]).reduce((best,w)=> wkts>=w.min&&w.pts>best?w.pts:best, 0) + maidens*(sc.maidenOverBonus||0) + (Number(s.lbwBowled)||0)*(sc.lbwBowledBonus||0) + erD.pts;
+          const fieldPts = (Number(s.catches)||0)*sc.perCatch + ((sc.catch3Bonus&&(Number(s.catches)||0)>=3)?sc.catch3Bonus:0) + (Number(s.stumpings)||0)*sc.perStumping + (Number(s.runOuts)||0)*sc.perRunOutDirect;
           return `
           <div style="display:grid;grid-template-columns:1fr 38px 30px 38px 38px 54px 58px;padding:8px 12px;border-top:1px solid rgba(255,255,255,0.05);align-items:center">
             <div>
@@ -14331,24 +14400,27 @@ function renderD11QuickScoreTable() {
   <div class="card mb14" style="padding:10px 14px;background:rgba(15,23,42,0.6);border-color:rgba(255,255,255,0.08)">
     <div style="font-size:11.5px;font-weight:700;color:var(--text);margin-bottom:6px">⚡ SR (Strike Rate) Points</div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;font-size:10.5px">
-      <span style="background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.3);border-radius:6px;padding:3px 8px;color:#4ade80">SR&gt;170 → +${sc.srBonus.above170||'—'}</span>
-      <span style="background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.3);border-radius:6px;padding:3px 8px;color:#4ade80">SR&gt;150 → +${sc.srBonus.above150||'—'}</span>
-      <span style="background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.3);border-radius:6px;padding:3px 8px;color:#4ade80">SR&gt;130 → +${sc.srBonus.above130||'—'}</span>
-      <span style="background:rgba(220,38,38,0.12);border:1px solid rgba(220,38,38,0.3);border-radius:6px;padding:3px 8px;color:#f87171">SR&lt;80 → ${sc.srPenalty.below80||'—'}</span>
-      <span style="background:rgba(220,38,38,0.12);border:1px solid rgba(220,38,38,0.3);border-radius:6px;padding:3px 8px;color:#f87171">SR&lt;70 → ${sc.srPenalty.below70||'—'}</span>
-      <span style="background:rgba(220,38,38,0.12);border:1px solid rgba(220,38,38,0.3);border-radius:6px;padding:3px 8px;color:#f87171">SR&lt;60 → ${sc.srPenalty.below60||'—'}</span>
+      ${sc.srBands ? sc.srBands.map((b,i,arr) => {
+        const label = i===0 ? `SR&lt;${b.max}` : i===arr.length-1 ? `SR&gt;${arr[i-1].max}` : `${arr[i-1].max}–${b.max}`;
+        const color = b.pts>0?'#4ade80':b.pts<0?'#f87171':'var(--dim)';
+        const bg = b.pts>0?'rgba(34,197,94,0.12)':b.pts<0?'rgba(220,38,38,0.12)':'rgba(255,255,255,0.06)';
+        const bd = b.pts>0?'rgba(34,197,94,0.3)':b.pts<0?'rgba(220,38,38,0.3)':'rgba(255,255,255,0.12)';
+        return `<span style="background:${bg};border:1px solid ${bd};border-radius:6px;padding:3px 8px;color:${color}">${label} → ${b.pts>0?'+':''}${b.pts}</span>`;
+      }).join('') : '<span style="color:var(--dim)">No SR bonus/penalty in Test cricket</span>'}
     </div>
-    <div style="font-size:10px;color:var(--dim);margin-top:5px">Min ${sc.srMinBalls} balls faced required · Formula: (Runs ÷ Balls) × 100</div>
-    <div style="font-size:11.5px;font-weight:700;color:var(--text);margin:10px 0 6px">📊 ER (Economy Rate) Points — T20</div>
+    ${sc.srBands ? `<div style="font-size:10px;color:var(--dim);margin-top:5px">Min ${sc.srMinRuns} runs OR ${sc.srMinBalls} balls faced required · Formula: (Runs ÷ Balls) × 100</div>` : ''}
+    <div style="font-size:11.5px;font-weight:700;color:var(--text);margin:10px 0 6px">📊 ER (Economy Rate) Points — ${sc.label}</div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;font-size:10.5px">
-      <span style="background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.3);border-radius:6px;padding:3px 8px;color:#4ade80">ER&lt;5 → +${sc.erBonus.below5||'—'}</span>
-      <span style="background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.3);border-radius:6px;padding:3px 8px;color:#4ade80">ER&lt;6 → +${sc.erBonus.below6||'—'}</span>
-      <span style="background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.3);border-radius:6px;padding:3px 8px;color:#4ade80">ER&lt;7 → +${sc.erBonus.below7||'—'}</span>
-      <span style="background:rgba(220,38,38,0.12);border:1px solid rgba(220,38,38,0.3);border-radius:6px;padding:3px 8px;color:#f87171">ER&gt;10 → ${sc.erPenalty.above10||'—'}</span>
-      <span style="background:rgba(220,38,38,0.12);border:1px solid rgba(220,38,38,0.3);border-radius:6px;padding:3px 8px;color:#f87171">ER&gt;11 → ${sc.erPenalty.above11||'—'}</span>
-      <span style="background:rgba(220,38,38,0.12);border:1px solid rgba(220,38,38,0.3);border-radius:6px;padding:3px 8px;color:#f87171">ER&gt;12 → ${sc.erPenalty.above12||'—'}</span>
+      ${sc.erBands ? sc.erBands.map((b,i,arr) => {
+        const label = i===0 ? `ER&lt;${b.max}` : i===arr.length-1 ? `ER&gt;${arr[i-1].max}` : `${arr[i-1].max}–${b.max}`;
+        const color = b.pts>0?'#4ade80':b.pts<0?'#f87171':'var(--dim)';
+        const bg = b.pts>0?'rgba(34,197,94,0.12)':b.pts<0?'rgba(220,38,38,0.12)':'rgba(255,255,255,0.06)';
+        const bd = b.pts>0?'rgba(34,197,94,0.3)':b.pts<0?'rgba(220,38,38,0.3)':'rgba(255,255,255,0.12)';
+        return `<span style="background:${bg};border:1px solid ${bd};border-radius:6px;padding:3px 8px;color:${color}">${label} → ${b.pts>0?'+':''}${b.pts}</span>`;
+      }).join('') : '<span style="color:var(--dim)">No ER bonus/penalty in Test cricket</span>'}
     </div>
-    <div style="font-size:10px;color:var(--dim);margin-top:5px">Min ${sc.erMinOvers} overs bowled required · Formula: Runs Given ÷ Overs</div>
+    ${sc.erBands ? `<div style="font-size:10px;color:var(--dim);margin-top:5px">Min ${sc.erMinOvers} overs bowled required · Formula: Runs Given ÷ Overs</div>` : ''}
+    <div style="font-size:10px;color:var(--gold);margin-top:8px">🎯 LBW/Bowled Bonus → +${sc.lbwBowledBonus} pts per LBW/Bowled wicket</div>
   </div>
 
   <div style="overflow-x:auto;-webkit-overflow-scrolling:touch;margin-bottom:14px">
@@ -14367,6 +14439,7 @@ function renderD11QuickScoreTable() {
           <th style="padding:7px 3px;font-size:10px;color:var(--dim);font-weight:700" title="Catches">Ct</th>
           <th style="padding:7px 3px;font-size:10px;color:#60a5fa;font-weight:700" title="Stumpings (WK only)">St</th>
           <th style="padding:7px 3px;font-size:10px;color:#fb923c;font-weight:700" title="Run Outs">RO</th>
+          <th style="padding:7px 3px;font-size:10px;color:var(--gold);font-weight:700" title="LBW/Bowled Wickets">LBW/B</th>
           <th style="padding:7px 3px;font-size:10px;color:var(--dim);font-weight:700" title="Is Out?">Out</th>
           <th style="padding:7px 4px;font-size:10px;color:#f59e0b;font-weight:700;text-align:center" title="Strike Rate + Bonus/Penalty">SR</th>
           <th style="padding:7px 4px;font-size:10px;color:#34d399;font-weight:700;text-align:center" title="Economy Rate + Bonus/Penalty">ER</th>
@@ -14374,8 +14447,8 @@ function renderD11QuickScoreTable() {
         </tr>
       </thead>
       <tbody>
-        ${sideA.length > 0 ? `<tr><td colspan="16" style="padding:8px 6px 4px;font-size:11px;font-weight:700;color:var(--blue-l);letter-spacing:0.5px">${(matches[matchId]||{}).teamA||'Team A'}</td></tr>${sideA.map(playerRow).join('')}` : ''}
-        ${sideB.length > 0 ? `<tr><td colspan="16" style="padding:10px 6px 4px;font-size:11px;font-weight:700;color:var(--orange);letter-spacing:0.5px">${(matches[matchId]||{}).teamB||'Team B'}</td></tr>${sideB.map(playerRow).join('')}` : ''}
+        ${sideA.length > 0 ? `<tr><td colspan="17" style="padding:8px 6px 4px;font-size:11px;font-weight:700;color:var(--blue-l);letter-spacing:0.5px">${(matches[matchId]||{}).teamA||'Team A'}</td></tr>${sideA.map(playerRow).join('')}` : ''}
+        ${sideB.length > 0 ? `<tr><td colspan="17" style="padding:10px 6px 4px;font-size:11px;font-weight:700;color:var(--orange);letter-spacing:0.5px">${(matches[matchId]||{}).teamB||'Team B'}</td></tr>${sideB.map(playerRow).join('')}` : ''}
       </tbody>
     </table>
   </div>
@@ -15531,55 +15604,50 @@ function calcUtPlayerPoints(stats, matchId) {
   const isOut = !!stats.isOut;
   const ballsFaced = Number(stats.ballsFaced)||0;
   const oversBowled = Number(stats.oversBowled)||0;
+  const isPlayingXI = stats.isPlayingXI !== false;
+
+  if (isPlayingXI) pts += s.playingXIBonus || 0;
 
   pts += runs * s.perRun;
   pts += fours * s.boundary4Bonus;
   pts += sixes * s.boundary6Bonus;
-  if (runs >= 100) pts += s.century100Bonus;
-  else if (runs >= 50) pts += s.half50Bonus;
+  if (s.runMilestones && s.runMilestones.length) {
+    let best = 0;
+    s.runMilestones.forEach(m => { if (runs >= m.min && m.pts > best) best = m.pts; });
+    pts += best;
+  }
   if (runs === 0 && isOut && ballsFaced > 0) pts += s.duckPenalty;
 
-  if (ballsFaced >= s.srMinBalls) {
+  if (s.srBands && (runs >= s.srMinRuns || ballsFaced >= s.srMinBalls) && ballsFaced > 0) {
     const sr = (runs / ballsFaced) * 100;
-    if (s.srBonus.above170 && sr > 170) pts += s.srBonus.above170;
-    else if (s.srBonus.above150 && sr > 150) pts += s.srBonus.above150;
-    else if (s.srBonus.above130 && sr > 130) pts += s.srBonus.above130;
-    else if (s.srBonus.above140 && sr > 140) pts += s.srBonus.above140;
-    else if (s.srBonus.above120 && sr > 120) pts += s.srBonus.above120;
-    else if (s.srBonus.above100 && sr > 100) pts += s.srBonus.above100;
-    if (s.srPenalty.below60 && sr < 60) pts += s.srPenalty.below60;
-    else if (s.srPenalty.below70 && sr < 70) pts += s.srPenalty.below70;
-    else if (s.srPenalty.below80 && sr < 80) pts += s.srPenalty.below80;
-    else if (s.srPenalty.below40 && sr < 40) pts += s.srPenalty.below40;
-    else if (s.srPenalty.below50 && sr < 50) pts += s.srPenalty.below50;
+    for (const band of s.srBands) {
+      if (sr < band.max) { pts += band.pts; break; }
+    }
   }
 
   pts += wickets * s.perWicket;
-  if (wickets >= 5) pts += s.fiveWicketBonus;
-  else if (wickets >= 3) pts += s.threeWicketBonus;
-  pts += maidens * s.maidenOverBonus;
+  if (s.wicketHaulBonus && s.wicketHaulBonus.length) {
+    let best = 0;
+    s.wicketHaulBonus.forEach(w => { if (wickets >= w.min && w.pts > best) best = w.pts; });
+    pts += best;
+  }
+  pts += maidens * (s.maidenOverBonus || 0);
+  const lbwBowled = Number(stats.lbwBowled)||0;
+  pts += lbwBowled * (s.lbwBowledBonus || 0);
 
   const overs = oversBowled;
-  if (overs >= s.erMinOvers) {
+  if (s.erBands && overs >= s.erMinOvers) {
     const runsGiven = Number(stats.runsGiven)||0;
     const er = runsGiven / overs;
-    if (s.erBonus.below5 && er < 5) pts += s.erBonus.below5;
-    else if (s.erBonus.below6 && er < 6) pts += s.erBonus.below6;
-    else if (s.erBonus.below7 && er < 7) pts += s.erBonus.below7;
-    else if (s.erBonus.below2_5 && er < 2.5) pts += s.erBonus.below2_5;
-    else if (s.erBonus.below3_5 && er < 3.5) pts += s.erBonus.below3_5;
-    else if (s.erBonus.below4_5 && er < 4.5) pts += s.erBonus.below4_5;
-    if (s.erPenalty.above12 && er > 12) pts += s.erPenalty.above12;
-    else if (s.erPenalty.above11 && er > 11) pts += s.erPenalty.above11;
-    else if (s.erPenalty.above10 && er > 10) pts += s.erPenalty.above10;
-    else if (s.erPenalty.above9 && er > 9) pts += s.erPenalty.above9;
-    else if (s.erPenalty.above8 && er > 8) pts += s.erPenalty.above8;
-    else if (s.erPenalty.above7 && er > 7) pts += s.erPenalty.above7;
+    for (const band of s.erBands) {
+      if (er < band.max) { pts += band.pts; break; }
+    }
   }
 
   pts += catches * s.perCatch;
+  if (s.catch3Bonus && catches >= 3) pts += s.catch3Bonus;
   pts += stumpings * s.perStumping;
-  pts += runOuts * s.perRunOut;
+  pts += runOuts * s.perRunOutDirect;
 
   return Math.round(pts);
 }
@@ -15706,7 +15774,7 @@ function _utBuildReviewRows(battingRows, bowlingRows, fieldingRows) {
         matched: !!p,
         runs: 0, ballsFaced: 0, fours: 0, sixes: 0, isOut: false,
         wickets: 0, maidens: 0, oversBowled: 0, runsGiven: 0,
-        catches: 0, stumpings: 0, runOuts: 0
+        catches: 0, stumpings: 0, runOuts: 0, lbwBowled: 0
       };
       order.push(key);
     }
@@ -15719,7 +15787,7 @@ function _utBuildReviewRows(battingRows, bowlingRows, fieldingRows) {
   });
   (bowlingRows||[]).forEach(row => {
     const r = touch(row.name);
-    r.wickets = row.wickets||0; r.maidens = row.maidens||0; r.oversBowled = row.oversBowled||0; r.runsGiven = row.runsGiven||0;
+    r.wickets = row.wickets||0; r.maidens = row.maidens||0; r.oversBowled = row.oversBowled||0; r.runsGiven = row.runsGiven||0; r.lbwBowled = row.lbwBowled||0;
   });
   (fieldingRows||[]).forEach(row => {
     const r = touch(row.name);
@@ -15800,7 +15868,7 @@ function _utApplyParsedRows(battingRows, bowlingRows, fieldingRows) {
     const p = findPlayer(row.name);
     if (!p) { unmatched.push(row.name); return; }
     const prev = p.stats || {};
-    p.stats = { ...prev, wickets: row.wickets||0, maidens: row.maidens||0, oversBowled: row.oversBowled||0, runsGiven: row.runsGiven||0 };
+    p.stats = { ...prev, wickets: row.wickets||0, maidens: row.maidens||0, oversBowled: row.oversBowled||0, runsGiven: row.runsGiven||0, lbwBowled: row.lbwBowled||0 };
     matchedPlayerIds.add(p.id);
   });
   // Fielding (catches/stumpings/run-outs) is a fresh, complete read each time —
@@ -15821,7 +15889,7 @@ function _utApplyParsedRows(battingRows, bowlingRows, fieldingRows) {
       runs: s.runs||0, ballsFaced: s.ballsFaced||0, fours: s.fours||0, sixes: s.sixes||0,
       isOut: !!s.isOut, wickets: s.wickets||0, maidens: s.maidens||0,
       catches: s.catches||0, stumpings: s.stumpings||0, runOuts: s.runOuts||0,
-      oversBowled: s.oversBowled||0, runsGiven: s.runsGiven||0
+      oversBowled: s.oversBowled||0, runsGiven: s.runsGiven||0, lbwBowled: s.lbwBowled||0
     };
     p.points = calcUtPlayerPoints(p.stats, m.id);
   });
@@ -15845,7 +15913,7 @@ function utReviewConfirmApply() {
   utScanReview.rows.forEach(row => {
     const name = row.displayName;
     battingRows.push({ name, runs: row.runs||0, ballsFaced: row.ballsFaced||0, fours: row.fours||0, sixes: row.sixes||0, isOut: !!row.isOut });
-    bowlingRows.push({ name, wickets: row.wickets||0, maidens: row.maidens||0, oversBowled: row.oversBowled||0, runsGiven: row.runsGiven||0 });
+    bowlingRows.push({ name, wickets: row.wickets||0, maidens: row.maidens||0, oversBowled: row.oversBowled||0, runsGiven: row.runsGiven||0, lbwBowled: row.lbwBowled||0 });
     fieldingRows.push({ name, catches: row.catches||0, stumpings: row.stumpings||0, runOuts: row.runOuts||0 });
   });
 
@@ -16582,15 +16650,10 @@ function renderUtQuickScoreTable() {
   const calcSRDisplay = (s) => {
     const runs = Number(s.runs)||0;
     const balls = Number(s.ballsFaced)||0;
-    if (balls < sc.srMinBalls) return { label: '—', pts: 0, color: 'var(--dim)' };
+    if (!sc.srBands || balls <= 0 || (runs < sc.srMinRuns && balls < sc.srMinBalls)) return { label: '—', pts: 0, color: 'var(--dim)' };
     const sr = (runs / balls) * 100;
     let pts = 0;
-    if (sc.srBonus.above170 && sr > 170) pts = sc.srBonus.above170;
-    else if (sc.srBonus.above150 && sr > 150) pts = sc.srBonus.above150;
-    else if (sc.srBonus.above130 && sr > 130) pts = sc.srBonus.above130;
-    if (sc.srPenalty.below60 && sr < 60) pts = sc.srPenalty.below60;
-    else if (sc.srPenalty.below70 && sr < 70) pts = sc.srPenalty.below70;
-    else if (sc.srPenalty.below80 && sr < 80) pts = sc.srPenalty.below80;
+    for (const band of sc.srBands) { if (sr < band.max) { pts = band.pts; break; } }
     const color = pts > 0 ? '#4ade80' : pts < 0 ? '#f87171' : 'var(--dim)';
     return { label: sr.toFixed(1), pts, color };
   };
@@ -16598,15 +16661,10 @@ function renderUtQuickScoreTable() {
   const calcERDisplay = (s) => {
     const overs = Number(s.oversBowled)||0;
     const rg = Number(s.runsGiven)||0;
-    if (overs < sc.erMinOvers) return { label: '—', pts: 0, color: 'var(--dim)' };
+    if (!sc.erBands || overs < sc.erMinOvers) return { label: '—', pts: 0, color: 'var(--dim)' };
     const er = rg / overs;
     let pts = 0;
-    if (sc.erBonus.below5 && er < 5) pts = sc.erBonus.below5;
-    else if (sc.erBonus.below6 && er < 6) pts = sc.erBonus.below6;
-    else if (sc.erBonus.below7 && er < 7) pts = sc.erBonus.below7;
-    if (sc.erPenalty.above10 && er > 10) pts = sc.erPenalty.above10;
-    if (sc.erPenalty.above11 && er > 11) pts = sc.erPenalty.above11;
-    if (sc.erPenalty.above12 && er > 12) pts = sc.erPenalty.above12;
+    for (const band of sc.erBands) { if (er < band.max) { pts = band.pts; break; } }
     const color = pts > 0 ? '#4ade80' : pts < 0 ? '#f87171' : 'var(--dim)';
     return { label: er.toFixed(2), pts, color };
   };
@@ -16637,6 +16695,7 @@ function renderUtQuickScoreTable() {
       <td style="padding:4px 3px">${inp(`${pid}-catches`, s.catches, 40)}</td>
       <td style="padding:4px 3px"><input type="number" min="0" id="${pid}-stumpings" value="${s.stumpings??''}" placeholder="0" style="width:36px;background:rgba(96,165,250,0.08);border:1px solid rgba(96,165,250,0.25);border-radius:6px;color:var(--text);padding:5px 4px;font-size:11px;text-align:center" title="Stumpings"/></td>
       <td style="padding:4px 3px"><input type="number" min="0" id="${pid}-runOuts" value="${s.runOuts??''}" placeholder="0" style="width:36px;background:rgba(251,146,60,0.08);border:1px solid rgba(251,146,60,0.25);border-radius:6px;color:var(--text);padding:5px 4px;font-size:11px;text-align:center" title="Run Outs"/></td>
+      <td style="padding:4px 3px"><input type="number" min="0" id="${pid}-lbwb" value="${s.lbwBowled??''}" placeholder="0" style="width:36px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.3);border-radius:6px;color:var(--text);padding:5px 4px;font-size:11px;text-align:center" title="LBW/Bowled Wickets"/></td>
       <td style="padding:4px 3px"><input type="checkbox" id="${pid}-isOut" ${s.isOut?'checked':''} style="width:16px;height:16px;accent-color:var(--orange)" title="Out?"/></td>
       <td style="padding:4px 5px;text-align:center">
         <div style="font-size:10px;font-weight:700;color:${sr.color}">${sr.label}</div>
@@ -16664,8 +16723,8 @@ function renderUtQuickScoreTable() {
           const s = p.stats||{}; const runs=Number(s.runs)||0; const balls=Number(s.ballsFaced)||0;
           const fours=Number(s.fours)||0; const sixes=Number(s.sixes)||0; const isOut=s.isOut;
           const srD=calcSRDisplay(s); const srLabel=balls>0?((runs/balls)*100).toFixed(1):'—';
-          const batPts=runs*sc.perRun+fours*sc.boundary4Bonus+sixes*sc.boundary6Bonus+(runs>=100?sc.century100Bonus:runs>=50?sc.half50Bonus:0)+(runs===0&&isOut&&balls>0?sc.duckPenalty:0)+srD.pts;
-          const fPts=(Number(s.catches)||0)*sc.perCatch+(Number(s.stumpings)||0)*sc.perStumping+(Number(s.runOuts)||0)*sc.perRunOut;
+          const batPts=runs*sc.perRun+fours*sc.boundary4Bonus+sixes*sc.boundary6Bonus+(sc.runMilestones||[]).reduce((best,mm)=>runs>=mm.min&&mm.pts>best?mm.pts:best,0)+(runs===0&&isOut&&balls>0?sc.duckPenalty:0)+srD.pts;
+          const fPts=(Number(s.catches)||0)*sc.perCatch+((sc.catch3Bonus&&(Number(s.catches)||0)>=3)?sc.catch3Bonus:0)+(Number(s.stumpings)||0)*sc.perStumping+(Number(s.runOuts)||0)*sc.perRunOutDirect;
           const pid=`utqs-${mid}-${p.id}`;
           return `
           <div style="display:grid;grid-template-columns:1fr 38px 38px 30px 30px 54px 58px;padding:8px 12px;border-top:1px solid rgba(255,255,255,0.05);align-items:center">
@@ -16708,8 +16767,8 @@ function renderUtQuickScoreTable() {
           const s=p.stats||{}; const overs=Number(s.oversBowled)||0; const maidens=Number(s.maidens)||0;
           const rg=Number(s.runsGiven)||0; const wkts=Number(s.wickets)||0;
           const erD=calcERDisplay(s); const erLabel=overs>0?(rg/overs).toFixed(2):'—';
-          const bowlPts=wkts*sc.perWicket+(wkts>=5?sc.fiveWicketBonus:wkts>=3?sc.threeWicketBonus:0)+maidens*sc.maidenOverBonus+erD.pts;
-          const fPts=(Number(s.catches)||0)*sc.perCatch+(Number(s.stumpings)||0)*sc.perStumping+(Number(s.runOuts)||0)*sc.perRunOut;
+          const bowlPts=wkts*sc.perWicket+(sc.wicketHaulBonus||[]).reduce((best,w)=>wkts>=w.min&&w.pts>best?w.pts:best,0)+maidens*(sc.maidenOverBonus||0)+(Number(s.lbwBowled)||0)*(sc.lbwBowledBonus||0)+erD.pts;
+          const fPts=(Number(s.catches)||0)*sc.perCatch+((sc.catch3Bonus&&(Number(s.catches)||0)>=3)?sc.catch3Bonus:0)+(Number(s.stumpings)||0)*sc.perStumping+(Number(s.runOuts)||0)*sc.perRunOutDirect;
           const pid=`utqs-${mid}-${p.id}`;
           return `
           <div style="display:grid;grid-template-columns:1fr 38px 30px 38px 38px 54px 58px;padding:8px 12px;border-top:1px solid rgba(255,255,255,0.05);align-items:center">
@@ -16752,7 +16811,7 @@ function renderUtQuickScoreTable() {
         ${fielders.map(p => {
           const s=p.stats||{};
           const catches=Number(s.catches)||0; const stumpings=Number(s.stumpings)||0; const runOuts=Number(s.runOuts)||0;
-          const fPts=catches*sc.perCatch+stumpings*sc.perStumping+runOuts*sc.perRunOut;
+          const fPts=catches*sc.perCatch+((sc.catch3Bonus&&catches>=3)?sc.catch3Bonus:0)+stumpings*sc.perStumping+runOuts*sc.perRunOutDirect;
           const pid=`utqs-${mid}-${p.id}`;
           return `
           <div style="display:grid;grid-template-columns:1fr 52px 52px 52px 70px;padding:8px 12px;border-top:1px solid rgba(255,255,255,0.05);align-items:center">
@@ -16770,7 +16829,7 @@ function renderUtQuickScoreTable() {
             </div>
             <div style="text-align:right">
               <input type="number" min="0" id="${pid}-runOuts" value="${runOuts||''}" placeholder="0" oninput="utQuickSaveAllStats()" style="width:40px;background:rgba(251,146,60,0.1);border:1px solid rgba(251,146,60,0.3);border-radius:6px;color:var(--text);padding:4px;font-size:12px;text-align:center"/>
-              <div style="font-size:9px;color:#fb923c">+${runOuts*sc.perRunOut}pts</div>
+              <div style="font-size:9px;color:#fb923c">+${runOuts*sc.perRunOutDirect}pts</div>
             </div>
             <div style="text-align:right;font-size:15px;font-weight:800;color:var(--gold)">+${fPts}</div>
           </div>`;
@@ -16782,7 +16841,7 @@ function renderUtQuickScoreTable() {
       <div style="display:flex;gap:10px;flex-wrap:wrap;font-size:11px">
         <span style="color:#60a5fa">🧤 Catch = +${sc.perCatch} pts</span>
         <span style="color:#a78bfa">🥊 Stumping = +${sc.perStumping} pts</span>
-        <span style="color:#fb923c">🏃 Run-out = +${sc.perRunOut} pts</span>
+        <span style="color:#fb923c">🏃 Run-out (Direct) = +${sc.perRunOutDirect} pts</span>
       </div>
       <div style="font-size:10px;color:var(--dim);margin-top:6px">💡 Fielding card sirf un players ko show karta hai jinka Ct/St/RO > 0 hai. Table view mein har player ke fielding stats enter karo.</div>
     </div>`;
@@ -16831,6 +16890,7 @@ function renderUtQuickScoreTable() {
           <th style="padding:7px 3px;font-size:10px;color:#60a5fa;font-weight:700" title="Catches">Ct</th>
           <th style="padding:7px 3px;font-size:10px;color:#a78bfa;font-weight:700" title="Stumpings">St</th>
           <th style="padding:7px 3px;font-size:10px;color:#fb923c;font-weight:700" title="Run Outs">RO</th>
+          <th style="padding:7px 3px;font-size:10px;color:var(--gold);font-weight:700" title="LBW/Bowled Wickets">LBW/B</th>
           <th style="padding:7px 3px;font-size:10px;color:var(--dim);font-weight:700" title="Is Out?">Out</th>
           <th style="padding:7px 4px;font-size:10px;color:#f59e0b;font-weight:700;text-align:center" title="Strike Rate">SR</th>
           <th style="padding:7px 4px;font-size:10px;color:#34d399;font-weight:700;text-align:center" title="Economy Rate">ER</th>
