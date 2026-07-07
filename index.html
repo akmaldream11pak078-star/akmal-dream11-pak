@@ -470,9 +470,11 @@
   .d11-progress-lbl { font-size:8.5px; color:var(--dim); text-transform:uppercase; letter-spacing:0.5px; }
   .d11-sticky-bar {
     position:sticky; bottom:80px; z-index:30; background:rgba(10,22,40,0.96); backdrop-filter:blur(14px);
-    border:1px solid rgba(255,255,255,0.1); border-radius:14px; padding:12px 14px; margin-top:14px;
+    border:1px solid var(--card-b); border-radius:14px; padding:12px 14px; margin-top:14px;
     display:flex; align-items:center; justify-content:space-between; gap:10px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.15);
   }
+  html[data-theme="light"] .d11-sticky-bar { background:rgba(255,255,255,0.98); box-shadow: 0 4px 16px rgba(15,23,42,0.12); }
 
   /* ── Dream11-style "Create Team" dual-column picker ── */
   .d11-role-tabs { display:flex; gap:4px; overflow-x:auto; margin:10px 0 14px; border-bottom:1px solid rgba(255,255,255,0.08); }
@@ -6205,6 +6207,10 @@ function renderCompletedMatchDetail() {
   <div style="margin-top:10px">
     <button class="btn-primary btn-block" style="background:linear-gradient(135deg,#0f766e,#0d9488);font-size:13px;padding:14px" onclick="openD11ScorecardPage('${m.id}')">📋 Full Batting & Bowling Scorecard Dekho →</button>
   </div>
+  ` : (d11m.players||[]).some(p => p.stats) ? `
+  <div style="margin-top:10px">
+    <button class="btn-primary btn-block" style="background:linear-gradient(135deg,#0f766e,#0d9488);font-size:13px;padding:14px" onclick="openD11LiveScorecard('${m.id}')">📋 Full Batting & Bowling Scorecard Dekho →</button>
+  </div>
   ` : ''}
   `;
 }
@@ -8543,12 +8549,12 @@ function d11ResumeAllLiveSyncPolling() {
 // hand) and stop this fast poll — the regular 35-min live-score poll takes
 // over from there for the rest of the match.
 let _d11SquadPollTimers = {};
-const D11_XI_CHECK_BEFORE_DEADLINE_MS = 15 * 60 * 1000; // check once, 15 min before the contest deadline
+const D11_XI_CHECK_BEFORE_DEADLINE_MS = 20 * 60 * 1000; // check once, 20 min before the contest deadline
 
 function d11StartSquadAnnouncementPolling(matchId) {
   d11StopSquadAnnouncementPolling(matchId);
   // Run once immediately (covers the case where XI was already announced,
-  // or the deadline is already within/past the 15-min window by the time
+  // or the deadline is already within/past the 20-min window by the time
   // admin links the match).
   d11CheckPlayingXIAnnounced(matchId);
 
@@ -8558,9 +8564,9 @@ function d11StartSquadAnnouncementPolling(matchId) {
 
   const fireAt = deadlineMs - D11_XI_CHECK_BEFORE_DEADLINE_MS;
   const delay = fireAt - Date.now();
-  if (delay <= 0) return; // already inside (or past) the 15-min window — the immediate check above covers it
+  if (delay <= 0) return; // already inside (or past) the 20-min window — the immediate check above covers it
 
-  // Single one-shot check, timed for exactly 15 min before deadline.
+  // Single one-shot check, timed for exactly 20 min before deadline.
   _d11SquadPollTimers[matchId] = setTimeout(() => {
     delete _d11SquadPollTimers[matchId];
     const m = matches[matchId];
@@ -12184,7 +12190,7 @@ function _d11RenderLiveSyncRow(m) {
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(37,99,235,0.08);border:1px solid rgba(37,99,235,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#60a5fa;flex:1;min-width:140px">📡 Live Sync: ${statusLabel} · Last: ${lastSyncStr}</span>
     ${isWaitingForStart ? `<span style="font-size:10.5px;color:#93c5fd;width:100%">⏳ No score checks yet — first check happens right at match start, then every ${syncIntervalLabel} after that.</span>` : ''}
-    ${isWatchingForXI ? `<span style="font-size:10.5px;color:#c084fc;width:100%">👀 Auto-watching for Playing XI announcement (checks once, 15 min before deadline)…</span>` : ''}
+    ${isWatchingForXI ? `<span style="font-size:10.5px;color:#c084fc;width:100%">👀 Auto-watching for Playing XI announcement (checks once, 20 min before deadline)…</span>` : ''}
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatch('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromCricbuzz('${m.id}')">📥 Fetch Squad</button>
     ${_d11SquadDebugData ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11OpenSquadDebugModal()">🐛 View Raw Data</button>` : ''}
@@ -12435,7 +12441,7 @@ function renderDream11Hub() {
       </div>
       ${!dLocked ? `<button class="btn-primary btn-block mb0" style="font-size:12px;padding:10px;margin-top:8px;background:linear-gradient(135deg,#f59e0b,#ea580c)" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">🏟️ Join Mega / H2H / Custom Contest</button>` : ''}
       ${isLiveScoring ? `<button class="btn-secondary btn-block mb0" style="font-size:12px;padding:10px;margin-top:8px" onclick="openDream11Leaderboard('${m.id}')">🏅 View Live Leaderboard</button>` : ''}
-      ${m.scorecardText ? `<button class="btn-primary btn-block mb0" style="background:linear-gradient(135deg,#0f766e,#0d9488);font-size:12px;padding:10px;margin-top:8px" onclick="openD11ScorecardPage('${m.id}')">📋 Full Batting & Bowling Scorecard Dekho →</button>` : ''}
+      ${m.scorecardText ? `<button class="btn-primary btn-block mb0" style="background:linear-gradient(135deg,#0f766e,#0d9488);font-size:12px;padding:10px;margin-top:8px" onclick="openD11ScorecardPage('${m.id}')">📋 Full Batting & Bowling Scorecard Dekho →</button>` : (d11m.players||[]).some(p => p.stats) ? `<button class="btn-primary btn-block mb0" style="background:linear-gradient(135deg,#0f766e,#0d9488);font-size:12px;padding:10px;margin-top:8px" onclick="openD11LiveScorecard('${m.id}')">📋 Full Batting & Bowling Scorecard Dekho →</button>` : ''}
     </div></div>`;
   }).join('')}</div>`;
   })()}
@@ -18795,7 +18801,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "2.1.0";
+const APP_VERSION = "2.2.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
