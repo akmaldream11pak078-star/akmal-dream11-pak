@@ -871,6 +871,40 @@ let quickResultsDraft = {}; // { [matchId]: { [qId]: answer } } — used by Quic
 let d11QuickScoreMatchId = null; // which Dream11 match is open in Quick Score mode
 let d11QsViewMode = 'table'; // 'table' | 'batting' | 'bowling'
 
+// ── Cricbuzz Cricket API (via RapidAPI) Live Sync integration ──
+// Free tier: 500 requests/month (~16/day budget). We poll every ~35 min per
+// linked match to stay comfortably inside that budget even with 2 matches
+// running per day. This is the same underlying Cricbuzz data source used for
+// manual scorecard pastes elsewhere in this app, so international matches
+// (bilateral series, ICC events) are fully covered — not just domestic
+// leagues. Admin links a Dream11 match to a Cricbuzz match id once; after
+// that, score, Playing XI and (once the match ends) the full scorecard get
+// pulled in automatically — no manual paste needed. Manual paste still works
+// as a fallback/override.
+const CRICBUZZ_RAPIDAPI_KEY = "0729e65d3cmsh78845ddc3e0a4f6p1850f5jsn07d741780019";
+const CRICBUZZ_RAPIDAPI_HOST = "cricbuzz-cricket.p.rapidapi.com";
+const CRICBUZZ_BASE = "https://cricbuzz-cricket.p.rapidapi.com";
+// (Live-sync interval is now computed per-match by format — see
+// d11GetLiveSyncIntervalMs() near d11StartLiveSyncPolling — instead of a
+// single fixed constant, since T20/ODI/Test complete innings at very
+// different paces and polling faster than that wastes API quota.)
+const CRICKETDATA_SQUAD_POLL_MS = 20 * 60 * 1000; // ~20 minutes (pre-toss Playing XI check — kept infrequent to stay within RapidAPI free-tier monthly request limits; trades a bit of detection delay for much lower quota usage)
+let _d11LiveSyncTimers = {}; // { [matchId]: intervalId } — one poll loop per linked match
+let _d11LiveSyncSearchResults = []; // last CricketData match-search results shown in the "Link Match" picker
+let _d11LiveSyncSearchLoading = false;
+let _d11LiveSyncSearchError = null;
+// ── "Import from Cricbuzz" panel — browse RapidAPI's own upcoming-matches
+// list and one-tap create + auto-link a Dream11 match, no manual typing.
+let d11ImportPanelOpen = false;
+let d11ImportResults = [];
+let d11ImportLoading = false;
+let d11ImportError = null;
+// TEMP DEBUG — holds the raw Cricbuzz team response so admin can view/copy
+// it on-screen (see renderD11SquadDebugModal). Remove once squad-shape
+// issue is confirmed/fixed.
+let _d11SquadDebugData = null;
+let _d11LiveSyncLastSyncedAt = {}; // { [matchId]: timestamp } — for the "Last synced" label in admin UI
+
 // ── Mobile hardware/system back-button support ──────────────────────
 // The app is a single-page state machine driven entirely by the `tab`
 // global (plus a few sub-state vars like d11ActiveMatchId). There is no
@@ -3820,6 +3854,9 @@ function render() {
     </div>
     ${renderBottomNav()}
     ${masterTeamsPhotoSearchTarget ? renderMasterTeamsPhotoSearchModal() : ''}
+    ${d11LiveSyncPickerMatchId ? renderD11LiveSyncPickerModal() : ''}
+    ${d11ImportPanelOpen ? renderD11ImportPanelModal() : ''}
+    ${_d11SquadDebugData ? renderD11SquadDebugModal() : ''}
   `;
 }
 
@@ -7908,12 +7945,21 @@ function d11AutoDetectScoreFromText(matchId, text) {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
   const teamAWords = (m.teamA || '').toLowerCase().split(/\s+/).filter(w => w.length > 2);
   const teamBWords = (m.teamB || '').toLowerCase().split(/\s+/).filter(w => w.length > 2);
-  const lineHasTeam = (lc, words) => words.some(w => lc.includes(w));
+  const lineHasTeam = (lc, words) => words.length > 0 && words.some(w => lc.includes(w));
   const scoreRe = /(\d{1,3})[\/\-](\d{1,2})(\s*\([\d.]+\s*(?:ov|overs?)?\))?/i;
   let scoreForTeamA = '';
   let scoreForTeamB = '';
   let detectedResult = '';
-  for (const line of lines) {
+
+  // A real Cricbuzz/ESPN paste puts the team name on its own line, with the
+  // score ("141-10 (36.4 Ov)") on one of the next couple of lines — NOT the
+  // same line. So for each score line found, look BACKWARDS a few lines for
+  // the nearest team-name mention to pair them correctly (instead of relying
+  // on paste order, which silently swaps A/B when the team batting second is
+  // listed first in the pasted text).
+  const LOOKBACK = 3;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const lc = line.toLowerCase();
     if (!detectedResult && (lc.includes('won by') || lc.includes('match tied') || lc.includes('no result') || lc.includes('abandoned'))) {
       detectedResult = line.replace(/^[*#>\s\-]+/, '').trim();
@@ -7921,9 +7967,19 @@ function d11AutoDetectScoreFromText(matchId, text) {
     const sm = line.match(scoreRe);
     if (!sm) continue;
     const scoreStr = (sm[1] + '/' + sm[2] + (sm[3] ? sm[3].trim() : '')).trim();
-    if (!scoreForTeamA && lineHasTeam(lc, teamAWords)) { scoreForTeamA = scoreStr; }
-    else if (!scoreForTeamB && lineHasTeam(lc, teamBWords)) { scoreForTeamB = scoreStr; }
+
+    // Search this line first (rare "Team 141/10" one-liner), then walk
+    // backwards through the preceding lines for the nearest team mention.
+    let matchedSide = null;
+    for (let back = 0; back <= LOOKBACK && (i - back) >= 0; back++) {
+      const checkLc = lines[i - back].toLowerCase();
+      if (lineHasTeam(checkLc, teamAWords)) { matchedSide = 'A'; break; }
+      if (lineHasTeam(checkLc, teamBWords)) { matchedSide = 'B'; break; }
+    }
+    if (matchedSide === 'A' && !scoreForTeamA) scoreForTeamA = scoreStr;
+    else if (matchedSide === 'B' && !scoreForTeamB) scoreForTeamB = scoreStr;
   }
+
   if (!scoreForTeamA || !scoreForTeamB) {
     const allScores = [];
     const gRe = /(\d{1,3})[\/\-](\d{1,2})(\s*\([\d.]+\s*(?:ov|overs?)?\))?/gi;
@@ -7933,14 +7989,771 @@ function d11AutoDetectScoreFromText(matchId, text) {
       if (!allScores.includes(s)) allScores.push(s);
       if (allScores.length >= 2) break;
     }
-    if (!scoreForTeamA && allScores[0]) scoreForTeamA = allScores[0];
-    if (!scoreForTeamB && allScores[1]) scoreForTeamB = allScores[1];
+    // Last-resort fallback (team names not found in text at all, e.g. custom
+    // team nicknames) — assign in paste order. Only fires when the
+    // name-based matching above found neither score.
+    if (!scoreForTeamA && !scoreForTeamB) {
+      if (allScores[0]) scoreForTeamA = allScores[0];
+      if (allScores[1]) scoreForTeamB = allScores[1];
+    } else {
+      // One side already matched by name — fill only the other, unmatched
+      // side from whichever detected score wasn't already used above.
+      const used = [scoreForTeamA, scoreForTeamB].filter(Boolean);
+      const remaining = allScores.filter(s => !used.includes(s));
+      if (!scoreForTeamA && remaining[0]) scoreForTeamA = remaining[0];
+      if (!scoreForTeamB && remaining[0]) scoreForTeamB = remaining[0];
+    }
   }
   if (scoreForTeamA) m.scoreA = scoreForTeamA;
   if (scoreForTeamB) m.scoreB = scoreForTeamB;
   if (detectedResult) m.resultText = detectedResult;
   // Keep the raw text too, so the user-facing "Full Scorecard" page has something to show.
   m.scorecardText = text;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CRICBUZZ (via RapidAPI) LIVE SYNC — automatic score/Playing XI/result
+// fetch, no manual paste needed. See CRICBUZZ_RAPIDAPI_KEY / CRICBUZZ_BASE
+// above. This mirrors the same Cricbuzz data the manual "paste scorecard"
+// flow already parses, so international bilateral series and ICC events are
+// fully covered, not just domestic leagues.
+// ═══════════════════════════════════════════════════════════════════════
+
+// Low-level fetch wrapper for the Cricbuzz RapidAPI endpoints. `path` is
+// appended to CRICBUZZ_BASE (e.g. '/matches/v1/upcoming'). Optional
+// `params` become a query string. Throws on any non-OK response or network
+// error — callers catch and show a friendly message / fall back to manual
+// paste.
+async function _cricbuzzFetch(path, params) {
+  const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+  const url = `${CRICBUZZ_BASE}${path}${qs}`;
+  const res = await fetch(url, {
+    headers: {
+      'x-rapidapi-host': CRICBUZZ_RAPIDAPI_HOST,
+      'x-rapidapi-key': CRICBUZZ_RAPIDAPI_KEY
+    }
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return await res.json();
+}
+
+// Cricbuzz's match-list endpoints nest matches inside
+// typeMatches[].seriesMatches[].seriesAdWrapper.matches[].matchInfo — pull
+// every matchInfo out into a flat array regardless of which endpoint
+// produced it (upcoming/live/recent all share this same shape).
+function _cricbuzzFlattenMatches(data) {
+  const out = [];
+  (data?.typeMatches || []).forEach(tm => {
+    (tm.seriesMatches || []).forEach(sm => {
+      const wrapper = sm.seriesAdWrapper;
+      if (!wrapper) return;
+      (wrapper.matches || []).forEach(match => {
+        if (match?.matchInfo) out.push({ matchInfo: match.matchInfo, matchScore: match.matchScore });
+      });
+    });
+  });
+  return out;
+}
+
+// Cricbuzz's matchFormat strings ("T20", "ODI", "TEST", "T10", "The Hundred"
+// etc.) → our internal format keys used by D11_SCORING ('T20'/'ODI'/'Test').
+// Anything unrecognized falls back to T20 (safest default — shortest/most
+// common format, and admin can still change it before publishing).
+function _d11MapCricbuzzFormat(fmt) {
+  const f = (fmt || '').toUpperCase();
+  if (f.includes('TEST')) return 'Test';
+  if (f.includes('ODI') || f.includes('LIST A') || f.includes('LIST-A')) return 'ODI';
+  return 'T20'; // covers T20, T20I, T10, The Hundred, etc.
+}
+
+// ── "📡 Import from Cricbuzz" — pulls RapidAPI's own upcoming-matches list
+// directly (no team-name search needed) so admin can browse real fixtures
+// and one-tap create + auto-link a Dream11 match. Uses only ONE API call
+// (a single /matches/v1/upcoming hit), so opening this panel is cheap on
+// the monthly quota — the search-based "🔗 Link Live Match" flow (which
+// costs 3 calls: upcoming+live+recent) is only needed afterward, once, to
+// finish linking a manually-created match.
+async function d11OpenImportPanel() {
+  d11ImportPanelOpen = true;
+  d11ImportResults = [];
+  d11ImportError = null;
+  render();
+  d11FetchImportList();
+}
+function d11CloseImportPanel() {
+  d11ImportPanelOpen = false;
+  d11ImportResults = [];
+  d11ImportError = null;
+  render();
+}
+async function d11FetchImportList() {
+  d11ImportLoading = true;
+  d11ImportError = null;
+  render();
+  try {
+    const data = await _cricbuzzFetch('/matches/v1/upcoming');
+    const flat = _cricbuzzFlattenMatches(data);
+    const juniorWomenTags = ['women','u19','u-19','u16','u-16','under-19','under 19'];
+    // De-dupe by matchId, drop junior/women fixtures (admin's platform is
+    // for the main international/league game — keeps the list relevant),
+    // sort soonest-first.
+    const seen = new Set();
+    d11ImportResults = flat.filter(mt => {
+      const info = mt.matchInfo;
+      const id = info?.matchId;
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
+      const nameL = [info.team1?.teamName, info.team2?.teamName, info.seriesName, info.matchDesc].filter(Boolean).join(' ').toLowerCase();
+      if (juniorWomenTags.some(t => nameL.includes(t))) return false;
+      return true;
+    }).sort((a,b) => (Number(a.matchInfo?.startDate)||0) - (Number(b.matchInfo?.startDate)||0));
+  } catch (e) {
+    console.error(e);
+    d11ImportError = 'Could not reach Cricbuzz API — ' + (e.message||'unknown error');
+  } finally {
+    d11ImportLoading = false;
+    render();
+  }
+}
+
+// One-tap import: creates the Dream11 match (unpublished), auto-fills
+// teamA/teamB/format/deadline from Cricbuzz's own data, then immediately
+// links it to that same fixture for Live Sync — admin never types a team
+// name or searches separately. Lands on the player-pool screen, matching
+// the same next-step as the manual "Create Match" flow.
+async function d11ImportMatch(mt) {
+  const info = mt.matchInfo;
+  if (!info) return;
+  const teamA = info.team1?.teamName || info.team1?.teamSName || 'TBD';
+  const teamB = info.team2?.teamName || info.team2?.teamSName || 'TBD';
+  const format = _d11MapCricbuzzFormat(info.matchFormat);
+  const startMs = Number(info.startDate) || Date.now();
+
+  const mid = 'm_' + Date.now() + '_' + Math.random().toString(36).slice(2,8);
+  matches[mid] = {
+    id: mid,
+    sport: 'cricket',
+    format,
+    teamA, teamB,
+    seriesName: info.seriesName || '',
+    deadline: startMs,
+    status: 'upcoming',
+    questions: []
+  };
+  await _saveMatchToFirestore(mid, matches[mid]);
+
+  dream11Matches[mid] = { players: [], scored: false, locked: false, published: false, megaPool: 0, freePool: 0 };
+  await _saveDream11MatchToFirestore(mid, dream11Matches[mid]);
+
+  // Auto-link to this exact Cricbuzz fixture — no separate search needed.
+  d11LinkLiveMatch(mid, info.matchId, info.team1?.teamId||info.team1?.id||null, info.team2?.teamId||info.team2?.id||null);
+
+  d11ImportPanelOpen = false;
+  d11ImportResults = [];
+  d11ActiveMatchId = mid;
+  d11AdminTab = 'pool';
+  tab = 'dream11Pool';
+  render();
+  window.scrollTo(0,0);
+  showNotif(`✅ Imported "${teamA} vs ${teamB}" — linked for Live Sync. Fetching squad…`);
+
+  // Auto-fetch squad right away too, so admin lands on a pool that's
+  // already populated (if Cricbuzz has published squads for this fixture
+  // yet — if not, this silently finds 0 players and the automatic
+  // pre-toss XI-announcement poll (already started by d11LinkLiveMatch)
+  // will pick them up the moment Cricbuzz publishes them).
+  try {
+    await d11FetchSquadFromCricbuzz(mid);
+  } catch (e) {
+    console.warn('Auto squad-fetch on import failed (can still Fetch Squad manually):', e.message);
+  }
+}
+
+function renderD11ImportPanelModal() {
+  if (!d11ImportPanelOpen) return '';
+  const fmtBadge = (fmt) => {
+    const mapped = _d11MapCricbuzzFormat(fmt);
+    const color = mapped==='T20' ? '#fbbf24' : mapped==='ODI' ? '#60a5fa' : '#c084fc';
+    return `<span style="font-size:9.5px;font-weight:700;color:${color};background:${color}1a;border-radius:5px;padding:2px 6px;white-space:nowrap">${mapped}</span>`;
+  };
+  return `<div style="position:fixed;inset:0;z-index:2000;background:rgba(5,10,20,0.82);backdrop-filter:blur(4px);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseImportPanel()">
+    <div class="card" style="width:100%;max-width:600px;max-height:82vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:18px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="font-size:15px;font-weight:700">📡 Import from Cricbuzz</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseImportPanel()">✕</button>
+      </div>
+      <div style="font-size:11.5px;color:var(--dim);margin-bottom:14px">Upcoming fixtures from Cricbuzz — tap one to create + auto-link a Dream11 match in one step (uses 1 API call to load this list).</div>
+      ${d11ImportLoading ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">🔄 Loading upcoming matches…</div>` : ''}
+      ${d11ImportError ? `<div style="background:rgba(220,38,38,0.1);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:10px;font-size:12px;color:#f87171;margin-bottom:10px">${d11ImportError}</div>` : ''}
+      ${!d11ImportLoading ? d11ImportResults.map(mt => {
+        const info = mt.matchInfo || {};
+        const title = [info.team1?.teamName, info.team2?.teamName].filter(Boolean).join(' vs ') || info.matchDesc || '—';
+        const sub = [info.matchDesc, info.seriesName].filter(Boolean).join(' · ');
+        const startMs = Number(info.startDate);
+        const dateStr = startMs ? pkDateTime(startMs) : '';
+        return `
+        <div style="background:var(--input-bg);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:2px">
+            <div style="font-size:12.5px;font-weight:600;line-height:1.4">${title}</div>
+            ${fmtBadge(info.matchFormat)}
+          </div>
+          <div style="font-size:10.5px;color:var(--dim);margin-bottom:2px">${sub}</div>
+          ${dateStr ? `<div style="font-size:10px;color:var(--dim2);margin-bottom:8px">⏰ ${dateStr}</div>` : `<div style="margin-bottom:8px"></div>`}
+          <button class="btn-secondary btn-block" style="font-size:11px;padding:8px;background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;border:none" onclick='d11ImportMatch(${JSON.stringify(mt).replace(/'/g,"&apos;")})'>➕ Import & Link This Match</button>
+        </div>
+      `;
+      }).join('') : ''}
+      ${!d11ImportLoading && !d11ImportResults.length && !d11ImportError ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">No upcoming matches found</div>` : ''}
+      <button class="btn-secondary btn-block" style="margin-top:10px;font-size:12px" onclick="d11FetchImportList()">🔄 Refresh</button>
+    </div>
+  </div>`;
+}
+
+// Search Cricbuzz's upcoming + live + recent match lists for ones whose team
+// names resemble the given match's teamA/teamB — used by the "🔗 Link Live
+// Match" picker so the admin can confirm the right fixture without typing an
+// id. Checking all three lists (rather than just one) is what lets a match
+// that hasn't started yet ("Today 9:30 PM") show up immediately.
+async function d11SearchLiveMatch(matchId) {
+  const m = matches[matchId];
+  if (!m) return;
+  _d11LiveSyncSearchLoading = true;
+  _d11LiveSyncSearchError = null;
+  _d11LiveSyncSearchResults = [];
+  render();
+  try {
+    const [upcomingRes, liveRes, recentRes] = await Promise.allSettled([
+      _cricbuzzFetch('/matches/v1/upcoming'),
+      _cricbuzzFetch('/matches/v1/live'),
+      _cricbuzzFetch('/matches/v1/recent')
+    ]);
+    const pools = [];
+    [upcomingRes, liveRes, recentRes].forEach(r => {
+      if (r.status === 'fulfilled' && r.value) pools.push(..._cricbuzzFlattenMatches(r.value));
+    });
+    if (pools.length === 0) {
+      const firstErr = [upcomingRes, liveRes, recentRes].find(r => r.status === 'rejected');
+      throw new Error(firstErr?.reason?.message || 'No data returned from Cricbuzz');
+    }
+    // De-dupe by matchId (a fixture can appear in more than one list, e.g.
+    // "live" and "recent" right around when it finishes)
+    const seen = new Set();
+    const combined = pools.filter(mt => {
+      const id = mt.matchInfo?.matchId;
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+
+    const teamAWords = (m.teamA||'').toLowerCase().split(/\s+/).filter(w=>w.length>2);
+    const teamBWords = (m.teamB||'').toLowerCase().split(/\s+/).filter(w=>w.length>2);
+    const juniorWomenTags = ['women','u19','u-19','u16','u-16','under-19','under 19'];
+    const ourMatchIsJuniorWomen = juniorWomenTags.some(t => (m.teamA+' '+m.teamB).toLowerCase().includes(t));
+
+    const scored = combined.map(mt => {
+      const info = mt.matchInfo;
+      const nameL = [info.team1?.teamName, info.team2?.teamName, info.seriesName, info.matchDesc].filter(Boolean).join(' ').toLowerCase();
+
+      const isJuniorWomen = juniorWomenTags.some(t => nameL.includes(t));
+      if (isJuniorWomen && !ourMatchIsJuniorWomen) return { mt, score: -1 };
+
+      const aHit = teamAWords.some(w => nameL.includes(w));
+      const bHit = teamBWords.some(w => nameL.includes(w));
+      if (!aHit || !bHit) return { mt, score: 0 };
+
+      let score = 0;
+      teamAWords.forEach(w => { if (nameL.includes(w)) score++; });
+      teamBWords.forEach(w => { if (nameL.includes(w)) score++; });
+      // Prefer fixtures that haven't finished yet.
+      const stateL = (info.state||info.status||'').toLowerCase();
+      if (!stateL.includes('complete') && !stateL.includes('won by') && !stateL.includes('drawn')) score += 0.5;
+      return { mt, score };
+    }).filter(x => x.score > 0).sort((a,b)=>b.score-a.score);
+
+    _d11LiveSyncSearchResults = scored.slice(0, 8).map(x => x.mt);
+    if (_d11LiveSyncSearchResults.length === 0) {
+      _d11LiveSyncSearchError = 'No exact match found on Cricbuzz for both team names together. Showing all upcoming/live matches instead — pick manually, or use manual paste if not listed.';
+      _d11LiveSyncSearchResults = combined.slice(0, 15);
+    }
+  } catch (e) {
+    console.error(e);
+    _d11LiveSyncSearchError = 'Could not reach Cricbuzz API — ' + (e.message||'unknown error');
+  } finally {
+    _d11LiveSyncSearchLoading = false;
+    render();
+  }
+}
+
+// Admin picks one of the search results — save the Cricbuzz match id onto
+// our match record and immediately do a first sync + start the poll loop.
+// team1Id/team2Id (Cricbuzz's own internal team IDs, not our app's team
+// names) are captured here too since they're only available in the search
+// result payload — needed later for the "📥 Fetch Squad" button which calls
+// matches/get-team, an endpoint that takes a teamId, not team name.
+function _d11MapCricbuzzRole(cbRole, keeper) {
+  const low = (cbRole || '').toLowerCase().trim();
+  if (keeper) return 'WK';
+  for (const [code, aliases] of Object.entries(D11_ROLE_ALIASES)) {
+    if (aliases.some(a => low === a || low.includes(a))) return code;
+  }
+  return 'BAT';
+}
+
+// ── Fetch Squad from Cricbuzz (matches/get-team, one call per team) ──────
+// Populates the Dream11 player pool directly from Cricbuzz's confirmed
+// lineup for a linked match — no manual typing needed. Only adds players
+// who aren't already in the pool (matched by name, case-insensitive) so
+// re-running this after the admin has made manual edits is safe and won't
+// create duplicates. Requires the match to have been linked via "🔗 Link
+// Live Match" first, since that's what captures the Cricbuzz team IDs.
+async function d11FetchSquadFromCricbuzz(matchId) {
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m) return;
+  if (!m.cricketDataMatchId) {
+    return showNotif('Link this match to Cricbuzz first (🔗 Link Live Match), then try again', 'error');
+  }
+  if (!m.cricbuzzTeam1Id || !m.cricbuzzTeam2Id) {
+    return showNotif('Team IDs missing — please unlink and re-link this match to pick up team IDs, then try again', 'error');
+  }
+
+  showNotif('📥 Fetching squads from Cricbuzz…');
+  try {
+    const [team1Data, team2Data] = await Promise.all([
+      _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam1Id}`),
+      _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam2Id}`)
+    ]);
+    // TEMP DEBUG — shows the raw Cricbuzz response for both teams in an
+    // on-screen, copyable panel (see renderD11SquadDebugModal) so the
+    // admin can screenshot/copy it without needing browser DevTools.
+    // Remove this once the squad-shape issue is confirmed/fixed.
+    _d11SquadDebugData = { team1: team1Data, team2: team2Data, team1Id: m.cricbuzzTeam1Id, team2Id: m.cricbuzzTeam2Id };
+
+    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    let addedCount = 0;
+
+    [{ data: team1Data, side: 'A' }, { data: team2Data, side: 'B' }].forEach(({ data, side }) => {
+      const playingXI = data?.players?.['playing XI'] || [];
+      const bench = data?.players?.bench || [];
+      let combined = [...playingXI, ...bench];
+      // Pre-toss fallback — before the toss, Cricbuzz hasn't decided the
+      // final XI yet, so 'players'/'playing XI'/'bench' don't exist at all.
+      // Instead the real shape (confirmed via a live debug capture) is:
+      //   { "player": [ { "player": [ {...player...}, ... ], "category": "Squad" } ] }
+      // i.e. a top-level `player` (singular) array of category-groups,
+      // each with its own nested `player` array of actual player objects.
+      // Walk every group under `data.player` and flatten all their player
+      // arrays together. This also naturally handles series that split the
+      // squad into multiple categories (e.g. "Squad" + "Support Staff") —
+      // support-staff entries just won't have a recognizable player `role`,
+      // which is fine since we still capture the name.
+      if (combined.length === 0 && Array.isArray(data?.player)) {
+        data.player.forEach(group => {
+          if (Array.isArray(group?.player)) combined.push(...group.player);
+        });
+      }
+      // Older/alternate shape fallback — some responses may nest everything
+      // a level deeper under `players` instead of `player`, or hand back a
+      // flat array directly. Covers those cases too, just in case.
+      if (combined.length === 0) {
+        const playersObj = data?.players;
+        if (Array.isArray(playersObj)) {
+          combined = playersObj;
+        } else if (playersObj && typeof playersObj === 'object') {
+          Object.values(playersObj).forEach(val => {
+            if (Array.isArray(val)) combined.push(...val);
+          });
+        }
+      }
+      combined.forEach(p => {
+        const name = (p.fullName || p.name || '').trim();
+        if (!name || existingNamesLower.has(name.toLowerCase())) return;
+        const role = _d11MapCricbuzzRole(p.role, p.keeper);
+        const player = newDream11Player(name, role, side);
+        // Players confirmed in Cricbuzz's "playing XI" list can be marked
+        // right away — saves the admin a manual confirm step later.
+        if (playingXI.includes(p)) player.isPlayingXI = true;
+        d11m.players.push(player);
+        d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
+        existingNamesLower.add(name.toLowerCase());
+        addedCount++;
+      });
+    });
+
+    if (addedCount === 0) {
+      showNotif('No new players to add — squad already matches what Cricbuzz has. Tap "🐛 View Raw Data" below to see why.', 'error');
+      render();
+      return;
+    }
+
+    await _saveDream11MatchToFirestore(matchId, d11m);
+    showNotif(`✅ Added ${addedCount} players from Cricbuzz squad!`);
+    render();
+  } catch (e) {
+    console.error('Squad fetch error:', e);
+    showNotif('Could not fetch squad — ' + (e.message||'unknown error') + '. You can still add players manually.', 'error');
+    render();
+  }
+}
+
+// TEMP DEBUG modal — shows the raw Cricbuzz response captured by the last
+// Fetch Squad attempt, so the admin can screenshot/copy it without needing
+// browser DevTools. Remove once squad-shape issue is confirmed/fixed.
+function d11OpenSquadDebugModal() { render(); }
+function d11CloseSquadDebugModal() { _d11SquadDebugData = null; render(); }
+function renderD11SquadDebugModal() {
+  if (!_d11SquadDebugData) return '';
+  const pretty = (obj) => JSON.stringify(obj, null, 2).replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return `<div style="position:fixed;inset:0;z-index:2100;background:rgba(5,10,20,0.9);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseSquadDebugModal()">
+    <div class="card" style="width:100%;max-width:700px;max-height:88vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:16px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-size:14px;font-weight:700">🐛 Raw Cricbuzz Response (debug)</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseSquadDebugModal()">✕</button>
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-bottom:10px">Long-press the text below to select all, then copy and share it. Team1 ID: ${_d11SquadDebugData.team1Id} · Team2 ID: ${_d11SquadDebugData.team2Id}</div>
+      <div style="font-size:11px;font-weight:700;color:#60a5fa;margin-bottom:4px">TEAM 1:</div>
+      <textarea readonly style="width:100%;height:180px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px;margin-bottom:12px" onclick="this.select()">${pretty(_d11SquadDebugData.team1)}</textarea>
+      <div style="font-size:11px;font-weight:700;color:#60a5fa;margin-bottom:4px">TEAM 2:</div>
+      <textarea readonly style="width:100%;height:180px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px" onclick="this.select()">${pretty(_d11SquadDebugData.team2)}</textarea>
+    </div>
+  </div>`;
+}
+
+function d11LinkLiveMatch(matchId, cricbuzzMatchId, team1Id, team2Id) {
+  const m = matches[matchId];
+  if (!m) return;
+  m.cricketDataMatchId = cricbuzzMatchId; // field name kept for backward compatibility with earlier saved links
+  if (team1Id) m.cricbuzzTeam1Id = team1Id;
+  if (team2Id) m.cricbuzzTeam2Id = team2Id;
+  _saveMatchToFirestore(matchId, m);
+  _d11LiveSyncSearchResults = [];
+  // Only sync right away if the match has actually already started —
+  // otherwise there's no score to fetch yet, and doing it anyway would
+  // just burn a RapidAPI call for nothing. d11StartLiveSyncPolling already
+  // handles waiting until the deadline before its first real check.
+  const deadlineMs = m.deadline ? new Date(m.deadline).getTime() : NaN;
+  const alreadyStarted = !deadlineMs || isNaN(deadlineMs) || deadlineMs <= Date.now();
+  showNotif(alreadyStarted ? '🔗 Linked! Fetching live data…' : '🔗 Linked! Will start syncing once the match begins.');
+  if (alreadyStarted) d11SyncLiveMatch(matchId, true);
+  d11StartLiveSyncPolling(matchId);
+  if (team1Id && team2Id) d11StartSquadAnnouncementPolling(matchId);
+  render();
+}
+
+function d11UnlinkLiveMatch(matchId) {
+  const m = matches[matchId];
+  if (!m) return;
+  delete m.cricketDataMatchId;
+  delete m.cricbuzzTeam1Id;
+  delete m.cricbuzzTeam2Id;
+  _saveMatchToFirestore(matchId, m);
+  d11StopLiveSyncPolling(matchId);
+  d11StopSquadAnnouncementPolling(matchId);
+  showNotif('Unlinked from Live Sync — switched back to manual paste');
+  render();
+}
+
+// Live-sync check frequency depends on match format — a T20 finishes an
+// innings roughly every ~1.5 hrs, an ODI roughly every ~4 hrs, so there's no
+// point checking Cricbuzz more often than that; it just burns through the
+// RapidAPI free-tier's limited monthly request quota for no benefit. Test
+// matches move slower still, so a similar long interval is used there too.
+// Falls back to the T20 interval for any unrecognized format.
+function d11GetLiveSyncIntervalMs(format) {
+  const f = (format || '').toUpperCase();
+  if (f === 'ODI') return 4 * 60 * 60 * 1000;   // 4 hours
+  if (f === 'TEST') return 4 * 60 * 60 * 1000;  // 4 hours (multi-day match — same cadence as ODI is plenty)
+  return 90 * 60 * 1000;                        // 1.5 hours — T20 default
+}
+
+// Starts (or restarts) the live-score poll loop for one linked match, at an
+// interval based on the match's format (see d11GetLiveSyncIntervalMs above).
+// Safe to call repeatedly — clears any existing timer for this match first
+// so we never double-poll. Call this once per linked match on app load, and
+// again right after linking.
+//
+// IMPORTANT: the repeating interval only starts once the match's deadline
+// (start time) has actually passed — there's nothing to sync before a ball
+// has been bowled, so polling before then would just burn RapidAPI quota
+// for empty responses. If the deadline is still in the future, this
+// schedules a single one-shot timer to fire right at the deadline, which
+// then kicks off the real repeating interval from that point on.
+function d11StartLiveSyncPolling(matchId) {
+  d11StopLiveSyncPolling(matchId);
+  const m = matches[matchId];
+  if (!m) return;
+  const deadlineMs = m.deadline ? new Date(m.deadline).getTime() : NaN;
+  const now = Date.now();
+
+  if (deadlineMs && !isNaN(deadlineMs) && deadlineMs > now) {
+    // Match hasn't started yet — wait until deadline, then begin polling.
+    const delay = deadlineMs - now;
+    _d11LiveSyncTimers[matchId] = setTimeout(() => {
+      const m2 = matches[matchId];
+      if (!m2 || !m2.cricketDataMatchId || m2.status === 'completed') return;
+      d11SyncLiveMatch(matchId, false);       // first check right at start time
+      _d11BeginLiveSyncInterval(matchId);      // then settle into the regular interval
+    }, delay);
+    return;
+  }
+
+  // Deadline already passed (or not set) — match may already be underway,
+  // so start polling immediately as before.
+  _d11BeginLiveSyncInterval(matchId);
+}
+// Internal: the actual repeating setInterval, factored out so both the
+// "wait for deadline" path and the "already started" path can share it.
+function _d11BeginLiveSyncInterval(matchId) {
+  const m = matches[matchId];
+  const intervalMs = d11GetLiveSyncIntervalMs(m?.format);
+  _d11LiveSyncTimers[matchId] = setInterval(() => {
+    const m = matches[matchId];
+    if (!m || !m.cricketDataMatchId || m.status === 'completed') {
+      d11StopLiveSyncPolling(matchId);
+      return;
+    }
+    d11SyncLiveMatch(matchId, false);
+  }, intervalMs);
+}
+function d11StopLiveSyncPolling(matchId) {
+  if (_d11LiveSyncTimers[matchId]) {
+    clearInterval(_d11LiveSyncTimers[matchId]);
+    clearTimeout(_d11LiveSyncTimers[matchId]); // matches whichever kind was scheduled (interval id and timeout id are both plain numbers, safe to pass to either clear fn)
+    delete _d11LiveSyncTimers[matchId];
+  }
+}
+// Call once on app startup to resume polling for every match the admin had
+// already linked in a previous session.
+function d11ResumeAllLiveSyncPolling() {
+  Object.keys(matches).forEach(matchId => {
+    const m = matches[matchId];
+    if (m && m.cricketDataMatchId && m.status !== 'completed') {
+      d11StartLiveSyncPolling(matchId);
+    }
+  });
+}
+
+// ── Automatic pre-toss "Playing XI announced" check ──────────────────────
+// From the moment a match is linked, poll Cricbuzz's squad endpoint every
+// ~3 min looking for the "playing XI" list to become non-empty (this is
+// how Cricbuzz reflects the toss/lineup announcement — independent of the
+// ball-by-ball scorecard, which only exists once play has actually begun).
+// The moment it's non-empty, mark all 11+11 confirmed players with a green
+// tick automatically (same result as admin tapping "📥 Fetch Squad" by
+// hand) and stop this fast poll — the regular 35-min live-score poll takes
+// over from there for the rest of the match.
+let _d11SquadPollTimers = {};
+const D11_XI_CHECK_BEFORE_DEADLINE_MS = 15 * 60 * 1000; // check once, 15 min before the contest deadline
+
+function d11StartSquadAnnouncementPolling(matchId) {
+  d11StopSquadAnnouncementPolling(matchId);
+  // Run once immediately (covers the case where XI was already announced,
+  // or the deadline is already within/past the 15-min window by the time
+  // admin links the match).
+  d11CheckPlayingXIAnnounced(matchId);
+
+  const d11m = dream11Matches[matchId];
+  const deadlineMs = d11m?.deadline ? new Date(d11m.deadline).getTime() : NaN;
+  if (!deadlineMs || isNaN(deadlineMs)) return; // no deadline set — nothing to schedule
+
+  const fireAt = deadlineMs - D11_XI_CHECK_BEFORE_DEADLINE_MS;
+  const delay = fireAt - Date.now();
+  if (delay <= 0) return; // already inside (or past) the 15-min window — the immediate check above covers it
+
+  // Single one-shot check, timed for exactly 15 min before deadline.
+  _d11SquadPollTimers[matchId] = setTimeout(() => {
+    delete _d11SquadPollTimers[matchId];
+    const m = matches[matchId];
+    if (!m || !m.cricketDataMatchId || m.status === 'completed') return;
+    d11CheckPlayingXIAnnounced(matchId);
+  }, delay);
+}
+function d11StopSquadAnnouncementPolling(matchId) {
+  if (_d11SquadPollTimers[matchId]) {
+    clearTimeout(_d11SquadPollTimers[matchId]);
+    delete _d11SquadPollTimers[matchId];
+  }
+}
+// Resume on app startup for every match that's linked but doesn't have a
+// confirmed Playing XI yet (e.g. admin linked it, then closed the app
+// before toss happened).
+function d11ResumeAllSquadAnnouncementPolling() {
+  Object.keys(matches).forEach(matchId => {
+    const m = matches[matchId];
+    const d11m = dream11Matches[matchId];
+    if (m && d11m && m.cricketDataMatchId && m.status !== 'completed' && !d11m.players?.some(p => p.isPlayingXI)) {
+      d11StartSquadAnnouncementPolling(matchId);
+    }
+  });
+}
+
+async function d11CheckPlayingXIAnnounced(matchId) {
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m || !m.cricketDataMatchId || !m.cricbuzzTeam1Id || !m.cricbuzzTeam2Id) return;
+  // Already confirmed (either by this poll earlier, or admin did it
+  // manually) — nothing left to check, stop polling.
+  if ((d11m.players || []).some(p => p.isPlayingXI)) {
+    d11StopSquadAnnouncementPolling(matchId);
+    return;
+  }
+  try {
+    const [team1Data, team2Data] = await Promise.all([
+      _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam1Id}`),
+      _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam2Id}`)
+    ]);
+    const xi1 = team1Data?.players?.['playing XI'] || [];
+    const xi2 = team2Data?.players?.['playing XI'] || [];
+    if (xi1.length === 0 && xi2.length === 0) return; // not announced yet — keep polling silently
+
+    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    let confirmedCount = 0, addedCount = 0;
+
+    [{ list: xi1, bench: team1Data?.players?.bench || [], side: 'A' }, { list: xi2, bench: team2Data?.players?.bench || [], side: 'B' }].forEach(({ list, bench, side }) => {
+      list.forEach(p => {
+        const name = (p.fullName || p.name || '').trim();
+        if (!name) return;
+        const nameLower = name.toLowerCase();
+        let player = (d11m.players || []).find(pl => pl.name.toLowerCase().trim() === nameLower);
+        if (player) {
+          if (!player.isPlayingXI) { player.isPlayingXI = true; confirmedCount++; }
+        } else {
+          // Player wasn't in our pool at all (pool built before this squad
+          // was fully known) — add them now, already confirmed.
+          const role = _d11MapCricbuzzRole(p.role, p.keeper);
+          const newPlayer = newDream11Player(name, role, side);
+          newPlayer.isPlayingXI = true;
+          d11m.players.push(newPlayer);
+          d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
+          existingNamesLower.add(nameLower);
+          addedCount++; confirmedCount++;
+        }
+      });
+      // Bench players aren't in the XI, but still worth having in the pool
+      // for completeness (e.g. admin wants to show them as unavailable).
+      bench.forEach(p => {
+        const name = (p.fullName || p.name || '').trim();
+        if (!name || existingNamesLower.has(name.toLowerCase())) return;
+        const role = _d11MapCricbuzzRole(p.role, p.keeper);
+        d11m.players.push(newDream11Player(name, role, side));
+        d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
+        existingNamesLower.add(name.toLowerCase());
+        addedCount++;
+      });
+    });
+
+    if (confirmedCount > 0) {
+      await _saveDream11MatchToFirestore(matchId, d11m);
+      showNotif(`🏏 Playing XI announced! ${confirmedCount} players confirmed automatically ✅${addedCount ? ` (${addedCount} new players added to pool)` : ''}`);
+      d11StopSquadAnnouncementPolling(matchId);
+      render();
+    }
+  } catch (e) {
+    // Silent failure on background polls — don't spam the admin with
+    // errors every 3 minutes if Cricbuzz hiccups; they'll see it next tick,
+    // or can always use the manual "📥 Fetch Squad" button as a fallback.
+    console.warn('Playing XI auto-check failed (will retry):', e.message);
+  }
+}
+
+
+// The core sync step: pulls the live scorecard for a linked match from
+// Cricbuzz and applies it —
+//  · running score (teamA/teamB "R/W (ov)" strings)
+//  · Playing XI (marks matching squad players as confirmed, per innings)
+//  · once status shows the match finished: full batting/bowling stats per
+//    player (feeding the same calcDream11PlayerPoints pipeline as manual
+//    paste) + result text, then stops polling.
+// `showToast` controls whether a success/error notif is shown — false for
+// the silent background poll ticks, true for an admin-triggered manual sync.
+async function d11SyncLiveMatch(matchId, showToast) {
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m || !m.cricketDataMatchId) return;
+  try {
+    const data = await _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/hscard`);
+    if (!data || (!data.scorecard && !data.matchHeader)) throw new Error('No scorecard data returned');
+
+    const header = data.matchHeader || {};
+    const team1Name = header.team1?.name || header.team1?.shortName || '';
+    const team2Name = header.team2?.name || header.team2?.shortName || '';
+
+    // ── Running score per team + Playing XI, from each innings on the scorecard ──
+    (data.scorecard || []).forEach(inn => {
+      const scoreStr = `${inn.score}/${inn.wickets} (${inn.overs} Ov)`;
+      const battingTeamNameL = (inn.batTeamName || '').toLowerCase();
+      if (_d11TeamNameMatches(battingTeamNameL, m.teamA)) m.scoreA = scoreStr;
+      else if (_d11TeamNameMatches(battingTeamNameL, m.teamB)) m.scoreB = scoreStr;
+
+      (inn.batsman || []).forEach(b => _d11ApplyLiveBattingRow(d11m, b));
+      (inn.bowler || []).forEach(bl => _d11ApplyLiveBowlingRow(d11m, bl));
+    });
+
+    if (header.status) m.liveStatusText = header.status;
+
+    (d11m.players || []).forEach(p => { if (p.stats) p.points = calcDream11PlayerPoints(p.stats, matchId); });
+    recalcDream11MatchPoints(d11m);
+
+    _d11LiveSyncLastSyncedAt[matchId] = Date.now();
+    _saveMatchToFirestore(matchId, m);
+    _saveDream11MatchToFirestore(matchId, d11m);
+    d11RefreshLiveTeamPoints(matchId);
+
+    // ── Match finished: apply final result + stop polling ──
+    const statusL = (header.status || '').toLowerCase();
+    const stateL = (header.state || '').toLowerCase();
+    const isFinished = stateL.includes('complete') || statusL.includes('won by') || statusL.includes('drawn') || statusL.includes('tied') || statusL.includes('no result');
+    if (isFinished) {
+      m.resultText = header.status || m.resultText;
+      m.status = 'completed';
+      if (d11m) d11m.scored = true;
+      _saveMatchToFirestore(matchId, m);
+      _saveDream11MatchToFirestore(matchId, d11m);
+      d11StopLiveSyncPolling(matchId);
+      if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
+    } else if (showToast) {
+      showNotif('✅ Live data synced — score & Playing XI updated');
+    }
+    render();
+  } catch (e) {
+    console.error('Live sync error:', e);
+    if (showToast) showNotif('Could not sync — ' + (e.message||'unknown error') + '. You can still paste manually.', 'error');
+  }
+}
+
+function _d11TeamNameMatches(cricbuzzName, ourTeamName) {
+  if (!cricbuzzName || !ourTeamName) return false;
+  const words = ourTeamName.toLowerCase().split(/\s+/).filter(w=>w.length>2);
+  return words.some(w => cricbuzzName.includes(w));
+}
+
+function _d11FindPlayerByName(d11m, name) {
+  if (!name) return null;
+  const nameL = name.toLowerCase().trim();
+  return (d11m.players || []).find(p => {
+    const pL = p.name.toLowerCase();
+    return pL === nameL || pL.includes(nameL) || nameL.includes(pL);
+  }) || null;
+}
+
+function _d11ApplyLiveBattingRow(d11m, b) {
+  const p = _d11FindPlayerByName(d11m, b.name);
+  if (!p) return;
+  const outDesc = (b.outDesc || '').toLowerCase();
+  p.stats = { ...(p.stats||{}),
+    runs: Number(b.runs)||0, ballsFaced: Number(b.balls)||0, fours: Number(b.fours)||0, sixes: Number(b.sixes)||0,
+    isOut: !!outDesc && outDesc !== 'not out' && outDesc !== 'batting',
+    isPlayingXI: true
+  };
+}
+function _d11ApplyLiveBowlingRow(d11m, bl) {
+  const p = _d11FindPlayerByName(d11m, bl.name);
+  if (!p) return;
+  p.stats = { ...(p.stats||{}),
+    wickets: Number(bl.wickets)||0, maidens: Number(bl.maidens)||0,
+    oversBowled: parseFloat(bl.overs)||0, runsGiven: Number(bl.runs)||0,
+    isPlayingXI: true
+  };
 }
 
 // Strips markdown bold (**x**) and surrounding whitespace from a cell.
@@ -11343,6 +12156,89 @@ function renderD11Hero(subtitle) {
   </div>`;
 }
 
+// ── Live Sync status row shown on each Dream11 admin match card ──
+function _d11RenderLiveSyncRow(m) {
+  if (!m.cricketDataMatchId) {
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:8px;padding:8px 10px">
+      <span style="font-size:11px;color:#4ade80;flex:1">📡 Live Sync: not linked (manual paste mode)</span>
+      <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;border:none" onclick="d11OpenLiveSyncPicker('${m.id}')">🔗 Link Live Match</button>
+    </div>`;
+  }
+  const lastSync = _d11LiveSyncLastSyncedAt[m.id];
+  const lastSyncStr = lastSync ? new Date(lastSync).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : 'not yet';
+  const isWatchingForXI = !!_d11SquadPollTimers[m.id];
+  const syncIntervalMins = Math.round(d11GetLiveSyncIntervalMs(m.format) / 60000);
+  const syncIntervalLabel = syncIntervalMins >= 60 ? `${(syncIntervalMins/60).toFixed(syncIntervalMins%60===0?0:1)} hr` : `${syncIntervalMins} min`;
+  // A timer being registered doesn't necessarily mean polling has begun —
+  // it might just be the one-shot setTimeout waiting for the match's
+  // deadline (see d11StartLiveSyncPolling). Check the actual clock against
+  // the deadline so the label doesn't misleadingly claim "Active" hours
+  // before the match starts, when in reality zero Cricbuzz calls have been
+  // made for live score yet.
+  const hasTimer = !!_d11LiveSyncTimers[m.id];
+  const deadlineMs = m.deadline ? new Date(m.deadline).getTime() : NaN;
+  const matchStarted = !deadlineMs || isNaN(deadlineMs) || deadlineMs <= Date.now();
+  const isPolling = hasTimer && matchStarted;
+  const isWaitingForStart = hasTimer && !matchStarted;
+  const statusLabel = isPolling ? `🟢 Active (every ${syncIntervalLabel})` : isWaitingForStart ? `🟡 Waiting for match to start` : '⚪ Idle';
+  return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(37,99,235,0.08);border:1px solid rgba(37,99,235,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
+    <span style="font-size:11px;color:#60a5fa;flex:1;min-width:140px">📡 Live Sync: ${statusLabel} · Last: ${lastSyncStr}</span>
+    ${isWaitingForStart ? `<span style="font-size:10.5px;color:#93c5fd;width:100%">⏳ No score checks yet — first check happens right at match start, then every ${syncIntervalLabel} after that.</span>` : ''}
+    ${isWatchingForXI ? `<span style="font-size:10.5px;color:#c084fc;width:100%">👀 Auto-watching for Playing XI announcement (checks once, 15 min before deadline)…</span>` : ''}
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatch('${m.id}', true)">🔄 Sync Now</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromCricbuzz('${m.id}')">📥 Fetch Squad</button>
+    ${_d11SquadDebugData ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11OpenSquadDebugModal()">🐛 View Raw Data</button>` : ''}
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(220,38,38,0.12);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11UnlinkLiveMatch('${m.id}')">✕ Unlink</button>
+  </div>`;
+}
+
+// ── "🔗 Link Live Match" picker modal state + open/close ──
+let d11LiveSyncPickerMatchId = null;
+function d11OpenLiveSyncPicker(matchId) {
+  d11LiveSyncPickerMatchId = matchId;
+  _d11LiveSyncSearchResults = [];
+  _d11LiveSyncSearchError = null;
+  render();
+  d11SearchLiveMatch(matchId);
+}
+function d11CloseLiveSyncPicker() {
+  d11LiveSyncPickerMatchId = null;
+  _d11LiveSyncSearchResults = [];
+  render();
+}
+function renderD11LiveSyncPickerModal() {
+  if (!d11LiveSyncPickerMatchId) return '';
+  const m = matches[d11LiveSyncPickerMatchId];
+  if (!m) return '';
+  return `<div style="position:fixed;inset:0;z-index:2000;background:rgba(5,10,20,0.82);backdrop-filter:blur(4px);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseLiveSyncPicker()">
+    <div class="card" style="width:100%;max-width:600px;max-height:82vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:18px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div style="font-size:15px;font-weight:700">🔗 Link Live Match</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseLiveSyncPicker()">✕</button>
+      </div>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:12px">Searching Cricbuzz for: <b>${m.teamA} vs ${m.teamB}</b></div>
+      ${_d11LiveSyncSearchLoading ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">🔄 Searching…</div>` : ''}
+      ${_d11LiveSyncSearchError ? `<div style="background:rgba(220,38,38,0.1);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:10px;font-size:12px;color:#f87171;margin-bottom:10px">${_d11LiveSyncSearchError}</div>` : ''}
+      ${!_d11LiveSyncSearchLoading ? _d11LiveSyncSearchResults.map(mt => {
+        const info = mt.matchInfo || {};
+        const title = [info.team1?.teamName, info.team2?.teamName].filter(Boolean).join(' vs ') || info.matchDesc || '—';
+        const sub = [info.matchFormat, info.seriesName].filter(Boolean).join(' · ');
+        const status = info.status || info.state || '';
+        return `
+        <div style="background:var(--input-bg);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+          <div style="font-size:12.5px;font-weight:600;line-height:1.4;margin-bottom:2px">${title}</div>
+          <div style="font-size:10.5px;color:var(--dim);margin-bottom:2px">${sub}</div>
+          ${status ? `<div style="font-size:10px;color:var(--dim2);margin-bottom:8px">${status}</div>` : `<div style="margin-bottom:8px"></div>`}
+          <button class="btn-secondary btn-block" style="font-size:11px;padding:8px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;border:none" onclick="d11LinkLiveMatch('${d11LiveSyncPickerMatchId}','${info.matchId}',${info.team1?.teamId||info.team1?.id||'null'},${info.team2?.teamId||info.team2?.id||'null'})">Link this match</button>
+        </div>
+      `;
+      }).join('') : ''}
+      ${!_d11LiveSyncSearchLoading && !_d11LiveSyncSearchResults.length && !_d11LiveSyncSearchError ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">No matches found</div>` : ''}
+      <button class="btn-secondary btn-block" style="margin-top:10px;font-size:12px" onclick="d11SearchLiveMatch('${d11LiveSyncPickerMatchId}')">🔄 Search Again</button>
+    </div>
+  </div>`;
+}
+
 function renderDream11Hub() {
   try {
   const eligible = Object.values(matches).filter(m => m.sport === 'cricket' || dream11Matches[m.id]);
@@ -11395,6 +12291,7 @@ function renderDream11Hub() {
     ${renderD11Hero('Manage player pools, publish contests, and run the show')}
     <div class="section-title">🎮 Dream11 — Manage Contests</div>
     <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#7c3aed,#4f46e5)" onclick="d11AdminCreateMatch()">➕ Create New Dream11 Match</button>
+    <button class="btn-secondary btn-block mb14" style="background:rgba(37,99,235,0.1);border-color:rgba(37,99,235,0.3);color:#60a5fa" onclick="d11OpenImportPanel()">📡 Import from Cricbuzz (Upcoming)</button>
     <button class="btn-secondary btn-block mb14" style="background:rgba(168,85,247,0.1);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="goD11Tournaments()">🏆 Tournaments (multi-match contests)</button>
     <button class="btn-secondary btn-block mb14" style="background:rgba(249,115,22,0.1);border-color:rgba(249,115,22,0.3);color:#fb923c" onclick="goUtHub()">👑 User Tournaments (owner-run contests)</button>
     ${eligible.length === 0 ? `<div class="empty-state"><div class="empty-icon">🎮</div>No cricket matches yet.<br/>Tap above to create one.</div>` : eligible.map(m => {
@@ -11426,6 +12323,7 @@ function renderDream11Hub() {
           <span style="font-size:11px;color:#fbbf24;flex:1">🏏 Format: ${m.format||'T20'}</span>
           <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11EditFormat('${m.id}')">✏️ Change</button>
         </div>
+        ${_d11RenderLiveSyncRow(m)}
         <button class="btn-primary btn-block" style="font-size:12px;padding:10px;margin-bottom:8px;background:${d11m?.published ? 'linear-gradient(135deg,#dc2626,#b91c1c)' : 'linear-gradient(135deg,#16a34a,#15803d)'}" onclick="d11TogglePublish('${m.id}')">${d11m?.published ? '🚫 Unpublish (hide from users)' : '🚀 Publish (show to users)'}</button>
         <div style="display:flex;gap:8px">
           <button class="btn-secondary" style="flex:1;font-size:12px;padding:10px" onclick="openDream11Match('${m.id}')">⚙️ Manage Pool</button>
@@ -12980,7 +13878,11 @@ function renderDream11BuildTeam() {
       <button class="d11-cv-btn" onclick="d11ToggleBackup('${bid}')">✕</button>
     </div>`;
   }).join('')}
-  ` : ''}
+  ` : `
+  <div class="empty-state" style="margin-top:14px;padding:14px;font-size:12px">
+    Select ${D11_TEAM_SIZE - d11TeamDraft.picks.length} more player${(D11_TEAM_SIZE - d11TeamDraft.picks.length)===1?'':'s'} to unlock Captain/Vice-Captain selection and submit your team.
+  </div>
+  `}
 
   <div class="d11-sticky-bar">
     <div>
@@ -12997,7 +13899,11 @@ function renderDream11BuildTeam() {
     </div>
     ${dLocked
       ? `<button class="btn-secondary" style="padding:12px 22px" disabled>🔒 Locked</button>`
-      : `<button class="btn-primary" style="padding:12px 22px" onclick="d11SubmitTeam()">✅ Submit Team</button>`}
+      : d11TeamDraft.picks.length !== D11_TEAM_SIZE
+        ? `<button class="btn-secondary" style="padding:12px 22px" disabled>Select ${D11_TEAM_SIZE} players</button>`
+        : !d11TeamDraft.captain || !d11TeamDraft.viceCaptain
+          ? `<button class="btn-secondary" style="padding:12px 22px" disabled>Pick C &amp; VC</button>`
+          : `<button class="btn-primary" style="padding:12px 22px" onclick="d11SubmitTeam()">✅ Submit Team</button>`}
   </div>
   `;
 }
@@ -13520,6 +14426,9 @@ function renderAdminD11MatchesList() {
   return `
   <div style="margin-bottom:14px">
     <button class="btn-primary btn-block" style="background:linear-gradient(135deg,#7c3aed,#4f46e5)" onclick="d11AdminCreateMatch()">➕ Naya Dream11 Match Banao</button>
+  </div>
+  <div style="margin-bottom:14px">
+    <button class="btn-secondary btn-block" style="background:rgba(37,99,235,0.1);border-color:rgba(37,99,235,0.3);color:#60a5fa" onclick="d11OpenImportPanel()">📡 Cricbuzz se Import Karo (Upcoming)</button>
   </div>
   ${active.length===0&&completed.length===0?`<div class="empty-state"><div class="empty-icon">🎮</div>Koi Dream11 match nahi hai.</div>`:''}
   ${active.length>0?`<div style="font-size:12px;font-weight:700;color:#4ade80;margin-bottom:10px">🟢 Active Matches (${active.length})</div>${active.map(matchCard).join('')}`:''}
@@ -17741,6 +18650,8 @@ async function initApp() {
     _loadAllDeletedMatchesFromFirestore(),_loadAllDeletedD11MatchesFromFirestore(),
   ]);
   render();
+  d11ResumeAllLiveSyncPolling(); // resume ~22-min poll loop for any Dream11 match already linked to CricketData
+  d11ResumeAllSquadAnnouncementPolling(); // resume fast pre-toss Playing XI check for any linked match not yet confirmed
 
   // Ensure owner/admin account always exists
   if (!users[OWNER_EMAIL]) {
@@ -17884,7 +18795,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "1.6.1";
+const APP_VERSION = "2.1.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
