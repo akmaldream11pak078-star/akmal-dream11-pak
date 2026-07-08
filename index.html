@@ -11342,6 +11342,285 @@ function _roundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
+// ══════════════════════════════════════════════════════════════
+//  Per-Contest "Masti" Result Share — har contest (Mega, Mini Mega,
+//  H2H, Free, Custom) ka apna alag, full-attitude 🤪 colorful IMAGE
+//  result: sab participants (name + points), ranked. Usable by both
+//  the user (their own contests) and Admin (any contest, any user).
+// ══════════════════════════════════════════════════════════════
+
+// Full ranked participant list for a given contest, with prize amounts.
+function _d11GetContestParticipantsRanked(matchId, contestType, contestRef) {
+  const d11m = dream11Matches[matchId];
+  if (!d11m) return null;
+  let list = [];
+  let label = 'Contest';
+
+  if (contestType === 'mega') { list = d11m.megaParticipants || []; label = 'Mega Contest 🎯'; }
+  else if (contestType === 'minimega') { list = d11m.miniMegaParticipants || []; label = 'Mini Mega Contest 🔸'; }
+  else if (contestType === 'free') { list = d11m.freeParticipants || []; label = 'Free Contest 🎁'; }
+  else if (contestType === 'h2h') {
+    const c = Object.values(d11h2hContests).find(x => x.matchId === matchId && x.id === contestRef)
+      || Object.values(d11h2hContests).find(x => x.matchId === matchId && (x.player1?.email===currentUser?.email || x.player2?.email===currentUser?.email));
+    if (!c) return null;
+    list = [c.player1?.email, c.player2?.email].filter(Boolean);
+    label = 'H2H Contest 🥊';
+  } else if (contestType === 'custom') {
+    const c = d11CustomContests[contestRef];
+    if (!c) return null;
+    list = c.participants || [];
+    label = `Custom Contest 🛠️ (${c.code||''})`;
+  }
+  if (!list.length) return null;
+
+  const prizeField = contestType==='mega' ? 'megaPrizes' : contestType==='minimega' ? 'miniMegaPrizes' : contestType==='free' ? 'freeRewards' : null;
+  const h2hContest = contestType==='h2h' ? Object.values(d11h2hContests).find(x => x.matchId === matchId && (contestRef ? x.id===contestRef : (x.player1?.email===currentUser?.email || x.player2?.email===currentUser?.email))) : null;
+  const customContest = contestType==='custom' ? d11CustomContests[contestRef] : null;
+
+  const ranked = list.map(email => {
+    const u = users[email];
+    const team = Object.values(dream11Teams).find(t=>t.matchId===matchId&&t.userEmail===email);
+    let prize = 0;
+    if (contestType === 'h2h') prize = (h2hContest?.status==='completed' && h2hContest.winnerId===email) ? (h2hContest.winnerPrize||0) : 0;
+    else if (contestType === 'custom') prize = customContest?.prizes?.[email] || 0;
+    else if (prizeField) prize = d11m[prizeField]?.[email] || 0;
+    return { email, name: u?.name || email, pts: team?.totalPoints || 0, prize };
+  }).sort((a,b) => b.pts - a.pts);
+
+  return { label, ranked };
+}
+
+// Masti/attitude captions, chosen by the TOP scorer's situation (used for the
+// image's headline — the whole contest gets one shared fun banner line).
+function _d11FunnyCaption(rank, total, pts, prize) {
+  const isTop3 = rank <= 3;
+  const isWinner = prize > 0;
+  const isLast = rank === total && total > 1;
+
+  const winnerLines = [
+    `👑 BAADSHAH ho gaya main! Rank #${rank}/${total} pe raj kar diya! 💸`,
+    `🔥 Paisay bhi mil gaye, izzat bhi! Rank #${rank} — kisi ki nahi sunta ab! 😎`,
+    `💰 Jeb bhi bhari, ghamand bhi! #${rank}/${total} pe Dream11 ka Sultan hu main! 👑🏏`,
+  ];
+  const top3Lines = [
+    `🏆 Top 3 mein aa gaya bhai! Rank #${rank}/${total} — baaki sab dekhte reh gaye! 😤`,
+    `🚀 Rank #${rank}! Meri team ne toh aag laga di aaj! 🔥🔥`,
+    `😏 #${rank}/${total}... itna hi kaafi tha tumhe hraane ke liye! 💪`,
+  ];
+  const midLines = [
+    `😅 Rank #${rank}/${total} — na jeet na haar, bas "chill mode" mein hu! 🍿`,
+    `🤔 #${rank}/${total} pe hu... agli baar captain change karunga shayad! 🤪`,
+    `📊 Rank #${rank} — average performance, lekin dil se full masti! 🎉`,
+  ];
+  const lastLines = [
+    `🤡 Rank #${rank}/${total}... last pe hu par confidence full hai! 😂`,
+    `💀 Team ne aaj chutti manai lag rahi hai... #${rank}/${total} 🤣`,
+    `😭 Last rank mila hai lekin attitude first rank wala hai! 🤪🔥`,
+  ];
+
+  const pool = isWinner ? winnerLines : isTop3 ? top3Lines : isLast ? lastLines : midLines;
+  return pool[Math.floor(Math.random()*pool.length)];
+}
+
+// One-liner masti tags stamped next to each row of the leaderboard image —
+// keeps it funny/attitude-loaded all the way down the list, not just at top.
+function _d11RowTag(rank, total, prize) {
+  if (prize > 0) return ['👑 Malamaal!','💰 Full Paisa Vasool!','🤑 Jeet Gaya Ustad!'][rank % 3];
+  if (rank === 1) return '🔥 Sabse Aage!';
+  if (rank <= 3) return ['😎 Zabardast!','💪 Shabaash!'][rank % 2];
+  if (total > 1 && rank === total) return ['🤡 Aakhri Number!','😴 So gaya tha kya?'][rank % 2];
+  return ['🍿 Chalta Hai','😅 Agli Baar Pakka'][rank % 2];
+}
+
+// ── Builds the full-attitude, colorful contest-result IMAGE ──
+async function d11GenerateContestResultImageBlob(matchId, contestType, contestRef) {
+  const m = matches[matchId];
+  const data = _d11GetContestParticipantsRanked(matchId, contestType, contestRef);
+  if (!m || !data) { showNotif('Contest data not found', 'error'); return null; }
+  const { label, ranked } = data;
+
+  const W = 900, PAD = 34, scale = 2;
+  const rowH = 56;
+  const listTop = 400;
+  const H = listTop + ranked.length * rowH + 90;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = W * scale; canvas.height = H * scale;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(scale, scale);
+
+  // ── Colorful attitude gradient background ──
+  const bgGrad = ctx.createLinearGradient(0, 0, W, H);
+  bgGrad.addColorStop(0, '#1e0a3c');
+  bgGrad.addColorStop(0.5, '#4c1d95');
+  bgGrad.addColorStop(1, '#0f172a');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Header banner
+  const headGrad = ctx.createLinearGradient(0, 0, W, 0);
+  headGrad.addColorStop(0, '#fbbf24');
+  headGrad.addColorStop(0.5, '#f97316');
+  headGrad.addColorStop(1, '#ef4444');
+  ctx.fillStyle = headGrad;
+  ctx.fillRect(0, 0, W, 130);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#0f172a';
+  ctx.font = '900 32px Arial, sans-serif';
+  ctx.fillText('🏆 AKMAL DREAM 11 PAK 🏆', W/2, 52);
+  ctx.font = '800 20px Arial, sans-serif';
+  ctx.fillText('Contest Result — Full Masti Edition 🤪', W/2, 84);
+  ctx.font = '700 15px Arial, sans-serif';
+  ctx.fillStyle = '#1f2937';
+  ctx.fillText(`${m.teamA||'Team A'}  vs  ${m.teamB||'Team B'}`, W/2, 112);
+
+  let y = 165;
+
+  // Contest label pill
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  _roundRect(ctx, W/2-160, y-26, 320, 40, 20); ctx.fill();
+  ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 2;
+  _roundRect(ctx, W/2-160, y-26, 320, 40, 20); ctx.stroke();
+  ctx.fillStyle = '#fde68a';
+  ctx.font = '800 17px Arial, sans-serif';
+  ctx.fillText(label, W/2, y);
+  y += 55;
+
+  // Random masti headline caption (based on the top scorer's vibe)
+  const topPrize = ranked[0]?.prize || 0;
+  const caption = _d11FunnyCaption(1, ranked.length, ranked[0]?.pts||0, topPrize);
+  ctx.fillStyle = '#f0abfc';
+  ctx.font = '700 18px Arial, sans-serif';
+  const wrapped = _d11WrapText(ctx, caption, W - PAD*2 - 40);
+  wrapped.forEach(line => { ctx.fillText(line, W/2, y); y += 26; });
+  y += 12;
+
+  // Sub caption
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '400 14px Arial, sans-serif';
+  ctx.fillText(`👥 ${ranked.length} Players Joined · Live Leaderboard`, W/2, y);
+
+  // ── Leaderboard header row ──
+  y = listTop - 24;
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '700 12px Arial, sans-serif';
+  ctx.fillText('RANK', PAD+10, y);
+  ctx.fillText('PLAYER', PAD+90, y);
+  ctx.textAlign = 'right';
+  ctx.fillText('POINTS', W-PAD-190, y);
+  ctx.fillText('PRIZE', W-PAD-10, y);
+
+  y = listTop;
+  const medalColors = ['#fbbf24', '#cbd5e1', '#d97706'];
+  ranked.forEach((r, i) => {
+    const rank = i+1;
+    const isMe = currentUser && r.email === currentUser.email;
+    // Row card background — alternating + highlight top3 / me
+    let rowBg = i % 2 === 0 ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)';
+    if (rank <= 3) rowBg = `rgba(${rank===1?'251,191,36':rank===2?'203,213,225':'217,119,6'},0.14)`;
+    if (isMe) rowBg = 'rgba(96,165,250,0.16)';
+    ctx.fillStyle = rowBg;
+    _roundRect(ctx, PAD, y, W-PAD*2, rowH-8, 10); ctx.fill();
+    if (isMe) { ctx.strokeStyle = '#60a5fa'; ctx.lineWidth = 1.5; _roundRect(ctx, PAD, y, W-PAD*2, rowH-8, 10); ctx.stroke(); }
+
+    // Rank badge
+    ctx.textAlign = 'center';
+    ctx.fillStyle = rank<=3 ? medalColors[rank-1] : '#334155';
+    ctx.beginPath(); ctx.arc(PAD+34, y+(rowH-8)/2, 18, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = rank<=3 ? '#0f172a' : '#cbd5e1';
+    ctx.font = '800 15px Arial, sans-serif';
+    ctx.fillText(rank<=3 ? ['🥇','🥈','🥉'][rank-1] : String(rank), PAD+34, y+(rowH-8)/2+5);
+
+    // Name + tag
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = '700 15px Arial, sans-serif';
+    ctx.fillText(`${r.name}${isMe?' (You)':''}`, PAD+68, y+22);
+    ctx.fillStyle = '#c4b5fd';
+    ctx.font = '600 12px Arial, sans-serif';
+    ctx.fillText(_d11RowTag(rank, ranked.length, r.prize), PAD+68, y+40);
+
+    // Points
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#fde68a';
+    ctx.font = '800 18px Arial, sans-serif';
+    ctx.fillText(String(r.pts), W-PAD-190, y+28);
+
+    // Prize
+    ctx.fillStyle = r.prize>0 ? '#4ade80' : '#475569';
+    ctx.font = '700 14px Arial, sans-serif';
+    ctx.fillText(r.prize>0 ? `Rs ${r.prize}` : '—', W-PAD-10, y+28);
+
+    y += rowH;
+  });
+
+  // Footer
+  y += 20;
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#64748b';
+  ctx.font = '400 13px Arial, sans-serif';
+  ctx.fillText('Tum bhi try karo, agar himmat hai! 😜🏆', W/2, y);
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '400 12px Arial, sans-serif';
+  ctx.fillText('Akmal Dream 11 Pak — ' + (typeof APP_URL!=='undefined'?APP_URL:''), W/2, y+20);
+
+  return await new Promise(resolve => canvas.toBlob(resolve, 'image/png', 0.95));
+}
+
+// Simple word-wrap helper for canvas text
+function _d11WrapText(ctx, text, maxWidth) {
+  const words = text.split(' ');
+  const lines = [];
+  let line = '';
+  words.forEach(w => {
+    const test = line ? line + ' ' + w : w;
+    if (ctx.measureText(test).width > maxWidth && line) { lines.push(line); line = w; }
+    else line = test;
+  });
+  if (line) lines.push(line);
+  return lines;
+}
+
+// ── Share the contest-result image (user or admin) ──
+async function d11ShareContestResult(matchId, contestType, contestRef, evt) {
+  const m = matches[matchId];
+  const btn = (evt || window.event)?.currentTarget;
+  if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+  try {
+    const blob = await d11GenerateContestResultImageBlob(matchId, contestType, contestRef);
+    if (!blob) return;
+
+    const teamA = m?.teamA||'Team A', teamB = m?.teamB||'Team B';
+    const fileName = `Dream11_${(teamA+'_vs_'+teamB).replace(/\s+/g,'')}_${contestType}_Result.png`;
+    const shareText = `🏏 ${teamA} vs ${teamB} — Contest Result! 🤪🏆`;
+    const file = new File([blob], fileName, { type: 'image/png' });
+
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: shareText, text: shareText });
+      showNotif('📤 Shared!');
+      return;
+    }
+
+    // Fallback: download image + open WhatsApp with text so user can attach manually
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fileName;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    showNotif('🖼️ Image downloaded! WhatsApp khol rahe hain — image attach karke bhejein 📲');
+    setTimeout(() => { window.open('https://wa.me/?text=' + encodeURIComponent(shareText), '_blank'); }, 400);
+  } catch(e) {
+    if (e?.name !== 'AbortError') {
+      console.error(e);
+      showNotif('Result image share nahi ho saka — dobara try karein', 'error');
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+  }
+}
+
 async function d11ShareResultPdfWhatsApp(matchId, evt) {
   const m = matches[matchId];
   const btn = (evt || window.event)?.currentTarget;
@@ -11416,14 +11695,18 @@ function renderD11JoinContest() {
 
   ${(() => {
     // Helper: renders one "My Contest" row with points + winning amount
-    function myContestRow({ icon, color, label, prize, extra, onClick }) {
-      return `<div onclick="${onClick}" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:10px;background:rgba(${color},0.08);border:1px solid rgba(${color},0.25);margin-bottom:6px">
+    function myContestRow({ icon, color, label, prize, extra, onClick, shareType, shareRef }) {
+      const shareBtn = shareType ? `<button onclick="event.stopPropagation();d11ShareContestResult('${matchId}','${shareType}'${shareRef?`,'${shareRef}'`:',null'},event)" title="Result Share Karo 🤪" style="flex-shrink:0;width:30px;height:30px;border-radius:8px;border:none;background:linear-gradient(135deg,#25D366,#1ea952);color:#fff;font-size:14px;display:flex;align-items:center;justify-content:center;cursor:pointer;margin-left:4px">📤</button>` : '';
+      return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+      <div onclick="${onClick}" style="cursor:pointer;flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:10px;background:rgba(${color},0.08);border:1px solid rgba(${color},0.25)">
         <div style="width:32px;height:32px;border-radius:9px;background:rgba(${color},0.18);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">${icon}</div>
         <div style="flex:1;min-width:0">
           <div style="font-size:12.5px;font-weight:700">${label}</div>
           <div style="font-size:10.5px;color:var(--dim);margin-top:1px">${myPoints} pts${extra?' · '+extra:''}</div>
         </div>
         ${prize>0 ? `<div style="font-size:12.5px;font-weight:700;color:#4ade80;flex-shrink:0">+Rs ${prize}</div>` : locked ? `<div style="font-size:10px;color:var(--dim);flex-shrink:0">⏳ Pending</div>` : ''}
+      </div>
+      ${shareBtn}
       </div>`;
     }
 
@@ -11432,14 +11715,16 @@ function renderD11JoinContest() {
       const prize = d11m.megaPrizes?.[currentUser.email] || 0;
       rows.push(myContestRow({
         icon:'🎯', color:'251,191,36', label:'Mega Contest', prize,
-        onClick:`openD11ContestParticipants('${matchId}','mega')`
+        onClick:`openD11ContestParticipants('${matchId}','mega')`,
+        shareType:'mega'
       }));
     }
     if (inMiniMega) {
       const prize = d11m.miniMegaPrizes?.[currentUser.email] || 0;
       rows.push(myContestRow({
         icon:'🔸', color:'96,165,250', label:'Mini Mega Contest', prize,
-        onClick:`openD11ContestParticipants('${matchId}','minimega')`
+        onClick:`openD11ContestParticipants('${matchId}','minimega')`,
+        shareType:'minimega'
       }));
     }
     if (inH2H) {
@@ -11449,7 +11734,8 @@ function renderD11JoinContest() {
         : (myH2HContest.status||'open');
       rows.push(myContestRow({
         icon:'🥊', color:'249,115,22', label:'H2H Contest', prize, extra,
-        onClick:`openD11ContestParticipants('${matchId}','h2h')`
+        onClick:`openD11ContestParticipants('${matchId}','h2h')`,
+        shareType:'h2h'
       }));
     }
     if (inFree) {
@@ -11457,7 +11743,8 @@ function renderD11JoinContest() {
       rows.push(myContestRow({
         icon:'🎁', color:'34,197,94', label:'Free Contest', prize,
         extra: prize>0 ? 'Admin reward' : '',
-        onClick:`openD11ContestParticipants('${matchId}','free')`
+        onClick:`openD11ContestParticipants('${matchId}','free')`,
+        shareType:'free'
       }));
     }
     myCustomContests.forEach(cc => {
@@ -11465,7 +11752,8 @@ function renderD11JoinContest() {
       rows.push(myContestRow({
         icon:'🛠️', color:'168,85,247', label:`Custom: ${cc.code}`, prize,
         extra: cc.cancelled ? 'Cancelled · refunded' : `Rs ${cc.entryFee||0} entry`,
-        onClick:`openD11ContestParticipants('${matchId}','custom','${cc.id}')`
+        onClick:`openD11ContestParticipants('${matchId}','custom','${cc.id}')`,
+        shareType:'custom', shareRef: cc.id
       }));
     });
 
@@ -14233,13 +14521,16 @@ function renderAdminPanel() {
 // ── Admin: Dream11 inline section in Admin Panel ────────────
 function renderAdminDream11Section() {
   const teamCount = Object.keys(teamSquads).length;
+  const eligibleCount = Object.values(matches).filter(m => m.sport === 'cricket' || dream11Matches[m.id]);
+  const completedCount = eligibleCount.filter(m => dream11Matches[m.id]?.scored).length;
   return `
   <div class="admin-tab-row" style="margin-bottom:16px">
     <button class="admin-tab ${d11AdminSection==='matches'?'active':''}" onclick="d11AdminSection='matches';render()">🎮 Matches</button>
     <button class="admin-tab ${d11AdminSection==='teams'?'active':''}" onclick="d11AdminSection='teams';masterTeamsActiveKey=null;render()" style="${d11AdminSection!=='teams'?'background:rgba(37,99,235,0.1);color:var(--blue-l);border-color:rgba(37,99,235,0.3)':''}">🏟️ Teams & Players${teamCount>0?` (${teamCount})`:''}</button>
+    <button class="admin-tab ${d11AdminSection==='completed'?'active':''}" onclick="d11AdminSection='completed';render()" style="${d11AdminSection!=='completed'?'background:rgba(100,116,139,0.1);color:#94a3b8;border-color:rgba(100,116,139,0.3)':''}">✅ Completed${completedCount>0?` (${completedCount})`:''}</button>
   </div>
 
-  ${d11AdminSection==='teams' ? renderAdminD11TeamsSection() : renderAdminD11MatchesList()}
+  ${d11AdminSection==='teams' ? renderAdminD11TeamsSection() : d11AdminSection==='completed' ? renderAdminD11CompletedMatchesList() : renderAdminD11MatchesList()}
   `;
 }
 
@@ -14327,25 +14618,37 @@ function renderAdminD11ParticipantsPanel(matchId) {
     </div>
     ${tab==='mega' ? `
       <div style="background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.2);border-radius:10px;padding:10px;margin-bottom:10px;font-size:11.5px">
-        <div style="color:#fbbf24;font-weight:700;margin-bottom:4px">💰 Prize Pool — ${megaList.length} joiners</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <div style="color:#fbbf24;font-weight:700">💰 Prize Pool — ${megaList.length} joiners</div>
+          ${megaList.length>0?`<button class="btn-block" style="width:auto;padding:5px 10px;font-size:10.5px;border:none;border-radius:8px;background:linear-gradient(135deg,#25D366,#1ea952);color:#fff;font-weight:700;cursor:pointer" onclick="d11ShareContestResult('${matchId}','mega',null,event)">📤 Image Result</button>`:''}
+        </div>
         <div style="color:var(--dim)">Total: <b style="color:var(--text)">Rs ${pool}</b> &nbsp;·&nbsp; Distribute (90%): <b style="color:#4ade80">Rs ${dist}</b> &nbsp;·&nbsp; Company (10%): <b style="color:#f87171">Rs ${pool-dist}</b></div>
         ${prizeRows.length>0?`<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px">${prizeRows.map(p=>`<span style="font-size:10.5px;background:rgba(251,191,36,0.12);color:#fbbf24;padding:3px 8px;border-radius:12px">Rank ${p.rank}: Rs ${p.prize}</span>`).join('')}</div>`:''}
       </div>
       ${megaList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Kisi ne join nahi kiya</div>`:megaList.map((e,i)=>userRow(e,i,'251,191,36',true,'megaPrizes')).join('')}
     `:tab==='minimega'?`
       <div style="background:rgba(96,165,250,0.08);border:1px solid rgba(96,165,250,0.2);border-radius:10px;padding:10px;margin-bottom:10px;font-size:11.5px">
-        <div style="color:#60a5fa;font-weight:700;margin-bottom:4px">💰 Prize Pool — ${miniMegaList.length} joiners</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <div style="color:#60a5fa;font-weight:700">💰 Prize Pool — ${miniMegaList.length} joiners</div>
+          ${miniMegaList.length>0?`<button class="btn-block" style="width:auto;padding:5px 10px;font-size:10.5px;border:none;border-radius:8px;background:linear-gradient(135deg,#25D366,#1ea952);color:#fff;font-weight:700;cursor:pointer" onclick="d11ShareContestResult('${matchId}','minimega',null,event)">📤 Image Result</button>`:''}
+        </div>
         <div style="color:var(--dim)">Total: <b style="color:var(--text)">Rs ${miniMegaPool}</b> &nbsp;·&nbsp; Distribute (90%): <b style="color:#4ade80">Rs ${miniMegaDist}</b> &nbsp;·&nbsp; Company (10%): <b style="color:#f87171">Rs ${miniMegaPool-miniMegaDist}</b></div>
         ${miniMegaPrizeRows.length>0?`<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px">${miniMegaPrizeRows.map(p=>`<span style="font-size:10.5px;background:rgba(96,165,250,0.12);color:#60a5fa;padding:3px 8px;border-radius:12px">Rank ${p.rank}: Rs ${p.prize}</span>`).join('')}</div>`:''}
       </div>
       ${miniMegaList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Kisi ne join nahi kiya</div>`:miniMegaList.map((e,i)=>userRow(e,i,'96,165,250',true,'miniMegaPrizes')).join('')}
     `:tab==='free'?`
-      <div style="background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.2);border-radius:10px;padding:8px 10px;margin-bottom:10px;font-size:11px;color:#4ade80">🎁 Free Contest — Admin manually rewards winners</div>
+      <div style="background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.2);border-radius:10px;padding:8px 10px;margin-bottom:10px;font-size:11px;color:#4ade80;display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span>🎁 Free Contest — Admin manually rewards winners</span>
+        ${freeList.length>0?`<button style="flex-shrink:0;width:auto;padding:5px 10px;font-size:10.5px;border:none;border-radius:8px;background:linear-gradient(135deg,#25D366,#1ea952);color:#fff;font-weight:700;cursor:pointer" onclick="d11ShareContestResult('${matchId}','free',null,event)">📤 Image Result</button>`:''}
+      </div>
       ${freeList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Kisi ne join nahi kiya</div>`:freeList.map((e,i)=>userRow(e,i,'74,222,128',false)).join('')}
     `:tab==='h2h'?`
       ${h2hList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Koi H2H nahi</div>`:h2hList.map((c,i)=>`
         <div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
-          <div style="font-size:11px;color:#fb923c;font-weight:700">H2H #${i+1} · Pool Rs ${c.pool||0} · ${(c.status||'open').toUpperCase()}</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+            <div style="font-size:11px;color:#fb923c;font-weight:700">H2H #${i+1} · Pool Rs ${c.pool||0} · ${(c.status||'open').toUpperCase()}</div>
+            <button style="flex-shrink:0;width:auto;padding:4px 9px;font-size:10px;border:none;border-radius:7px;background:linear-gradient(135deg,#25D366,#1ea952);color:#fff;font-weight:700;cursor:pointer" onclick="d11ShareContestResult('${matchId}','h2h','${c.id}',event)">📤 Image</button>
+          </div>
           <div style="font-size:12px;margin-top:3px">${c.player1?.name||'—'} vs ${c.player2?.name||'⏳ Waiting'}</div>
           ${c.winnerId?`<div style="font-size:11px;color:#4ade80;margin-top:2px">🏆 Winner: ${users[c.winnerId]?.name||c.winnerId}</div>`:''}
         </div>`).join('')}
@@ -14357,7 +14660,10 @@ function renderAdminD11ParticipantsPanel(matchId) {
           .sort((a,b) => b.points - a.points);
         return `
         <div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
-          <div style="font-size:11px;color:#a78bfa;font-weight:700">${c.name||'Contest #'+(i+1)} · Rs ${c.entryFee||0} entry · Pool Rs ${c.pool||0} · ${(c.status||'open').toUpperCase()}</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+            <div style="font-size:11px;color:#a78bfa;font-weight:700">${c.name||'Contest #'+(i+1)} · Rs ${c.entryFee||0} entry · Pool Rs ${c.pool||0} · ${(c.status||'open').toUpperCase()}</div>
+            <button style="flex-shrink:0;width:auto;padding:4px 9px;font-size:10px;border:none;border-radius:7px;background:linear-gradient(135deg,#25D366,#1ea952);color:#fff;font-weight:700;cursor:pointer" onclick="d11ShareContestResult('${matchId}','custom','${c.id}',event)">📤 Image</button>
+          </div>
           ${ranked.map((p,ri) => {
             const prize = c.prizes?.[p.email];
             return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0">
@@ -14377,12 +14683,7 @@ function renderAdminD11ParticipantsPanel(matchId) {
   </div>`;
 }
 
-function renderAdminD11MatchesList() {
-  const eligible = Object.values(matches).filter(m => m.sport === 'cricket' || dream11Matches[m.id]);
-  const active = eligible.filter(m => !dream11Matches[m.id]?.scored);
-  const completed = eligible.filter(m => dream11Matches[m.id]?.scored);
-
-  function matchCard(m) {
+function _d11AdminMatchCard(m) {
     const d11m = dream11Matches[m.id];
     const playerCount = d11m ? d11m.players.length : 0;
     const tc = Object.values(dream11Teams).filter(t => t.matchId === m.id).length;
@@ -14427,7 +14728,13 @@ function renderAdminD11MatchesList() {
         ${d11m ? `<button class="btn-secondary" style="flex:1;font-size:12px;padding:9px;${d11m.published?'color:#facc15;border-color:rgba(234,179,8,0.4)':'color:#4ade80;border-color:rgba(34,197,94,0.4)'}" onclick="d11TogglePublish('${m.id}')">${d11m.published?'🔒 Unpublish':'🟢 Publish'}</button>` : ''}
       </div>
     </div>`;
-  }
+}
+
+// ── Active matches only (upcoming/live/open) — completed/scored
+//    matches are moved out to their own dedicated admin section ──
+function renderAdminD11MatchesList() {
+  const eligible = Object.values(matches).filter(m => m.sport === 'cricket' || dream11Matches[m.id]);
+  const active = eligible.filter(m => !dream11Matches[m.id]?.scored);
 
   return `
   <div style="margin-bottom:14px">
@@ -14436,14 +14743,21 @@ function renderAdminD11MatchesList() {
   <div style="margin-bottom:14px">
     <button class="btn-secondary btn-block" style="background:rgba(37,99,235,0.1);border-color:rgba(37,99,235,0.3);color:#60a5fa" onclick="d11OpenImportPanel()">📡 Cricbuzz se Import Karo (Upcoming)</button>
   </div>
-  ${active.length===0&&completed.length===0?`<div class="empty-state"><div class="empty-icon">🎮</div>Koi Dream11 match nahi hai.</div>`:''}
-  ${active.length>0?`<div style="font-size:12px;font-weight:700;color:#4ade80;margin-bottom:10px">🟢 Active Matches (${active.length})</div>${active.map(matchCard).join('')}`:''}
-  ${completed.length>0?`
-    <button class="btn-secondary btn-block mb10" style="background:rgba(100,116,139,0.12);color:#94a3b8;border-color:rgba(100,116,139,0.25);font-size:12.5px" onclick="d11AdminShowCompleted=!d11AdminShowCompleted;render()">
-      ${d11AdminShowCompleted?'▲':'▼'} ✅ Completed Matches (${completed.length}) — tap to ${d11AdminShowCompleted?'hide':'show'}
-    </button>
-    ${d11AdminShowCompleted?completed.map(matchCard).join(''):''}
-  `:''}
+  ${active.length===0?`<div class="empty-state"><div class="empty-icon">🎮</div>Koi upcoming/live Dream11 match nahi hai.</div>`:''}
+  ${active.length>0?`<div style="font-size:12px;font-weight:700;color:#4ade80;margin-bottom:10px">🟢 Active Matches (${active.length})</div>${active.map(_d11AdminMatchCard).join('')}`:''}
+  `;
+}
+
+// ── Dedicated "Completed Matches" admin section — scored Dream11
+//    matches live here, kept separate from the active matches list ──
+function renderAdminD11CompletedMatchesList() {
+  const eligible = Object.values(matches).filter(m => m.sport === 'cricket' || dream11Matches[m.id]);
+  const completed = eligible.filter(m => dream11Matches[m.id]?.scored);
+
+  return `
+  <div style="font-size:12px;font-weight:700;color:#94a3b8;margin-bottom:10px">✅ Completed / Scored Matches (${completed.length})</div>
+  ${completed.length===0?`<div class="empty-state"><div class="empty-icon">✅</div>Abhi tak koi match complete/score nahi hua.</div>`:''}
+  ${completed.map(_d11AdminMatchCard).join('')}
   `;
 }
 
@@ -18801,7 +19115,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "2.2.0";
+const APP_VERSION = "2.3.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
