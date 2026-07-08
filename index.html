@@ -311,13 +311,16 @@
   .empty-icon { font-size:42px; margin-bottom:12px; opacity:0.5; }
   .toast {
     position:fixed; top:14px; left:50%; transform:translateX(-50%) translateY(-60px);
-    background:#16203c; border:1px solid var(--card-b); color:var(--text); padding:13px 20px;
+    background:var(--card2, #16203c); border:1px solid var(--card-b); color:var(--text); padding:13px 20px;
     border-radius:13px; font-size:13.5px; font-weight:600; z-index:9999; box-shadow:0 8px 24px rgba(0,0,0,0.4);
     transition:transform 0.3s; max-width:90%; display:flex; align-items:center; gap:8px;
   }
   .toast.show { transform:translateX(-50%) translateY(0); }
   .toast.error { border-color:rgba(220,38,38,0.4); }
   .toast.success { border-color:rgba(22,163,74,0.4); }
+  html[data-theme="light"] .toast {
+    background:#ffffff; color:#0f172a; box-shadow:0 8px 24px rgba(15,23,42,0.18);
+  }
   .badge-dot { width:7px; height:7px; border-radius:50%; display:inline-block; }
 
   /* ── Loading ── */
@@ -19131,7 +19134,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.3.0";
+const APP_VERSION = "3.3.1";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
