@@ -902,6 +902,7 @@ let d11ImportError = null;
 // it on-screen (see renderD11SquadDebugModal). Remove once squad-shape
 // issue is confirmed/fixed.
 let _d11SquadDebugData = null;
+let _d11SyncDebugData = null; // { matchId, fetchedAt, raw } — last raw hscard response from d11SyncLiveMatch, for the "View Raw Sync Data" debug panel
 let _d11LiveSyncLastSyncedAt = {}; // { [matchId]: timestamp } — for the "Last synced" label in admin UI
 
 // ── Mobile hardware/system back-button support ──────────────────────
@@ -3857,6 +3858,7 @@ function render() {
     ${d11LiveSyncPickerMatchId ? renderD11LiveSyncPickerModal() : ''}
     ${d11ImportPanelOpen ? renderD11ImportPanelModal() : ''}
     ${_d11SquadDebugData ? renderD11SquadDebugModal() : ''}
+    ${_d11SyncDebugData ? renderD11SyncDebugModal() : ''}
   `;
 }
 
@@ -8433,6 +8435,26 @@ function renderD11SquadDebugModal() {
   </div>`;
 }
 
+// Raw hscard response debug modal — shown when a Sync Now / Fetch Final
+// Result comes back with 0 matched players, so the admin can immediately
+// see the actual Cricbuzz field names instead of guessing.
+function d11OpenSyncDebugModal() { render(); }
+function d11CloseSyncDebugModal() { _d11SyncDebugData = null; render(); }
+function renderD11SyncDebugModal() {
+  if (!_d11SyncDebugData) return '';
+  const pretty = (obj) => JSON.stringify(obj, null, 2).replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return `<div style="position:fixed;inset:0;z-index:2100;background:rgba(5,10,20,0.9);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseSyncDebugModal()">
+    <div class="card" style="width:100%;max-width:700px;max-height:88vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:16px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-size:14px;font-weight:700">🐛 Raw Cricbuzz Sync Response (debug)</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseSyncDebugModal()">✕</button>
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-bottom:10px">Long-press the text below to select all, then copy and share it so the field names can be fixed. Fetched: ${new Date(_d11SyncDebugData.fetchedAt).toLocaleTimeString()}</div>
+      <textarea readonly style="width:100%;height:400px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px" onclick="this.select()">${pretty(_d11SyncDebugData.raw)}</textarea>
+    </div>
+  </div>`;
+}
+
 function d11LinkLiveMatch(matchId, cricbuzzMatchId, team1Id, team2Id) {
   const m = matches[matchId];
   if (!m) return;
@@ -8558,19 +8580,41 @@ async function d11SyncLiveMatch(matchId, showToast) {
     const data = await _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/hscard`);
     if (!data || (!data.scorecard && !data.matchHeader)) throw new Error('No scorecard data returned');
 
+    // Always capture the raw response so admin can inspect it via
+    // "🐛 View Raw Sync Data" if points don't look right — Cricbuzz's hscard
+    // shape has been observed to vary slightly between match types
+    // (bilateral vs league vs ICC events), so this is the fastest way to
+    // spot a field-name mismatch instead of guessing blind.
+    _d11SyncDebugData = { matchId, fetchedAt: Date.now(), raw: data };
+
     const header = data.matchHeader || {};
     const team1Name = header.team1?.name || header.team1?.shortName || '';
     const team2Name = header.team2?.name || header.team2?.shortName || '';
 
     // ── Running score per team + Playing XI, from each innings on the scorecard ──
-    (data.scorecard || []).forEach(inn => {
-      const scoreStr = `${inn.score}/${inn.wickets} (${inn.overs} Ov)`;
-      const battingTeamNameL = (inn.batTeamName || '').toLowerCase();
+    let battersApplied = 0, bowlersApplied = 0;
+    const scorecardInnings = data.scorecard || data.scoreCard || [];
+    scorecardInnings.forEach(inn => {
+      const score = inn.score ?? inn.scoreDetails?.runs;
+      const wkts = inn.wickets ?? inn.scoreDetails?.wickets;
+      const overs = inn.overs ?? inn.scoreDetails?.overs;
+      const scoreStr = `${score}/${wkts} (${overs} Ov)`;
+      const battingTeamNameL = (inn.batTeamName || inn.batTeamDetails?.batTeamName || '').toLowerCase();
       if (_d11TeamNameMatches(battingTeamNameL, m.teamA)) m.scoreA = scoreStr;
       else if (_d11TeamNameMatches(battingTeamNameL, m.teamB)) m.scoreB = scoreStr;
 
-      (inn.batsman || []).forEach(b => _d11ApplyLiveBattingRow(d11m, b));
-      (inn.bowler || []).forEach(bl => _d11ApplyLiveBowlingRow(d11m, bl));
+      // Different Cricbuzz endpoints have returned batsman/bowler lists
+      // under slightly different keys and shapes — try each in order and
+      // use whichever one actually has data.
+      const battingCard = inn.batsman || inn.batTeamDetails?.batsmenData
+        ? (inn.batsman || Object.values(inn.batTeamDetails?.batsmenData || {}))
+        : [];
+      const bowlingCard = inn.bowler || inn.bowlTeamDetails?.bowlersData
+        ? (inn.bowler || Object.values(inn.bowlTeamDetails?.bowlersData || {}))
+        : [];
+
+      battingCard.forEach(b => { if (_d11ApplyLiveBattingRow(d11m, b)) battersApplied++; });
+      bowlingCard.forEach(bl => { if (_d11ApplyLiveBowlingRow(d11m, bl)) bowlersApplied++; });
     });
 
     if (header.status) m.liveStatusText = header.status;
@@ -8583,7 +8627,7 @@ async function d11SyncLiveMatch(matchId, showToast) {
     _saveDream11MatchToFirestore(matchId, d11m);
     d11RefreshLiveTeamPoints(matchId);
 
-    // ── Match finished: apply final result + stop polling ──
+    // ── Match finished: apply final result ──
     const statusL = (header.status || '').toLowerCase();
     const stateL = (header.state || '').toLowerCase();
     const isFinished = stateL.includes('complete') || statusL.includes('won by') || statusL.includes('drawn') || statusL.includes('tied') || statusL.includes('no result');
@@ -8595,7 +8639,15 @@ async function d11SyncLiveMatch(matchId, showToast) {
       _saveDream11MatchToFirestore(matchId, d11m);
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
-      showNotif('✅ Live data synced — score & Playing XI updated');
+      if (battersApplied === 0 && bowlersApplied === 0) {
+        // Data came back, but nothing matched our player pool — almost
+        // always a name-matching or shape mismatch, not "nothing happened
+        // in the match yet". Flag it clearly instead of a generic success
+        // toast so the admin knows to check the raw data.
+        showNotif('⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected Cricbuzz format).', 'error');
+      } else {
+        showNotif(`✅ Live data synced — ${battersApplied} batting + ${bowlersApplied} bowling rows updated`);
+      }
     }
     render();
   } catch (e) {
@@ -8620,23 +8672,27 @@ function _d11FindPlayerByName(d11m, name) {
 }
 
 function _d11ApplyLiveBattingRow(d11m, b) {
-  const p = _d11FindPlayerByName(d11m, b.name);
-  if (!p) return;
-  const outDesc = (b.outDesc || '').toLowerCase();
+  const name = b.name || b.batName || b.batsmanName || b.fullName;
+  const p = _d11FindPlayerByName(d11m, name);
+  if (!p) return false;
+  const outDesc = (b.outDesc || b.dismissal || '').toLowerCase();
   p.stats = { ...(p.stats||{}),
-    runs: Number(b.runs)||0, ballsFaced: Number(b.balls)||0, fours: Number(b.fours)||0, sixes: Number(b.sixes)||0,
+    runs: Number(b.runs)||0, ballsFaced: Number(b.balls ?? b.ballsFaced)||0, fours: Number(b.fours ?? b.four4s)||0, sixes: Number(b.sixes ?? b.six6s)||0,
     isOut: !!outDesc && outDesc !== 'not out' && outDesc !== 'batting',
     isPlayingXI: true
   };
+  return true;
 }
 function _d11ApplyLiveBowlingRow(d11m, bl) {
-  const p = _d11FindPlayerByName(d11m, bl.name);
-  if (!p) return;
+  const name = bl.name || bl.bowlName || bl.bowlerName || bl.fullName;
+  const p = _d11FindPlayerByName(d11m, name);
+  if (!p) return false;
   p.stats = { ...(p.stats||{}),
     wickets: Number(bl.wickets)||0, maidens: Number(bl.maidens)||0,
-    oversBowled: parseFloat(bl.overs)||0, runsGiven: Number(bl.runs)||0,
+    oversBowled: parseFloat(bl.overs)||0, runsGiven: Number(bl.runs ?? bl.runsConceded)||0,
     isPlayingXI: true
   };
+  return true;
 }
 
 // Strips markdown bold (**x**) and surrounding whitespace from a cell.
@@ -12344,7 +12400,8 @@ function _d11RenderLiveSyncRow(m) {
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatch('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromCricbuzz('${m.id}')">📥 Fetch Squad</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11CheckPlayingXIAnnounced('${m.id}')">🏏 Check Playing XI</button>
-    ${_d11SquadDebugData ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11OpenSquadDebugModal()">🐛 View Raw Data</button>` : ''}
+    ${_d11SquadDebugData ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11OpenSquadDebugModal()">🐛 View Raw Squad Data</button>` : ''}
+    ${_d11SyncDebugData && _d11SyncDebugData.matchId === m.id ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.3);color:#fca5a5" onclick="d11OpenSyncDebugModal()">🐛 View Raw Sync Data</button>` : ''}
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(220,38,38,0.12);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11UnlinkLiveMatch('${m.id}')">✕ Unlink</button>
   </div>`;
 }
@@ -19046,7 +19103,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.1.0";
+const APP_VERSION = "3.2.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
