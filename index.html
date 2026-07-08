@@ -617,7 +617,7 @@ window.showBabarSplash = function(){
 <!-- ═══ Firebase ═══ -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  import { getFirestore, doc, setDoc, getDoc, updateDoc, collection, getDocs, deleteDoc, runTransaction } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+  import { getFirestore, doc, setDoc, getDoc, updateDoc, collection, getDocs, deleteDoc, runTransaction, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
   import { getMessaging, getToken, onMessage } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-messaging.js";
   import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail, updatePassword } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
@@ -637,7 +637,7 @@ window.showBabarSplash = function(){
     const auth = getAuth(app);
     window._fbDb = db;
     window._fbAuth = auth;
-    window._fbFns = { doc, setDoc, getDoc, updateDoc, collection, getDocs, deleteDoc, runTransaction };
+    window._fbFns = { doc, setDoc, getDoc, updateDoc, collection, getDocs, deleteDoc, runTransaction, onSnapshot };
     window._firebaseReady = true;
     console.log("Firebase ready (PredictionPro)");
     if (window._firebaseReadyResolve) window._firebaseReadyResolve(true);
@@ -1165,6 +1165,31 @@ async function _loadAllUsersFromFirestore() {
     try { localStorage.setItem('pp_users_cache', JSON.stringify(users)); } catch(e){}
     return true;
   } catch(e){ return false; }
+}
+
+// ── Live listener for the admin "Users" tab ──
+// _loadAllUsersFromFirestore() above is a one-time snapshot, used all over
+// login/referral flows. That's fine for those, but it meant the admin Users
+// tab could show a stale user list — e.g. a user who joins a contest right
+// after the admin panel loads wouldn't appear until a manual reload re-ran
+// the one-time fetch. This listener keeps `users` (and the visible Users
+// tab) live-synced while the admin has that tab open, and detaches when
+// they leave it so we're not holding an open listener for no reason.
+let _usersLiveUnsub = null;
+function _startAdminUsersLiveSync() {
+  if (_usersLiveUnsub) return; // already listening
+  if (!window._fbDb || !window._fbFns || !window._fbFns.onSnapshot) return;
+  const { collection, onSnapshot } = window._fbFns;
+  try {
+    _usersLiveUnsub = onSnapshot(collection(window._fbDb, 'pp_users'), snap => {
+      snap.forEach(d => { users[d.id.replace(/_/g,'.')] = d.data(); });
+      try { localStorage.setItem('pp_users_cache', JSON.stringify(users)); } catch(e){}
+      if (adminTab === 'users') render();
+    }, err => console.error('Users live-sync error:', err));
+  } catch(e){ console.error('Failed to start users live-sync:', e); }
+}
+function _stopAdminUsersLiveSync() {
+  if (_usersLiveUnsub) { try { _usersLiveUnsub(); } catch(e){} _usersLiveUnsub = null; }
 }
 // ── One-time migration: backfill 8-digit idNumber for users created before
 // the ID system existed. Only the admin has full pp_users read access, so
@@ -14484,14 +14509,14 @@ function renderAdminPanel() {
   </div>
 
   <div class="admin-tab-row">
-    <button class="admin-tab ${adminTab==='pending'?'active':''}" onclick="adminTab='pending';render()">💰 Pending</button>
-    <button class="admin-tab ${adminTab==='users'?'active':''}" onclick="adminTab='users';render()">👥 Users</button>
-    <button class="admin-tab ${adminTab==='transactions'?'active':''}" onclick="adminTab='transactions';render()">📜 Transactions</button>
-    <button class="admin-tab ${adminTab==='masterteams'?'active':''}" onclick="adminTab='masterteams';masterTeamsActiveKey=null;render()">🏟️ Teams</button>
-    <button class="admin-tab ${adminTab==='dream11admin'?'active':''}" onclick="adminTab='dream11admin';render()">🎮 Dream11</button>
-    <button class="admin-tab ${adminTab==='notify'?'active':''}" onclick="adminTab='notify';render()">📢 Notify</button>
-    <button class="admin-tab ${adminTab==='recyclebin'?'active':''}" onclick="adminTab='recyclebin';render()">🗑️ Recycle Bin${Array.from(new Set([...Object.keys(deletedMatches), ...Object.keys(deletedDream11Matches)])).length>0 ? ` (${Array.from(new Set([...Object.keys(deletedMatches), ...Object.keys(deletedDream11Matches)])).length})` : ''}</button>
-    <button class="admin-tab ${adminTab==='cleanup'?'active':''}" onclick="adminTab='cleanup';render()">🧹 Cleanup</button>
+    <button class="admin-tab ${adminTab==='pending'?'active':''}" onclick="_stopAdminUsersLiveSync();adminTab='pending';render()">💰 Pending</button>
+    <button class="admin-tab ${adminTab==='users'?'active':''}" onclick="adminTab='users';render();_startAdminUsersLiveSync()">👥 Users</button>
+    <button class="admin-tab ${adminTab==='transactions'?'active':''}" onclick="_stopAdminUsersLiveSync();adminTab='transactions';render()">📜 Transactions</button>
+    <button class="admin-tab ${adminTab==='masterteams'?'active':''}" onclick="_stopAdminUsersLiveSync();adminTab='masterteams';masterTeamsActiveKey=null;render()">🏟️ Teams</button>
+    <button class="admin-tab ${adminTab==='dream11admin'?'active':''}" onclick="_stopAdminUsersLiveSync();adminTab='dream11admin';render()">🎮 Dream11</button>
+    <button class="admin-tab ${adminTab==='notify'?'active':''}" onclick="_stopAdminUsersLiveSync();adminTab='notify';render()">📢 Notify</button>
+    <button class="admin-tab ${adminTab==='recyclebin'?'active':''}" onclick="_stopAdminUsersLiveSync();adminTab='recyclebin';render()">🗑️ Recycle Bin${Array.from(new Set([...Object.keys(deletedMatches), ...Object.keys(deletedDream11Matches)])).length>0 ? ` (${Array.from(new Set([...Object.keys(deletedMatches), ...Object.keys(deletedDream11Matches)])).length})` : ''}</button>
+    <button class="admin-tab ${adminTab==='cleanup'?'active':''}" onclick="_stopAdminUsersLiveSync();adminTab='cleanup';render()">🧹 Cleanup</button>
   </div>
 
   ${adminTab==='pending' ? renderAdminPending(pendingDep, pendingWd) : ''}
@@ -14721,8 +14746,11 @@ function _d11AdminMatchCard(m) {
 //    matches are moved out to their own dedicated admin section ──
 function renderAdminD11MatchesList() {
   const eligible = Object.values(matches).filter(m => m.sport === 'cricket' || dream11Matches[m.id]);
-  const manualEligible = eligible.filter(m => !m.cricketDataMatchId);
-  const active = manualEligible.filter(m => !dream11Matches[m.id]?.scored);
+  // Previously Cricbuzz auto-imported matches (m.cricketDataMatchId set) were
+  // excluded here, so any match created via Cricbuzz import never showed up
+  // in the Active Matches list even while live/open. Now all non-scored
+  // eligible matches (manual + Cricbuzz-imported) show together.
+  const active = eligible.filter(m => !dream11Matches[m.id]?.scored);
 
   return `
   <div style="margin-bottom:14px">
@@ -19103,7 +19131,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.2.0";
+const APP_VERSION = "3.3.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
