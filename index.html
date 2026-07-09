@@ -889,7 +889,7 @@ let d11QsViewMode = 'table'; // 'table' | 'batting' | 'bowling'
 // (Sync Now / Fetch Squad / Check Playing XI / Fetch Final Result) — there
 // is no background polling, so refreshing or reopening the app never costs
 // an API call by itself.
-const CRICBUZZ_RAPIDAPI_KEY = "0729e65d3cmsh78845ddc3e0a4f6p1850f5jsn07d741780019";
+const CRICBUZZ_RAPIDAPI_KEY = "a957688052msh0344d11d0be5533p1804f8jsnec67a9ab817f";
 const CRICBUZZ_RAPIDAPI_HOST = "cricbuzz-cricket.p.rapidapi.com";
 const CRICBUZZ_BASE = "https://cricbuzz-cricket.p.rapidapi.com";
 let _d11LiveSyncSearchResults = []; // last CricketData match-search results shown in the "Link Match" picker
@@ -3887,6 +3887,7 @@ function render() {
     ${d11ImportPanelOpen ? renderD11ImportPanelModal() : ''}
     ${_d11SquadDebugData ? renderD11SquadDebugModal() : ''}
     ${_d11SyncDebugData ? renderD11SyncDebugModal() : ''}
+    ${d11CleanupPoolMatchId ? renderD11CleanupPoolModal() : ''}
   `;
 }
 
@@ -6547,6 +6548,63 @@ function d11RemovePlayer(playerId) {
   _saveDream11MatchToFirestore(d11ActiveMatchId, d11m);
   render();
 }
+// One-tap fix for pools that got polluted by an earlier bug where Cricbuzz's
+// "Support Staff" group (head coach, assistant coach, batting/bowling/fielding
+// coach, physio, etc.) was imported into the player pool alongside real
+// players. IMPORTANT: unmapped Cricbuzz role text silently defaults to 'BAT'
+// (see _d11MapCricbuzzRole), so a coach's stored p.role is indistinguishable
+// from a real batter's — role text can't be used to detect them after the
+// fact. Instead this opens a checklist of every player currently in the
+// pool so the admin can tick the ones that are actually coaches/staff and
+// remove exactly those, rather than guessing automatically.
+let d11CleanupPoolMatchId = null;
+let d11CleanupPoolSelected = [];
+function d11OpenCleanupPool(matchId) {
+  d11CleanupPoolMatchId = matchId;
+  d11CleanupPoolSelected = [];
+  render();
+}
+function d11CloseCleanupPool() {
+  d11CleanupPoolMatchId = null;
+  d11CleanupPoolSelected = [];
+  render();
+}
+function d11ToggleCleanupPick(playerId) {
+  const i = d11CleanupPoolSelected.indexOf(playerId);
+  if (i === -1) d11CleanupPoolSelected.push(playerId); else d11CleanupPoolSelected.splice(i, 1);
+  render();
+}
+function d11ConfirmCleanupPool() {
+  const d11m = dream11Matches[d11CleanupPoolMatchId];
+  if (!d11m || d11CleanupPoolSelected.length === 0) { d11CloseCleanupPool(); return; }
+  const removedCount = d11CleanupPoolSelected.length;
+  d11m.players = d11m.players.filter(p => !d11CleanupPoolSelected.includes(p.id));
+  _saveDream11MatchToFirestore(d11CleanupPoolMatchId, d11m);
+  showNotif(`🧹 Removed ${removedCount} entr${removedCount===1?'y':'ies'} from the pool.`);
+  d11CloseCleanupPool();
+}
+function renderD11CleanupPoolModal() {
+  const d11m = dream11Matches[d11CleanupPoolMatchId];
+  if (!d11m) return '';
+  return `
+  <div style="position:fixed;inset:0;z-index:2000;background:rgba(5,10,20,0.85);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseCleanupPool()">
+    <div class="card" style="width:100%;max-width:600px;max-height:82vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:16px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div style="font-weight:700;font-size:14px">🧹 Remove Coaches / Support Staff</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseCleanupPool()">✕</button>
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-bottom:12px">Tick everyone who is actually a coach or support-staff member (not a player), then tap Remove Selected below.</div>
+      ${d11m.players.map(p => `
+        <label style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--card-b);cursor:pointer">
+          <input type="checkbox" ${d11CleanupPoolSelected.includes(p.id)?'checked':''} onchange="d11ToggleCleanupPick('${p.id}')" style="width:18px;height:18px;flex-shrink:0" />
+          <span style="flex:1;font-size:13px">${p.name}</span>
+          <span style="font-size:10.5px;color:var(--dim)">${p.role} · ${p.side==='A'?matches[d11CleanupPoolMatchId]?.teamA:matches[d11CleanupPoolMatchId]?.teamB}</span>
+        </label>
+      `).join('')}
+      <button class="btn-primary btn-block" style="margin-top:14px;background:linear-gradient(135deg,#dc2626,#b91c1c)" onclick="d11ConfirmCleanupPool()">🗑️ Remove Selected (${d11CleanupPoolSelected.length})</button>
+    </div>
+  </div>`;
+}
 // Lets the admin upload/replace a single player's photo any time (not just right
 // after a squad screenshot scan) — opens the same crop modal for just this one.
 function d11UploadPlayerPhoto(playerId, input) {
@@ -8068,7 +8126,9 @@ function d11AutoDetectScoreFromText(matchId, text) {
 // `params` become a query string. Throws on any non-OK response or network
 // error — callers catch and show a friendly message / fall back to manual
 // paste.
-async function _cricbuzzFetch(path, params) {
+function _d11Sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+async function _cricbuzzFetch(path, params, _isRetry) {
   const qs = params ? '?' + new URLSearchParams(params).toString() : '';
   const url = `${CRICBUZZ_BASE}${path}${qs}`;
   const res = await fetch(url, {
@@ -8077,6 +8137,13 @@ async function _cricbuzzFetch(path, params) {
       'x-rapidapi-key': CRICBUZZ_RAPIDAPI_KEY
     }
   });
+  if (res.status === 429 && !_isRetry) {
+    // Almost always a transient per-second burst limit, not the monthly
+    // quota being exhausted — wait a bit and retry exactly once before
+    // giving up and surfacing an error.
+    await _d11Sleep(3000);
+    return _cricbuzzFetch(path, params, true);
+  }
   if (!res.ok) throw new Error('HTTP ' + res.status);
   return await res.json();
 }
@@ -8199,18 +8266,10 @@ async function d11ImportMatch(mt) {
   tab = 'dream11Pool';
   render();
   window.scrollTo(0,0);
-  showNotif(`✅ Imported "${teamA} vs ${teamB}" — linked for Live Sync. Fetching squad…`);
-
-  // Auto-fetch squad right away too, so admin lands on a pool that's
-  // already populated (if Cricbuzz has published squads for this fixture
-  // yet — if not, this silently finds 0 players and the automatic
-  // pre-toss XI-announcement poll (already started by d11LinkLiveMatch)
-  // will pick them up the moment Cricbuzz publishes them).
-  try {
-    await d11FetchSquadFromCricbuzz(mid);
-  } catch (e) {
-    console.warn('Auto squad-fetch on import failed (can still Fetch Squad manually):', e.message);
-  }
+  showNotif(`✅ Imported "${teamA} vs ${teamB}" — linked for Live Sync. Tap "📥 Fetch Squad" whenever you're ready.`);
+  // No automatic follow-up calls — importing costs exactly 1 API hit.
+  // Fetching the squad is a separate, deliberate tap on "📥 Fetch Squad"
+  // below, same as Sync Now / Check Playing XI / Fetch Final Result.
 }
 
 function renderD11ImportPanelModal() {
@@ -8363,10 +8422,13 @@ async function d11FetchSquadFromCricbuzz(matchId) {
 
   showNotif('📥 Fetching squads from Cricbuzz…');
   try {
-    const [team1Data, team2Data] = await Promise.all([
-      _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam1Id}`),
-      _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam2Id}`)
-    ]);
+    // Fetched one at a time (not Promise.all) with a short gap between —
+    // firing both team calls in the same instant was tripping Cricbuzz's
+    // per-second burst rate limit (HTTP 429), even when the monthly quota
+    // still had plenty of room left.
+    const team1Data = await _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam1Id}`);
+    await _d11Sleep(1200);
+    const team2Data = await _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam2Id}`);
     // TEMP DEBUG — shows the raw Cricbuzz response for both teams in an
     // on-screen, copyable panel (see renderD11SquadDebugModal) so the
     // admin can screenshot/copy it without needing browser DevTools.
@@ -8393,6 +8455,8 @@ async function d11FetchSquadFromCricbuzz(matchId) {
       // which is fine since we still capture the name.
       if (combined.length === 0 && Array.isArray(data?.player)) {
         data.player.forEach(group => {
+          const categoryL = (group?.category || '').toLowerCase();
+          if (categoryL.includes('support') || categoryL.includes('staff') || categoryL.includes('coach')) return; // skip coaches/physios/etc — not actual players
           if (Array.isArray(group?.player)) combined.push(...group.player);
         });
       }
@@ -8412,6 +8476,8 @@ async function d11FetchSquadFromCricbuzz(matchId) {
       combined.forEach(p => {
         const name = (p.fullName || p.name || '').trim();
         if (!name || existingNamesLower.has(name.toLowerCase())) return;
+        const roleTextL = (p.role || '').toLowerCase();
+        if (roleTextL.includes('coach') || roleTextL.includes('physio') || roleTextL.includes('manager') || roleTextL.includes('trainer') || roleTextL.includes('support staff')) return; // safety net — coaches/support staff sometimes lack a category tag
         const role = _d11MapCricbuzzRole(p.role, p.keeper);
         const player = newDream11Player(name, role, side);
         // Players confirmed in Cricbuzz's "playing XI" list can be marked
@@ -8532,13 +8598,44 @@ async function d11CheckPlayingXIAnnounced(matchId) {
   }
   showNotif('🔍 Checking Cricbuzz for Playing XI…');
   try {
-    const [team1Data, team2Data] = await Promise.all([
-      _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam1Id}`),
-      _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam2Id}`)
-    ]);
+    // Sequential with a gap — see note above in d11FetchSquadFromCricbuzz
+    // about why parallel team calls trip Cricbuzz's burst rate limit.
+    const team1Data = await _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam1Id}`);
+    await _d11Sleep(1200);
+    const team2Data = await _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam2Id}`);
     const xi1 = team1Data?.players?.['playing XI'] || [];
     const xi2 = team2Data?.players?.['playing XI'] || [];
     if (xi1.length === 0 && xi2.length === 0) {
+      // The dedicated pre-toss squad endpoint found nothing — this is
+      // expected before the toss, but if the match has actually already
+      // started (locked), fall back to the live scorecard instead: anyone
+      // who already has batting or bowling stats is proof-positive part of
+      // the Playing XI, even if this endpoint's shape didn't cooperate.
+      if (isD11Locked(matchId)) {
+        try {
+          const hscard = await _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/hscard`);
+          const innings = hscard?.scorecard || hscard?.scoreCard || [];
+          const namesInPlay = new Set();
+          innings.forEach(inn => {
+            (inn.batsman || []).forEach(b => { const n = (b.name||'').trim(); if (n) namesInPlay.add(n.toLowerCase()); });
+            (inn.bowler || []).forEach(bl => { const n = (bl.name||'').trim(); if (n) namesInPlay.add(n.toLowerCase()); });
+          });
+          if (namesInPlay.size > 0) {
+            let confirmedFromLive = 0;
+            (d11m.players || []).forEach(p => {
+              if (namesInPlay.has(p.name.toLowerCase().trim()) && !p.isPlayingXI) { p.isPlayingXI = true; confirmedFromLive++; }
+            });
+            if (confirmedFromLive > 0) {
+              await _saveDream11MatchToFirestore(matchId, d11m);
+              showNotif(`🏏 Playing XI confirmed from live scorecard — ${confirmedFromLive} players confirmed ✅`);
+              render();
+              return;
+            }
+          }
+        } catch (e) {
+          console.warn('Fallback live-scorecard XI check failed:', e.message);
+        }
+      }
       showNotif('Playing XI not announced yet on Cricbuzz — try again closer to match start.', 'error');
       return;
     }
@@ -8616,8 +8713,8 @@ async function d11SyncLiveMatch(matchId, showToast) {
     _d11SyncDebugData = { matchId, fetchedAt: Date.now(), raw: data };
 
     const header = data.matchHeader || {};
-    const team1Name = header.team1?.name || header.team1?.shortName || '';
-    const team2Name = header.team2?.name || header.team2?.shortName || '';
+    const statusText = data.status || header.status || '';
+    const isComplete = data.ismatchcomplete !== undefined ? !!data.ismatchcomplete : undefined;
 
     // ── Running score per team + Playing XI, from each innings on the scorecard ──
     let battersApplied = 0, bowlersApplied = 0;
@@ -8627,7 +8724,7 @@ async function d11SyncLiveMatch(matchId, showToast) {
       const wkts = inn.wickets ?? inn.scoreDetails?.wickets;
       const overs = inn.overs ?? inn.scoreDetails?.overs;
       const scoreStr = `${score}/${wkts} (${overs} Ov)`;
-      const battingTeamNameL = (inn.batTeamName || inn.batTeamDetails?.batTeamName || '').toLowerCase();
+      const battingTeamNameL = (inn.batteamname || inn.batTeamName || inn.batTeamDetails?.batTeamName || '').toLowerCase();
       if (_d11TeamNameMatches(battingTeamNameL, m.teamA)) m.scoreA = scoreStr;
       else if (_d11TeamNameMatches(battingTeamNameL, m.teamB)) m.scoreB = scoreStr;
 
@@ -8645,7 +8742,7 @@ async function d11SyncLiveMatch(matchId, showToast) {
       bowlingCard.forEach(bl => { if (_d11ApplyLiveBowlingRow(d11m, bl)) bowlersApplied++; });
     });
 
-    if (header.status) m.liveStatusText = header.status;
+    if (statusText) m.liveStatusText = statusText;
 
     (d11m.players || []).forEach(p => { if (p.stats) p.points = calcDream11PlayerPoints(p.stats, matchId); });
     recalcDream11MatchPoints(d11m);
@@ -8656,11 +8753,12 @@ async function d11SyncLiveMatch(matchId, showToast) {
     d11RefreshLiveTeamPoints(matchId);
 
     // ── Match finished: apply final result ──
-    const statusL = (header.status || '').toLowerCase();
-    const stateL = (header.state || '').toLowerCase();
-    const isFinished = stateL.includes('complete') || statusL.includes('won by') || statusL.includes('drawn') || statusL.includes('tied') || statusL.includes('no result');
+    // "ismatchcomplete" is the reliable top-level flag on the hscard
+    // endpoint; fall back to status-text sniffing for other shapes.
+    const statusL = statusText.toLowerCase();
+    const isFinished = isComplete === true || statusL.includes('won by') || statusL.includes('drawn') || statusL.includes('tied') || statusL.includes('no result');
     if (isFinished) {
-      m.resultText = header.status || m.resultText;
+      m.resultText = statusText || m.resultText;
       m.status = 'completed';
       if (d11m) d11m.scored = true;
       _saveMatchToFirestore(matchId, m);
@@ -8703,7 +8801,7 @@ function _d11ApplyLiveBattingRow(d11m, b) {
   const name = b.name || b.batName || b.batsmanName || b.fullName;
   const p = _d11FindPlayerByName(d11m, name);
   if (!p) return false;
-  const outDesc = (b.outDesc || b.dismissal || '').toLowerCase();
+  const outDesc = (b.outdec || b.outDesc || b.dismissal || '').toLowerCase();
   p.stats = { ...(p.stats||{}),
     runs: Number(b.runs)||0, ballsFaced: Number(b.balls ?? b.ballsFaced)||0, fours: Number(b.fours ?? b.four4s)||0, sixes: Number(b.sixes ?? b.six6s)||0,
     isOut: !!outDesc && outDesc !== 'not out' && outDesc !== 'batting',
@@ -12851,6 +12949,7 @@ function renderDream11AdminPool() {
       <span class="team-name">${m.teamB||'TBD'}</span>
     </div>
     <div style="text-align:center;font-size:11px;color:var(--dim)">👥 ${d11m.players.length} players · 🏏 ${xiCount} Playing XI confirmed · ${dLocked ? '🔒 Locked' : '🔓 Open for teams'}</div>
+    ${m.cricketDataMatchId ? `<div style="text-align:center;margin-top:6px"><button class="btn-secondary" style="font-size:10.5px;padding:5px 10px;background:rgba(220,38,38,0.1);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11OpenCleanupPool('${d11ActiveMatchId}')">🧹 Remove Coaches / Support Staff</button></div>` : ''}
     <div style="text-align:center;font-size:11px;color:var(--orange);font-weight:600;margin-top:6px">⏰ Deadline: ${deadlineStr} ${dLocked && !d11m.locked ? '(passed — auto-locked)' : ''}</div>
     ${!dLocked && m.deadline ? `<div class="d11-countdown" data-deadline="${m.deadline}" style="text-align:center;font-size:12px;font-weight:700;color:var(--orange);margin-top:2px">${d11FormatCountdown(m.deadline - Date.now())}</div>` : ''}
     <div style="text-align:center;margin-top:8px">
@@ -13372,11 +13471,11 @@ function renderD11LiveScorecard() {
     <div class="d11-player-row">
       <div class="d11-player-left">
         ${p.photo ? `<img src="${p.photo}" style="width:26px;height:26px;border-radius:50%;object-fit:cover;flex-shrink:0" />` : ''}
-        <div class="d11-player-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80;font-size:10px">✅</span>' : ''}${!s.isOut ? ' <span style="color:#60a5fa;font-size:10px">(not out)</span>' : ''}</div>
+        <div class="d11-player-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80;font-size:10px">✅</span>' : ''} <span style="color:${s.isOut ? 'var(--dim)' : '#60a5fa'};font-size:10px;font-weight:600">${s.isOut ? '(out)' : '(not out)'}</span></div>
       </div>
-      <div style="display:flex;gap:10px;font-size:11px;color:var(--dim);white-space:nowrap">
-        <span style="font-weight:800;color:var(--text);min-width:22px;text-align:right">${s.runs||0}</span>
-        <span>(${s.ballsFaced||0}b)</span>
+      <div style="display:grid;grid-template-columns:26px 34px 24px 24px 44px;gap:8px;font-size:11px;color:var(--dim);text-align:right;white-space:nowrap">
+        <span style="font-weight:800;color:var(--text)">${s.runs||0}</span>
+        <span>(${s.ballsFaced||0})</span>
         <span>${s.fours||0}×4</span>
         <span>${s.sixes||0}×6</span>
         <span>SR ${sr}</span>
@@ -13392,22 +13491,39 @@ function renderD11LiveScorecard() {
         ${p.photo ? `<img src="${p.photo}" style="width:26px;height:26px;border-radius:50%;object-fit:cover;flex-shrink:0" />` : ''}
         <div class="d11-player-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80;font-size:10px">✅</span>' : ''}</div>
       </div>
-      <div style="display:flex;gap:10px;font-size:11px;color:var(--dim);white-space:nowrap">
+      <div style="display:grid;grid-template-columns:50px 24px 44px;gap:8px;font-size:11px;color:var(--dim);text-align:right;white-space:nowrap">
         <span>${s.oversBowled||0}-${s.maidens||0}-${s.runsGiven||0}</span>
-        <span style="font-weight:800;color:#4ade80;min-width:14px;text-align:right">${s.wickets||0}w</span>
+        <span style="font-weight:800;color:#4ade80">${s.wickets||0}w</span>
         <span>Eco ${eco}</span>
       </div>
     </div>`;
   };
+  const battingHeaderRow = `
+    <div class="d11-player-row" style="opacity:0.6">
+      <div class="d11-player-left"><span style="font-size:10px;color:var(--dim)">BATTER</span></div>
+      <div style="display:grid;grid-template-columns:26px 34px 24px 24px 44px;gap:8px;font-size:9.5px;color:var(--dim);text-align:right">
+        <span>R</span><span>(B)</span><span>4s</span><span>6s</span><span>SR</span>
+      </div>
+    </div>`;
+  const bowlingHeaderRow = `
+    <div class="d11-player-row" style="opacity:0.6">
+      <div class="d11-player-left"><span style="font-size:10px;color:var(--dim)">BOWLER</span></div>
+      <div style="display:grid;grid-template-columns:50px 24px 44px;gap:8px;font-size:9.5px;color:var(--dim);text-align:right">
+        <span>O-M-R</span><span>W</span><span>Eco</span>
+      </div>
+    </div>`;
 
-  const inningsBlock = (sidePlayers, sideName, flag) => {
+  const inningsBlock = (sidePlayers, sideName, flag, scoreStr) => {
     const batters = sidePlayers.filter(p => (p.stats.ballsFaced||0) > 0 || p.stats.isOut === false);
     const bowlers = sidePlayers.filter(p => (p.stats.oversBowled||0) > 0);
     if (batters.length === 0 && bowlers.length === 0) return '';
     return `
-    <div class="section-title" style="margin-top:16px">${flag} ${sideName} Innings</div>
-    ${batters.length ? `<div style="font-size:10.5px;font-weight:700;color:var(--dim);margin-bottom:4px">🏏 BATTING</div>${batters.map(battingRow).join('')}` : ''}
-    ${bowlers.length ? `<div style="font-size:10.5px;font-weight:700;color:var(--dim);margin:10px 0 4px">🎯 BOWLING</div>${bowlers.map(bowlingRow).join('')}` : ''}
+    <div class="section-title" style="margin-top:16px;display:flex;justify-content:space-between;align-items:center">
+      <span>${flag} ${sideName} Innings</span>
+      ${scoreStr ? `<span style="font-family:Rajdhani,sans-serif;font-weight:700;color:var(--gold)">${scoreStr}</span>` : ''}
+    </div>
+    ${batters.length ? `<div style="font-size:10.5px;font-weight:700;color:var(--dim);margin-bottom:4px">🏏 BATTING</div>${battingHeaderRow}${batters.map(battingRow).join('')}` : ''}
+    ${bowlers.length ? `<div style="font-size:10.5px;font-weight:700;color:var(--dim);margin:10px 0 4px">🎯 BOWLING</div>${bowlingHeaderRow}${bowlers.map(bowlingRow).join('')}` : ''}
     `;
   };
 
@@ -13432,8 +13548,8 @@ function renderD11LiveScorecard() {
     ${m.resultText ? `<div style="text-align:center;font-size:13px;font-weight:700;color:#4ade80;padding:8px;background:rgba(74,222,128,0.08);border-radius:9px;margin-top:8px">🏆 ${m.resultText}</div>` : ''}
   </div>
   ${playersWithStats.length === 0 ? `<div class="card" style="text-align:center;padding:32px;color:var(--dim)"><div style="font-size:32px;margin-bottom:10px">📋</div>Scoreboard abhi available nahi hai.</div>` : `
-  ${inningsBlock(bySide.A, m.teamA||'Team A', flagA)}
-  ${inningsBlock(bySide.B, m.teamB||'Team B', flagB)}
+  ${inningsBlock(bySide.A, m.teamA||'Team A', flagA, m.scoreA)}
+  ${inningsBlock(bySide.B, m.teamB||'Team B', flagB, m.scoreB)}
   `}
   `;
 }
@@ -19134,7 +19250,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.3.1";
+const APP_VERSION = "3.7.1";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
