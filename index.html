@@ -8590,13 +8590,16 @@ function d11LinkLiveMatch(matchId, cricbuzzMatchId, team1Id, team2Id) {
   if (team2Id) m.cricbuzzTeam2Id = team2Id;
   _saveMatchToFirestore(matchId, m);
   _d11LiveSyncSearchResults = [];
-  // No background polling — admin controls every Cricbuzz hit from here by
-  // tapping "🔄 Sync Now" / "📥 Fetch Squad" / "🏁 Fetch Final Result"
-  // whenever they actually want fresh data. Keeps API usage predictable
-  // (~15 calls per match total) and means refreshing/reopening the app
-  // never triggers extra calls on its own.
-  showNotif('🔗 Linked to Cricbuzz! Use "🔄 Sync Now" / "📥 Fetch Squad" whenever you want to pull fresh data.');
+  showNotif('🔗 Linked to Cricbuzz! Fetching squad…');
   render();
+  // Auto-fetch the squad right away so the admin doesn't need a separate
+  // manual "📥 Fetch Squad" tap for every match — linking and squad-pull are
+  // now one step. Sync Now / Fetch Final Result remain manual/admin-triggered
+  // (Fetch Final Result also has its own deadline-based auto-scheduler, see
+  // d11AutoFetchFinalResult).
+  if (team1Id && team2Id) {
+    d11FetchSquadFromCricbuzz(matchId).catch(e => console.warn('Auto squad fetch after link failed:', e.message));
+  }
 }
 
 function d11UnlinkLiveMatch(matchId) {
@@ -8619,25 +8622,135 @@ function d11UnlinkLiveMatch(matchId) {
 // button — no background timers, no resume-on-load. Checks Cricbuzz's
 // squad endpoint; if the Playing XI has been announced, marks matching
 // pool players confirmed (and adds any missing ones) in one call-pair.
-async function d11CheckPlayingXIAnnounced(matchId) {
+// `silent=true` is used by the auto-scheduler (see d11AutoCheckPlayingXI
+// below) — same logic, but no showNotif() calls, so it doesn't interrupt
+// whichever user's tab happened to trigger the background refresh.
+// ── Auto Playing XI check (deadline-proximity scheduler) ──────────────────
+// Runs off the existing 3-min background refresh loop (any signed-in user's
+// active tab can trigger it — no dedicated admin session needed). For every
+// linked, unlocked, unscored, not-yet-confirmed Dream11 match, checks if the
+// current time falls in one of two windows before the match deadline:
+//   • 20–25 minutes before deadline (first attempt)
+//   • 8–10 minutes before deadline (second attempt, catches late announcements)
+// Each window fires at most ONCE per match — tracked via
+// d11m.autoXICheck = { w25: true/false, w10: true/false } saved to Firestore,
+// so it's shared across every device/user and never double-fires even if
+// many tabs are open at once. This keeps it to at most 2 extra Cricbuzz
+// calls per match (well within quota) while still surfacing the Playing XI
+// to users well before their team-submission deadline closes.
+async function d11AutoCheckPlayingXI() {
+  const now = Date.now();
+  for (const m of Object.values(matches)) {
+    const d11m = dream11Matches[m.id];
+    if (!d11m || !m.cricketDataMatchId || !m.cricbuzzTeam1Id || !m.cricbuzzTeam2Id) continue;
+    if (d11m.scored || d11m.locked) continue;
+    if ((d11m.players || []).some(p => p.isPlayingXI)) continue; // already confirmed
+    if (!m.deadline) continue;
+    const deadlineMs = new Date(m.deadline).getTime();
+    if (isNaN(deadlineMs)) continue;
+    const minsToDeadline = (deadlineMs - now) / 60000;
+    const check = d11m.autoXICheck || {};
+    let windowHit = null;
+    if (!check.w25 && minsToDeadline <= 25 && minsToDeadline > 20) windowHit = 'w25';
+    else if (!check.w10 && minsToDeadline <= 10 && minsToDeadline > 8) windowHit = 'w10';
+    if (!windowHit) continue;
+    // Mark the window used FIRST (before the async call) so a second tab
+    // running this same loop a few seconds later doesn't double-fire while
+    // the first call is still in flight.
+    d11m.autoXICheck = { ...check, [windowHit]: true };
+    await _saveDream11MatchToFirestore(m.id, d11m);
+    try {
+      await d11CheckPlayingXIAnnounced(m.id, /*silent=*/true);
+    } catch (e) {
+      console.warn('Auto Playing XI check failed for', m.id, e.message);
+    }
+  }
+}
+
+// ── Auto Fetch Final Result (post-deadline scheduler) ──────────────────────
+// Runs off the same 3-min background refresh loop as d11AutoCheckPlayingXI —
+// works even if the admin's own app is closed, as long as ANY signed-in
+// user has the app open somewhere (that tab's background loop does the
+// check on everyone's behalf). For every linked, not-yet-scored match, once
+// enough time has passed after the deadline for the match to plausibly have
+// finished (T20 → 5.5 hours, ODI/other → 12 hours), it silently calls the
+// same sync used by "🏁 Fetch Final Result" to pull the scorecard — ONCE.
+// If Cricbuzz confirms the match is finished, player points get applied and
+// d11m.scored is set — same as the manual button — but this does NOT run
+// payouts/prize distribution. The admin still needs to tap "Finalize
+// Scoring" / "Run All Payouts" themselves before any money moves.
+// If this one attempt doesn't find a finished result (match ran long, rain
+// delay, etc.), it does NOT keep retrying on its own — that would mean
+// polling Cricbuzz indefinitely for a match that might never resolve
+// cleanly. Instead d11m.autoFinalResultTried is set so we never try again
+// automatically, and the admin just taps "🏁 Fetch Final Result" manually
+// once the match has actually finished.
+async function d11AutoFetchFinalResult() {
+  const now = Date.now();
+  for (const m of Object.values(matches)) {
+    const d11m = dream11Matches[m.id];
+    if (!d11m || !m.cricketDataMatchId) continue;
+    if (d11m.scored) continue;
+    if (d11m.autoFinalResultTried) continue; // one-shot — already attempted, admin takes over from here
+    if (!m.deadline) continue;
+    const deadlineMs = new Date(m.deadline).getTime();
+    if (isNaN(deadlineMs)) continue;
+    const waitHours = (m.format === 'T20') ? 5.5 : 12; // ODI/Test/other → 12h
+    const readyAt = deadlineMs + waitHours * 3600 * 1000;
+    if (now < readyAt) continue;
+    // Mark as tried FIRST (before the async call) so a second tab running
+    // this same loop a few seconds later doesn't double-fire while the
+    // first call is still in flight.
+    d11m.autoFinalResultTried = true;
+    d11m.autoFinalResultTriedAt = getDateTime();
+    await _saveDream11MatchToFirestore(m.id, d11m);
+    try {
+      await d11SyncLiveMatch(m.id, /*showToast=*/false);
+    } catch (e) {
+      console.warn('Auto final-result fetch failed for', m.id, e.message);
+    }
+  }
+}
+
+async function d11CheckPlayingXIAnnounced(matchId, silent) {
+  const notify = silent ? (()=>{}) : showNotif;
   const m = matches[matchId];
   const d11m = dream11Matches[matchId];
   if (!m || !d11m || !m.cricketDataMatchId || !m.cricbuzzTeam1Id || !m.cricbuzzTeam2Id) return;
   // Already confirmed (either by this poll earlier, or admin did it
   // manually) — nothing left to check.
   if ((d11m.players || []).some(p => p.isPlayingXI)) {
-    showNotif('Playing XI already confirmed for this match.');
+    notify('Playing XI already confirmed for this match.');
     return;
   }
-  showNotif('🔍 Checking Cricbuzz for Playing XI…');
+  notify('🔍 Checking Cricbuzz for Playing XI…');
   try {
     // Sequential with a gap — see note above in d11FetchSquadFromCricbuzz
     // about why parallel team calls trip Cricbuzz's burst rate limit.
     const team1Data = await _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam1Id}`);
     await _d11Sleep(1200);
     const team2Data = await _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam2Id}`);
-    const xi1 = team1Data?.players?.['playing XI'] || [];
-    const xi2 = team2Data?.players?.['playing XI'] || [];
+    // Parse Cricbuzz's response the same robust way d11FetchSquadFromCricbuzz
+    // does. This function used to ONLY look at data.players['playing XI'],
+    // but Cricbuzz frequently returns the squad under a different shape —
+    // { "player": [ { "player": [...], "category": "Squad" } ] } — which
+    // has no explicit "confirmed XI" flag at all pre-toss, and sometimes
+    // even after. That mismatch made this button report "not announced yet"
+    // even when Fetch Squad (which already handles both shapes) worked fine.
+    function _extractXI(data) {
+      let xi = data?.players?.['playing XI'] || [];
+      if (xi.length === 0 && Array.isArray(data?.player)) {
+        data.player.forEach(group => {
+          const categoryL = (group?.category || '').toLowerCase();
+          if (categoryL.includes('playing') || categoryL === '') {
+            if (Array.isArray(group?.player)) xi.push(...group.player);
+          }
+        });
+      }
+      return xi;
+    }
+    const xi1 = _extractXI(team1Data);
+    const xi2 = _extractXI(team2Data);
     if (xi1.length === 0 && xi2.length === 0) {
       // The dedicated pre-toss squad endpoint found nothing — this is
       // expected before the toss, but if the match has actually already
@@ -8660,7 +8773,7 @@ async function d11CheckPlayingXIAnnounced(matchId) {
             });
             if (confirmedFromLive > 0) {
               await _saveDream11MatchToFirestore(matchId, d11m);
-              showNotif(`🏏 Playing XI confirmed from live scorecard — ${confirmedFromLive} players confirmed ✅`);
+              notify(`🏏 Playing XI confirmed from live scorecard — ${confirmedFromLive} players confirmed ✅`);
               render();
               return;
             }
@@ -8669,7 +8782,7 @@ async function d11CheckPlayingXIAnnounced(matchId) {
           console.warn('Fallback live-scorecard XI check failed:', e.message);
         }
       }
-      showNotif('Playing XI not announced yet on Cricbuzz — try again closer to match start.', 'error');
+      notify('Playing XI not announced yet on Cricbuzz — try again closer to match start.', 'error');
       return;
     }
 
@@ -8711,12 +8824,12 @@ async function d11CheckPlayingXIAnnounced(matchId) {
 
     if (confirmedCount > 0) {
       await _saveDream11MatchToFirestore(matchId, d11m);
-      showNotif(`🏏 Playing XI confirmed! ${confirmedCount} players confirmed ✅${addedCount ? ` (${addedCount} new players added to pool)` : ''}`);
+      notify(`🏏 Playing XI confirmed! ${confirmedCount} players confirmed ✅${addedCount ? ` (${addedCount} new players added to pool)` : ''}`);
       render();
     }
   } catch (e) {
     console.error('Playing XI check failed:', e);
-    showNotif('Could not check Playing XI — ' + (e.message||'unknown error'), 'error');
+    notify('Could not check Playing XI — ' + (e.message||'unknown error'), 'error');
   }
 }
 
@@ -19205,6 +19318,8 @@ if ('serviceWorker' in navigator) {
       if(currentUser&&currentUser.email&&users[currentUser.email])
         currentUser={...users[currentUser.email],email:currentUser.email};
       render();
+      if (typeof d11AutoCheckPlayingXI === 'function') d11AutoCheckPlayingXI().catch(function(){});
+      if (typeof d11AutoFetchFinalResult === 'function') d11AutoFetchFinalResult().catch(function(){});
     }).catch(function(){});
   },3*60*1000);
 })();
@@ -19303,7 +19418,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.7.5";
+const APP_VERSION = "3.7.9";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
