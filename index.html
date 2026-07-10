@@ -3678,7 +3678,7 @@ function getTotalWithdrawsAll() {
 function getAllTransactions() {
   const list = [];
   Object.entries(users).forEach(([email,u]) => {
-    (u.transactions||[]).forEach(t => list.push({ email, name:u.name, ...t }));
+    (u.transactions||[]).forEach(t => list.push({ email, name:u.name, idNumber:u.idNumber||'', ...t }));
   });
   return list.sort((a,b)=> b.id.localeCompare(a.id));
 }
@@ -3888,6 +3888,7 @@ function render() {
     ${d11ImportPanelOpen ? renderD11ImportPanelModal() : ''}
     ${_d11SquadDebugData ? renderD11SquadDebugModal() : ''}
     ${_d11SyncDebugData ? renderD11SyncDebugModal() : ''}
+    ${_receiptModalImage ? renderReceiptImageModal() : ''}
     ${d11CleanupPoolMatchId ? renderD11CleanupPoolModal() : ''}
   `;
 }
@@ -8680,6 +8681,34 @@ function renderD11SyncDebugModal() {
       </div>
       <div style="font-size:11px;color:var(--dim);margin-bottom:10px">Long-press the text below to select all, then copy and share it so the field names can be fixed. Fetched: ${new Date(_d11SyncDebugData.fetchedAt).toLocaleTimeString()}</div>
       <textarea readonly style="width:100%;height:400px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px" onclick="this.select()">${pretty(_d11SyncDebugData.raw)}</textarea>
+    </div>
+  </div>`;
+}
+
+// ── In-app receipt image viewer ──────────────────────────────────────────
+// Replaces window.open(receiptImage, '_blank') — opening a new tab on
+// mobile is a clunky extra step (new tab, then back). This shows the image
+// directly over the current screen instead, with native pinch-to-zoom
+// since it's a plain <img> the browser will zoom same as any other content
+// once the person double-taps or pinches within the modal.
+let _receiptModalImage = null;
+function openReceiptImageModal(imageUrl) {
+  _receiptModalImage = imageUrl;
+  render();
+}
+function closeReceiptImageModal() {
+  _receiptModalImage = null;
+  render();
+}
+function renderReceiptImageModal() {
+  if (!_receiptModalImage) return '';
+  return `<div style="position:fixed;inset:0;z-index:2100;background:rgba(5,10,20,0.94);display:flex;flex-direction:column" onclick="if(event.target===this) closeReceiptImageModal()">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px;flex-shrink:0">
+      <div style="font-size:14px;font-weight:700;color:#fff">🧾 Deposit/Withdrawal Receipt</div>
+      <button class="btn-secondary" style="width:auto;padding:8px 14px" onclick="closeReceiptImageModal()">✕ Close</button>
+    </div>
+    <div style="flex:1;overflow:auto;display:flex;align-items:center;justify-content:center;padding:10px" onclick="event.stopPropagation()">
+      <img src="${_receiptModalImage}" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:8px;touch-action:pinch-zoom" />
     </div>
   </div>`;
 }
@@ -16481,7 +16510,8 @@ function renderAdminPending(pendingDep, pendingWd) {
     ${t.receiptImage ? `
     <div style="margin-bottom:10px">
       <div style="font-size:11px;color:var(--dim);font-weight:600;margin-bottom:5px">📷 PAYMENT RECEIPT</div>
-      <img src="${t.receiptImage}" style="width:100%;max-height:220px;object-fit:contain;border-radius:10px;border:1px solid var(--card-b)" />
+      <img src="${t.receiptImage}" style="width:100%;max-height:220px;object-fit:contain;border-radius:10px;border:1px solid var(--card-b);cursor:pointer" onclick="openReceiptImageModal('${(t.receiptImage||'').replace(/'/g,"\\'")}')" />
+      <div style="font-size:10px;color:var(--dim);margin-top:3px">Tap image to zoom</div>
     </div>` : `<div style="font-size:11px;color:var(--orange);margin-bottom:8px">⚠️ No receipt uploaded</div>`}
     <div style="display:flex;gap:8px">
       <button class="admin-tab" style="flex:1;background:rgba(22,163,74,0.15);color:#4ade80" onclick="adminApproveDeposit('${t.email}','${t.id}')">✓ Approve</button>
@@ -16589,11 +16619,28 @@ async function adminAdjustBalance(email, type) {
 
 // ── Admin: All transactions across all users ──────────────────
 let adminTxFilter = 'all';
+let adminTxSearchText = ''; // matches against user name, email, and idNumber
+let adminTxDateFilter = ''; // 'YYYY-MM-DD' string, matched against the start of t.date
 
 function renderAdminTransactions() {
   const all = getAllTransactions();
   const filter = adminTxFilter;
-  const filtered = filter==='all' ? all : all.filter(t => t.type === filter);
+  let filtered = filter==='all' ? all : all.filter(t => t.type === filter);
+
+  const searchQ = (adminTxSearchText||'').trim().toLowerCase();
+  if (searchQ) {
+    filtered = filtered.filter(t =>
+      (t.name||'').toLowerCase().includes(searchQ)
+      || (t.email||'').toLowerCase().includes(searchQ)
+      || (t.idNumber||'').toLowerCase().includes(searchQ)
+    );
+  }
+  if (adminTxDateFilter) {
+    // t.date is stored via getDateTime() which starts with 'YYYY-MM-DD', so
+    // a plain startsWith match against the date-picker's value works
+    // without needing to parse/reformat anything.
+    filtered = filtered.filter(t => (t.date||'').startsWith(adminTxDateFilter));
+  }
 
   const TX_META = {
     deposit:          { label: 'Deposit',                icon: '⬇️',  positive: true  },
@@ -16634,6 +16681,12 @@ function renderAdminTransactions() {
   return `
   <div class="section-title">📜 All Transactions (${filtered.length})</div>
 
+  <div style="display:flex;gap:8px;margin-bottom:10px">
+    <input class="input" style="flex:1" placeholder="🔍 Search name, email, or ID number" value="${(adminTxSearchText||'').replace(/"/g,'&quot;')}" oninput="adminTxSearchText=this.value;render()" />
+    <input class="input" type="date" style="width:150px" value="${adminTxDateFilter||''}" onchange="adminTxDateFilter=this.value;render()" />
+    ${(adminTxSearchText || adminTxDateFilter) ? `<button class="btn-secondary" style="width:auto;padding:0 12px" onclick="adminTxSearchText='';adminTxDateFilter='';render()">✕</button>` : ''}
+  </div>
+
   <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">
     ${filterOptions.map(([val,label]) => `
     <button class="admin-tab ${adminTxFilter===val?'active':''}" onclick="adminTxFilter='${val}';render()" style="font-size:11px;padding:7px 11px">${label}</button>`).join('')}
@@ -16664,7 +16717,7 @@ function renderAdminTransactions() {
           <div style="min-width:0;flex:1">
             <div style="font-weight:700;font-size:13.5px">${meta.label}</div>
             <div style="font-size:11px;color:var(--text);margin-top:1px">${t.name}</div>
-            <div style="font-size:10.5px;color:var(--dim)">${t.email}</div>
+            <div style="font-size:10.5px;color:var(--dim)">${t.email}${t.idNumber ? ` · ID: ${t.idNumber}` : ''}</div>
             ${details.length>0?`<div style="font-size:10.5px;color:#a78bfa;margin-top:3px;line-height:1.6">${details.join(' &nbsp;·&nbsp; ')}</div>`:''}
             <div style="font-size:10px;color:var(--dim);margin-top:2px">${t.date}</div>
           </div>
@@ -16672,7 +16725,7 @@ function renderAdminTransactions() {
         <div style="text-align:right;flex-shrink:0;margin-left:10px">
           <div style="font-weight:700;font-size:15px;color:${meta.positive?'#4ade80':'#f87171'}">${meta.positive?'+':'-'}Rs ${t.amount}</div>
           <div style="font-size:10px;font-weight:700;color:${statusColor};text-transform:uppercase;margin-top:2px">${t.status}</div>
-          ${t.receiptImage?`<div style="font-size:10px;color:#60a5fa;cursor:pointer;margin-top:3px" onclick="window.open('${t.receiptImage}','_blank')">🧾 Receipt</div>`:''}
+          ${t.receiptImage?`<div style="font-size:10px;color:#60a5fa;cursor:pointer;margin-top:3px" onclick="openReceiptImageModal('${(t.receiptImage||'').replace(/'/g,"\\'")}')">🧾 Receipt</div>`:''}
         </div>
       </div>
     </div>`;
@@ -19792,7 +19845,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.10.0";
+const APP_VERSION = "3.10.2";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
