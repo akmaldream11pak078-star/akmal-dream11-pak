@@ -827,6 +827,7 @@ const UT_CREDIT_BUDGET = 100; // same 100-credit Dream11 budget system
 const UT_DEFAULT_CREDIT = 9.0;
 const UT_MAX_PER_SIDE = 7;
 const UT_ROLE_LIMITS = { WK:[1,4], BAT:[3,6], AR:[1,4], BOWL:[3,6] };
+const UT_MAX_BACKUPS = 3; // same as D11_MAX_BACKUPS — free (no credit cost), auto-replace a same-role main player who isn't in the confirmed Playing XI
 const UT_ROLE_LABELS = { WK:'Wicket-Keeper', BAT:'Batsman', AR:'All-Rounder', BOWL:'Bowler' };
 
 let users = {};
@@ -5680,12 +5681,76 @@ async function d11SyncToUtTournaments(matchId, d11m) {
     if (d11m.deadline) utM.deadline = d11m.deadline;
     await _saveUtTournamentToFirestore(t.id, t);
     try { localStorage.setItem('pp_ut_tournaments_cache', JSON.stringify(utTournaments)); } catch(e){}
+    // Apply UT's own backup-replacement rules now that isPlayingXI has been
+    // refreshed for this match — same mechanism as regular Dream11 teams:
+    // if a user's main pick isn't in the confirmed Playing XI, swap in their
+    // first same-role backup that IS confirmed.
+    utApplyBackupReplacements(t.id, matchId, utM);
   }
   const utTeamsForMatch = Object.values(utTeams).filter(x => x.matchId === matchId);
   for (const team of utTeamsForMatch) {
     team.totalPoints = calcDream11TeamPoints(team, d11m);
     await _saveUtTeamToFirestore(team.id, team);
   }
+}
+
+// ── UT equivalent of d11ApplyBackupReplacements ──────────────────────────
+// UT teams reference a per-tournament copy of the match's players (utM),
+// not the shared dream11Matches pool, so this recomputes against that copy.
+// Same rule: if a user's original pick isn't in the confirmed Playing XI,
+// swap in their first same-role backup that IS confirmed; undo the swap if
+// the original later gets flipped back into the XI (e.g. a correction).
+function utApplyBackupReplacements(tournamentId, matchId, utM) {
+  if (!utM) return;
+  const teams = Object.values(utTeams).filter(x => x.tournamentId === tournamentId && x.matchId === matchId);
+  teams.forEach(team => {
+    if (!team.originalPicks || team.originalPicks.length === 0) return; // submitted before this feature existed
+    if (!team.backups || team.backups.length === 0) return; // no backups chosen
+
+    const usedBackupIds = new Set(Object.values(team.replacements || {}));
+    let changed = false;
+
+    team.originalPicks.forEach(originalId => {
+      const originalPlayer = (utM.players||[]).find(x => x.id === originalId);
+      if (!originalPlayer) return;
+
+      const alreadyReplaced = !!(team.replacements && team.replacements[originalId]);
+      const currentlyInXI = originalPlayer.isPlayingXI;
+
+      if (currentlyInXI && alreadyReplaced) {
+        const backupId = team.replacements[originalId];
+        const slotIdx = team.picks.indexOf(backupId);
+        if (slotIdx >= 0) team.picks[slotIdx] = originalId;
+        delete team.replacements[originalId];
+        usedBackupIds.delete(backupId);
+        changed = true;
+        return;
+      }
+
+      if (!currentlyInXI && !alreadyReplaced) {
+        const backupId = team.backups.find(bId => {
+          if (usedBackupIds.has(bId)) return false;
+          if (team.picks.includes(bId)) return false;
+          const bp = (utM.players||[]).find(x => x.id === bId);
+          return bp && bp.role === originalPlayer.role && bp.isPlayingXI;
+        });
+        if (backupId) {
+          const slotIdx = team.picks.indexOf(originalId);
+          if (slotIdx >= 0) {
+            team.picks[slotIdx] = backupId;
+            team.replacements = team.replacements || {};
+            team.replacements[originalId] = backupId;
+            usedBackupIds.add(backupId);
+            changed = true;
+          }
+        }
+      }
+    });
+
+    if (changed) {
+      _saveUtTeamToFirestore(team.id, team);
+    }
+  });
 }
 
 function dream11TeamComposition(picks, d11m) {
@@ -8876,13 +8941,21 @@ async function d11SyncLiveMatch(matchId, showToast) {
 
       // Different Cricbuzz endpoints have returned batsman/bowler lists
       // under slightly different keys and shapes — try each in order and
-      // use whichever one actually has data.
+      // use whichever one actually has data. Bowling in particular has been
+      // seen missing entirely when only the most common key was checked, so
+      // this now tries several known Cricbuzz field-name variants before
+      // giving up (mirrors the robustness already added for the squad
+      // endpoint in d11FetchSquadFromCricbuzz).
       const battingCard = inn.batsman || inn.batTeamDetails?.batsmenData
         ? (inn.batsman || Object.values(inn.batTeamDetails?.batsmenData || {}))
         : [];
-      const bowlingCard = inn.bowler || inn.bowlTeamDetails?.bowlersData
-        ? (inn.bowler || Object.values(inn.bowlTeamDetails?.bowlersData || {}))
-        : [];
+      let bowlingCard = inn.bowler
+        || (inn.bowlTeamDetails?.bowlersData ? Object.values(inn.bowlTeamDetails.bowlersData) : null)
+        || inn.bowlerData
+        || inn.bowlers
+        || (inn.bowlTeamDetails?.bowlerData ? Object.values(inn.bowlTeamDetails.bowlerData) : null)
+        || [];
+      if (!Array.isArray(bowlingCard)) bowlingCard = Object.values(bowlingCard || {});
 
       battingCard.forEach(b => { if (_d11ApplyLiveBattingRow(d11m, b)) battersApplied++; });
       bowlingCard.forEach(bl => { if (_d11ApplyLiveBowlingRow(d11m, bl)) bowlersApplied++; });
@@ -8948,9 +9021,24 @@ function _d11ApplyLiveBattingRow(d11m, b) {
   const p = _d11FindPlayerByName(d11m, name);
   if (!p) return false;
   const outDesc = (b.outdec || b.outDesc || b.dismissal || '').toLowerCase();
+  const runs = Number(b.runs)||0;
+  const ballsFaced = Number(b.balls ?? b.ballsFaced)||0;
+  const isOut = !!outDesc && outDesc !== 'not out' && outDesc !== 'batting';
+  // Cricbuzz's completed-match scorecard includes a placeholder row for
+  // every squad member who never actually came out to bat — not just the
+  // XI who batted. These show up as 0 runs, 0 balls, "not out"/no dismissal
+  // text, exactly like a real Playing XI batter who is genuinely 0* not
+  // out. The only way to tell them apart is: a real not-out batter still
+  // has SOME balls faced (they were at the crease), while a placeholder for
+  // someone who never batted (including non-Playing-XI squad members) has
+  // zero balls faced AND wasn't given out. Skip those entirely instead of
+  // marking them Playing XI — this was wrongly awarding the flat Playing XI
+  // bonus (and any batting bonuses that happen to trigger at 0) to players
+  // who never took the field.
+  if (ballsFaced === 0 && !isOut) return false;
   p.stats = { ...(p.stats||{}),
-    runs: Number(b.runs)||0, ballsFaced: Number(b.balls ?? b.ballsFaced)||0, fours: Number(b.fours ?? b.four4s)||0, sixes: Number(b.sixes ?? b.six6s)||0,
-    isOut: !!outDesc && outDesc !== 'not out' && outDesc !== 'batting',
+    runs, ballsFaced, fours: Number(b.fours ?? b.four4s)||0, sixes: Number(b.sixes ?? b.six6s)||0,
+    isOut,
     isPlayingXI: true
   };
   return true;
@@ -8959,9 +9047,14 @@ function _d11ApplyLiveBowlingRow(d11m, bl) {
   const name = bl.name || bl.bowlName || bl.bowlerName || bl.fullName;
   const p = _d11FindPlayerByName(d11m, name);
   if (!p) return false;
+  const oversBowled = parseFloat(bl.overs)||0;
+  // Same placeholder issue as batting — a bowler who never bowled a ball
+  // shouldn't be marked Playing XI just because their name is on the squad
+  // list Cricbuzz attaches to the innings.
+  if (oversBowled === 0) return false;
   p.stats = { ...(p.stats||{}),
     wickets: Number(bl.wickets)||0, maidens: Number(bl.maidens)||0,
-    oversBowled: parseFloat(bl.overs)||0, runsGiven: Number(bl.runs ?? bl.runsConceded)||0,
+    oversBowled, runsGiven: Number(bl.runs ?? bl.runsConceded)||0,
     isPlayingXI: true
   };
   return true;
@@ -14580,6 +14673,21 @@ function renderDream11ViewTeam() {
   const d11m = dream11Matches[t.matchId];
   const u = users[t.userEmail];
 
+  // Other users' teams stay hidden until the match deadline has passed —
+  // seeing a rival's picks (captain/VC choices, which players they backed)
+  // before the lock would let a user copy or counter-pick against them.
+  // Admin and the team's own owner can always see it; everyone else only
+  // once isD11Locked() is true (deadline passed or admin manually locked it).
+  const isOwnTeam = currentUser && currentUser.email === t.userEmail;
+  const viewerIsAdmin = isAdmin();
+  if (!isOwnTeam && !viewerIsAdmin && !isD11Locked(t.matchId)) {
+    return `<div class="empty-state">
+      <div style="font-size:15px;font-weight:700;margin-bottom:8px">🔒 Team Hidden Until Deadline</div>
+      <div style="font-size:13px;color:var(--dim);margin-bottom:14px">Other users' teams are only visible after the match deadline has passed, so no one can copy picks before locking in their own team.</div>
+      <button class="btn-secondary" onclick="goDream11Hub()">← Back</button>
+    </div>`;
+  }
+
   const squadA = m ? d11GetTeamSquad(m.teamA) : null;
   const squadB = m ? d11GetTeamSquad(m.teamB) : null;
   const flagA = squadA?.flag;
@@ -16686,6 +16794,7 @@ function newUtTournamentTemplate(ownerEmail, name, passwordHash) {
     teams: {},     // keyed by lowercased team name → { teamName, flag, players:[{id,name,role,credit,photo}] }
     matches: {},   // keyed by matchId → UT match object (see newUtMatchTemplate)
     participants: {}, // userEmail → true, for anyone who has ever joined a contest in this tournament
+    joinRequests: {}, // userEmail → { status: 'pending'|'approved'|'rejected', requestedAt, respondedAt }
     createdAt: getDateTime(),
     deleted: false
   };
@@ -16718,6 +16827,7 @@ function newUtTeamSubmission(tournamentId, matchId, userEmail) {
     id: uid(),
     tournamentId, matchId, userEmail,
     picks: [], captain: null, viceCaptain: null,
+    backups: [], originalPicks: [], replacements: {},
     totalPoints: 0,
     paid: false, // whether entry fee has been deducted
     createdAt: getDateTime()
@@ -17796,16 +17906,66 @@ function utTournamentRanked(t) {
     .map(email => ({ email, name: users[email]?.name || 'Unknown Player', idNumber: users[email]?.idNumber || '', points: utTournamentUserPoints(t, email) }))
     .sort((a,b) => b.points - a.points);
 }
+// ── Join-Request approval gate ──────────────────────────────────────────
+// A user can no longer join a UT tournament just by knowing the code and
+// tapping "Join" — they first send a join request, which the owner sees in
+// their tournament panel and must Accept before the user can build/submit a
+// team. isUtApproved() treats the owner and admin as always-approved, and
+// also treats anyone already in t.participants (existing members from
+// before this feature, or already-accepted requests) as approved so no one
+// already playing gets locked out retroactively.
+function isUtApproved(t, email) {
+  if (!t || !email) return false;
+  if (t.ownerEmail === email) return true;
+  if (t.participants && t.participants[email]) return true;
+  if (t.joinRequests && t.joinRequests[email] && t.joinRequests[email].status === 'approved') return true;
+  return false;
+}
+function utJoinRequestStatus(t, email) {
+  if (!t || !email || !t.joinRequests || !t.joinRequests[email]) return null;
+  return t.joinRequests[email].status; // 'pending' | 'approved' | 'rejected'
+}
+async function utSendJoinRequest(tId) {
+  const t = utTournaments[tId];
+  if (!t || !currentUser) return;
+  if (isUtApproved(t, currentUser.email)) return;
+  const status = utJoinRequestStatus(t, currentUser.email);
+  if (status === 'pending') { showNotif('Request already sent — waiting for owner approval'); return; }
+  t.joinRequests = t.joinRequests || {};
+  t.joinRequests[currentUser.email] = { status: 'pending', requestedAt: getDateTime() };
+  await _saveUtTournamentToFirestore(t.id, t);
+  try { localStorage.setItem('pp_ut_tournaments_cache', JSON.stringify(utTournaments)); } catch(e){}
+  render();
+  showNotif('✅ Join request sent — the owner will Accept or Reject it');
+}
+async function utRespondJoinRequest(tId, email, approve) {
+  const t = utTournaments[tId];
+  if (!t || !isUtOwner(t)) return;
+  if (!t.joinRequests || !t.joinRequests[email]) return;
+  t.joinRequests[email].status = approve ? 'approved' : 'rejected';
+  t.joinRequests[email].respondedAt = getDateTime();
+  if (approve) {
+    t.participants = { ...(t.participants||{}), [email]: true };
+  }
+  await _saveUtTournamentToFirestore(t.id, t);
+  try { localStorage.setItem('pp_ut_tournaments_cache', JSON.stringify(utTournaments)); } catch(e){}
+  render();
+  showNotif(approve ? '✅ Request accepted' : 'Request rejected');
+}
 function utStartJoinContest(matchId) {
   const t = utTournaments[utViewTournamentId];
   const m = t && t.matches[matchId];
   if (!t || !m) return;
+  if (!isUtOwner(t) && !isAdmin() && !isUtApproved(t, currentUser.email)) {
+    showNotif('You need the owner\'s approval before joining — tap "Request to Join" first', 'error');
+    return;
+  }
   if (isUtLocked(t.id, matchId)) { showNotif('Deadline has passed — team cannot be submitted', 'error'); return; }
   const existing = utGetUserTeam(t.id, matchId, currentUser.email);
   if (existing) {
-    utTeamDraft = { tournamentId: t.id, matchId, picks: [...existing.picks], captain: existing.captain, viceCaptain: existing.viceCaptain, editingTeamId: existing.id };
+    utTeamDraft = { tournamentId: t.id, matchId, picks: [...existing.picks], captain: existing.captain, viceCaptain: existing.viceCaptain, backups: [...(existing.backups||[])], editingTeamId: existing.id };
   } else {
-    utTeamDraft = { tournamentId: t.id, matchId, picks: [], captain: null, viceCaptain: null, editingTeamId: null };
+    utTeamDraft = { tournamentId: t.id, matchId, picks: [], captain: null, viceCaptain: null, backups: [], editingTeamId: null };
   }
   utActiveMatchId = matchId;
   tab = 'utBuildTeam';
@@ -17862,6 +18022,24 @@ function utTogglePick(playerId) {
 }
 function utSetCaptain(pid) { if (!utTeamDraft) return; utTeamDraft.captain = pid; if (utTeamDraft.viceCaptain === pid) utTeamDraft.viceCaptain = null; render(); }
 function utSetViceCaptain(pid) { if (!utTeamDraft) return; utTeamDraft.viceCaptain = pid; if (utTeamDraft.captain === pid) utTeamDraft.captain = null; render(); }
+function utToggleBackup(playerId) {
+  if (!utTeamDraft) return;
+  utTeamDraft.backups = utTeamDraft.backups || [];
+  const idx = utTeamDraft.backups.indexOf(playerId);
+  if (idx >= 0) {
+    utTeamDraft.backups.splice(idx, 1);
+  } else {
+    if (utTeamDraft.picks.includes(playerId)) { showNotif('This player is already in your main 11', 'error'); return; }
+    if (utTeamDraft.backups.length >= UT_MAX_BACKUPS) { showNotif(`Only ${UT_MAX_BACKUPS} backup players allowed`, 'error'); return; }
+    utTeamDraft.backups.push(playerId);
+  }
+  render();
+}
+function utValidateBackups(backups) {
+  const errors = [];
+  if (backups && backups.length > UT_MAX_BACKUPS) errors.push(`Max ${UT_MAX_BACKUPS} backup players allowed`);
+  return errors;
+}
 function utValidateTeam(picks, m) {
   const errors = [];
   if (picks.length !== UT_TEAM_SIZE) errors.push(`Exactly ${UT_TEAM_SIZE} players required (currently ${picks.length})`);
@@ -17887,7 +18065,7 @@ async function utSubmitTeam() {
   const m = t && t.matches[utTeamDraft.matchId];
   if (!t || !m) return;
   if (isUtLocked(t.id, m.id)) { showNotif('Deadline guzar gayi', 'error'); return; }
-  const errors = utValidateTeam(utTeamDraft.picks, m);
+  const errors = utValidateTeam(utTeamDraft.picks, m).concat(utValidateBackups(utTeamDraft.backups));
   if (errors.length) { showNotif(errors[0], 'error'); return; }
   if (!utTeamDraft.captain || !utTeamDraft.viceCaptain) { showNotif('Please select Captain and Vice-Captain', 'error'); return; }
 
@@ -17900,6 +18078,8 @@ async function utSubmitTeam() {
     team.picks = [...utTeamDraft.picks];
     team.captain = utTeamDraft.captain;
     team.viceCaptain = utTeamDraft.viceCaptain;
+    team.backups = [...(utTeamDraft.backups||[])];
+    if (!team.originalPicks || team.originalPicks.length === 0) team.originalPicks = [...utTeamDraft.picks];
 
     _saveUtTeamToFirestore(team.id, team);
     try { localStorage.setItem('pp_ut_teams_cache', JSON.stringify(utTeams)); } catch(e){}
@@ -17927,6 +18107,8 @@ async function utSubmitTeam() {
     team.picks = [...utTeamDraft.picks];
     team.captain = utTeamDraft.captain;
     team.viceCaptain = utTeamDraft.viceCaptain;
+    team.backups = [...(utTeamDraft.backups||[])];
+    team.originalPicks = [...utTeamDraft.picks];
     team.paid = true;
 
     const result = await _atomicJoinUtContest({ tournamentId: t.id, matchId: m.id, entryFeeAmount: m.entryFee, team });
@@ -17986,6 +18168,12 @@ async function _atomicJoinUtContest({ tournamentId, matchId, entryFeeAmount, tea
       if (!userSnap.exists()) throw new Error('USER_NOT_FOUND');
       if (teamSnap.exists()) throw new Error('ALREADY_JOINED');
 
+      const tournamentData = tournamentSnap.data();
+      const approvedAlready = (tournamentData.participants && tournamentData.participants[currentUser.email])
+        || tournamentData.ownerEmail === currentUser.email
+        || (tournamentData.joinRequests && tournamentData.joinRequests[currentUser.email] && tournamentData.joinRequests[currentUser.email].status === 'approved');
+      if (!approvedAlready) throw new Error('NOT_APPROVED');
+
       const userData = userSnap.data();
       if ((userData.balance || 0) < entryFeeAmount) throw new Error('INSUFFICIENT_BALANCE');
 
@@ -17996,7 +18184,6 @@ async function _atomicJoinUtContest({ tournamentId, matchId, entryFeeAmount, tea
         matchId: matchId || null, date: getDateTime(), status: 'confirmed'
       });
 
-      const tournamentData = tournamentSnap.data();
       const updatedParticipants = { ...(tournamentData.participants || {}), [currentUser.email]: true };
 
       tx.set(userRef, { ...userData, balance: newBalance, transactions: newTransactions });
@@ -18008,6 +18195,7 @@ async function _atomicJoinUtContest({ tournamentId, matchId, entryFeeAmount, tea
     return outcome;
   } catch (e) {
     if (e.message === 'ALREADY_JOINED') showNotif('You have already joined this contest with a team!', 'error');
+    else if (e.message === 'NOT_APPROVED') showNotif('You need the owner\'s approval before joining this tournament', 'error');
     else if (e.message === 'INSUFFICIENT_BALANCE') showNotif(`Insufficient balance — Rs ${entryFeeAmount} required`, 'error');
     else if (e.message === 'TOURNAMENT_NOT_FOUND' || e.message === 'USER_NOT_FOUND') showNotif('Could not find tournament or user data — please refresh', 'error');
     else { console.error('UT contest join transaction failed:', e); showNotif('Join failed — please check your connection and try again', 'error'); }
@@ -18214,6 +18402,26 @@ function renderUtDashboard() {
     <button class="btn-secondary" style="flex:1;font-size:12.5px;padding:11px" onclick="openUtTeamsManage()">👥 Teams & Players</button>
   </div>
   <button class="btn-secondary btn-block mb14" style="font-size:12px;padding:10px;background:rgba(168,85,247,0.1);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="utOpenAddAdminMatch('${t.id}')">📋 Admin Ka Published Match Add Karo</button>
+  ${(() => {
+    const pending = Object.entries(t.joinRequests||{}).filter(([,r]) => r.status === 'pending');
+    if (pending.length === 0) return '';
+    return `
+    <div class="card mb14" style="border-color:rgba(249,115,22,0.35);background:rgba(249,115,22,0.06)">
+      <div style="font-weight:700;font-size:13.5px;margin-bottom:10px">🙋 Join Requests (${pending.length})</div>
+      ${pending.map(([email, r]) => {
+        const u = users[email];
+        return `
+        <div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--card-b)">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${u?.name || email}</div>
+            <div style="font-size:10px;color:var(--dim)">${email}</div>
+          </div>
+          <button class="btn-secondary" style="padding:8px 12px;font-size:11px;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="utRespondJoinRequest('${t.id}','${email.replace(/'/g,"\\'")}',true)">✅ Accept</button>
+          <button class="btn-secondary" style="padding:8px 12px;font-size:11px;background:rgba(220,38,38,0.1);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="utRespondJoinRequest('${t.id}','${email.replace(/'/g,"\\'")}',false)">✕ Reject</button>
+        </div>`;
+      }).join('')}
+    </div>`;
+  })()}
   ` : ''}
 
   ${isAdmin() && !owner ? `<button class="btn-secondary btn-block mb14" style="font-size:11.5px;padding:9px;background:rgba(220,38,38,0.1);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="utAdminResetPasswordPrompt('${t.id}')">🔑 Reset Owner's Password (Admin)</button>` : ''}
@@ -18392,7 +18600,13 @@ function utMatchCard(t, m, owner) {
       <span style="font-family:Rajdhani,sans-serif;font-weight:800;font-size:16px;color:var(--gold)">${myTeam.totalPoints||0} pts</span>
     </div>` : ''}
     <div style="display:flex;gap:8px">
-      ${myTeam ? `
+      ${!isUtApproved(t, currentUser?.email) ? (() => {
+        const reqStatus = utJoinRequestStatus(t, currentUser?.email);
+        if (reqStatus === 'pending') return `<button class="btn-secondary btn-block" style="padding:11px" disabled>⏳ Request Pending — Waiting for Owner</button>`;
+        if (reqStatus === 'rejected') return `<button class="btn-secondary btn-block" style="padding:11px;background:rgba(220,38,38,0.1);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="utSendJoinRequest('${t.id}')">❌ Request Rejected — Tap to Ask Again</button>`;
+        return `<button class="btn-primary btn-block" style="padding:11px;background:linear-gradient(135deg,#f97316,#ea580c)" onclick="utSendJoinRequest('${t.id}')">🙋 Request to Join Tournament</button>`;
+      })() :
+      myTeam ? `
         <button class="btn-secondary" style="flex:1;padding:11px;font-size:12px" onclick="openUtViewTeam('${myTeam.id}')">👁 My Team ${myTeam.totalPoints?'· '+myTeam.totalPoints+' pts':''}</button>
         ${!dLocked ? `<button class="btn-primary" style="flex:1;padding:11px;font-size:12px;background:linear-gradient(135deg,#f97316,#ea580c)" onclick="utStartJoinContest('${m.id}')">✏️ Edit Team</button>` : ''}
       ` : dLocked ? `<button class="btn-secondary" style="flex:1;padding:11px" disabled>🔒 Locked</button>` :
@@ -18998,10 +19212,29 @@ function renderUtBuildTeam() {
   }).join('')}
   ` : ''}
 
+  <div class="section-title" style="margin-top:18px">🔁 Backup Players (${(utTeamDraft.backups||[]).length}/${UT_MAX_BACKUPS})</div>
+  <div class="empty-state" style="padding:8px 4px;font-size:11px;text-align:left">Free picks — no credit cost. If a main player isn't in the confirmed Playing XI, a backup of the SAME role automatically takes their spot.</div>
+  ${(utTeamDraft.backups||[]).length === 0 ? `<div class="empty-state" style="padding:10px 4px;font-size:11px">No backups selected yet — tap "+ B" next to any player above to add one (up to ${UT_MAX_BACKUPS}).</div>` : (utTeamDraft.backups||[]).map(bid => {
+    const p = m.players.find(x => x.id === bid);
+    if (!p) return '';
+    return `
+    <div class="d11-player-row picked">
+      <div class="d11-player-left">
+        <span class="d11-role-chip d11-role-${p.role}">${p.role}</span>
+        <div class="d11-player-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80;font-size:11px">✅</span>' : ''}</div>
+      </div>
+      <button class="d11-cv-btn" onclick="utToggleBackup('${bid}')">✕</button>
+    </div>`;
+  }).join('')}
+
   <div class="d11-sticky-bar">
     <div>
       <div style="font-size:11px;color:var(--dim)">Selected</div>
       <div class="display" style="font-size:18px">${utTeamDraft.picks.length}/${UT_TEAM_SIZE}</div>
+    </div>
+    <div>
+      <div style="font-size:11px;color:var(--dim);text-align:center">Backups</div>
+      <div class="display" style="font-size:18px;color:#60a5fa;text-align:center">${(utTeamDraft.backups||[]).length}/${UT_MAX_BACKUPS}</div>
     </div>
     <div>
       <div style="font-size:11px;color:var(--dim);text-align:center">Credits Left</div>
@@ -19015,15 +19248,17 @@ function renderUtBuildTeam() {
 }
 function utPickRow(p) {
   const picked = utTeamDraft.picks.includes(p.id);
+  const isBackup = (utTeamDraft.backups||[]).includes(p.id);
   return `
   <div class="d11-player-row ${picked?'picked':''}">
     <div class="d11-player-left">
       ${p.photo ? `<img src="${p.photo}" style="width:30px;height:30px;border-radius:50%;object-fit:cover;flex-shrink:0" />` : ''}
       <span class="d11-role-chip d11-role-${p.role}">${p.role}</span>
-      <div class="d11-player-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80;font-size:11px" title="Confirmed Playing XI">✅</span>' : ''}</div>
+      <div class="d11-player-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80;font-size:11px" title="Confirmed Playing XI">✅</span>' : ''}${isBackup ? ' <span style="color:#60a5fa;font-size:11px" title="Backup player">🔁</span>' : ''}</div>
     </div>
     <div style="display:flex;align-items:center;gap:8px">
       <span style="font-size:11px;color:var(--dim);font-weight:600">${utPlayerCredit(p)} Cr</span>
+      ${!picked ? `<button class="d11-cv-btn" style="background:${isBackup?'#2563eb':'transparent'};border-color:#60a5fa;color:${isBackup?'#fff':'#60a5fa'};font-size:9px;width:auto;padding:2px 6px" title="Mark as backup" onclick="utToggleBackup('${p.id}')">${isBackup?'✕ B':'+ B'}</button>` : ''}
       <button class="d11-pick-btn ${picked?'active':''}" onclick="utTogglePick('${p.id}')">${picked?'✕':'+'}</button>
     </div>
   </div>`;
@@ -19081,6 +19316,19 @@ function renderUtViewTeam() {
   const t = utTournaments[team.tournamentId];
   const m = t && t.matches[team.matchId];
   const u = users[team.userEmail];
+
+  // Same rule as regular Dream11 teams — other users' UT teams stay hidden
+  // until the match deadline has passed, so no one can copy picks before
+  // locking in their own team. Admin and the team's own owner always see it.
+  const isOwnTeam = currentUser && currentUser.email === team.userEmail;
+  const viewerIsAdmin = isAdmin();
+  if (!isOwnTeam && !viewerIsAdmin && t && !isUtLocked(t.id, team.matchId)) {
+    return `<div class="empty-state">
+      <div style="font-size:15px;font-weight:700;margin-bottom:8px">🔒 Team Hidden Until Deadline</div>
+      <div style="font-size:13px;color:var(--dim);margin-bottom:14px">Other users' teams are only visible after the match deadline has passed, so no one can copy picks before locking in their own team.</div>
+      <button class="btn-secondary" onclick="utBackFromBuildOrBoard()">← Back</button>
+    </div>`;
+  }
 
   const picked = team.picks.map(pid => m?.players.find(x => x.id === pid)).filter(Boolean);
   const roleOrder = ['WK','BAT','AR','BOWL'];
@@ -19418,7 +19666,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.7.9";
+const APP_VERSION = "3.9.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
