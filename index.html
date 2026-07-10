@@ -11524,12 +11524,147 @@ _Akmal Dream 11 Pak — Pakistan ka #1 Fantasy Cricket Platform_ 🇵🇰🏆`;
   window.open('https://wa.me/?text='+encodeURIComponent(msg),'_blank');
 }
 
-function shareD11CustomContestWhatsApp(ccId) {
+// ── Custom Contest Invite IMAGE — drawn client-side, shown when the
+// creator shares their newly-made "Create Your Own Dream11 Contest" on
+// WhatsApp. Shows creator name/ID, match details, entry fee, deadline, and
+// the join code, with the same "attitude" gradient styling used by the
+// contest-result share images (see d11GenerateContestResultImageBlob). ──
+async function d11GenerateCustomContestInviteImageBlob(ccId) {
+  const cc = d11CustomContests[ccId];
+  if (!cc) { showNotif('Contest not found', 'error'); return null; }
+  const m = matches[cc.matchId];
+  const creator = users[cc.creatorEmail];
+
+  const W = 900, PAD = 40, scale = 2;
+  const H = 760;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = W * scale; canvas.height = H * scale;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(scale, scale);
+
+  // ── Colorful attitude gradient background ──
+  const bgGrad = ctx.createLinearGradient(0, 0, W, H);
+  bgGrad.addColorStop(0, '#1e0a3c');
+  bgGrad.addColorStop(0.5, '#4c1d95');
+  bgGrad.addColorStop(1, '#0f172a');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Header banner
+  const headGrad = ctx.createLinearGradient(0, 0, W, 0);
+  headGrad.addColorStop(0, '#a855f7');
+  headGrad.addColorStop(0.5, '#7c3aed');
+  headGrad.addColorStop(1, '#4f46e5');
+  ctx.fillStyle = headGrad;
+  ctx.fillRect(0, 0, W, 130);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff';
+  ctx.font = '900 32px Arial, sans-serif';
+  ctx.fillText('🛠️ MY DREAM11 CONTEST 🛠️', W/2, 52);
+  ctx.font = '800 20px Arial, sans-serif';
+  ctx.fillStyle = '#ede9fe';
+  ctx.fillText('Aake dikhao apna dum — join karo agar himmat hai! 😎', W/2, 84);
+  ctx.font = '700 15px Arial, sans-serif';
+  ctx.fillStyle = '#0f172a';
+  ctx.fillText(`${m?.teamA||'Team A'}  vs  ${m?.teamB||'Team B'}`, W/2, 112);
+
+  let y = 175;
+
+  // Creator card
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  _roundRect(ctx, PAD, y-32, W-PAD*2, 74, 14); ctx.fill();
+  ctx.strokeStyle = '#c084fc'; ctx.lineWidth = 1.5;
+  _roundRect(ctx, PAD, y-32, W-PAD*2, 74, 14); ctx.stroke();
+
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#c4b5fd';
+  ctx.font = '700 12px Arial, sans-serif';
+  ctx.fillText('CONTEST CREATED BY', PAD+20, y-6);
+  ctx.fillStyle = '#fff';
+  ctx.font = '800 20px Arial, sans-serif';
+  ctx.fillText(creator?.name || 'Unknown', PAD+20, y+20);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '600 13px Arial, sans-serif';
+  ctx.fillText(creator?.idNumber ? `ID: ${creator.idNumber}` : '', W-PAD-20, y+20);
+
+  y += 100;
+
+  // Contest detail rows — icon, label, value
+  const detailRows = [
+    ['💰', 'Entry Fee', cc.entryFee > 0 ? `Rs ${cc.entryFee}` : 'FREE'],
+    ['📋', 'Match Format', m?.format || 'T20'],
+    ['⏰', 'Deadline', m?.deadline ? pkDateTime(m.deadline) : 'Not set'],
+    ['👥', 'Max Players', `Up to ${D11_CUSTOM_CONTEST_MAX_PLAYERS}`],
+    ['🔑', 'Join Code', cc.code],
+  ];
+  const rowH2 = 62;
+  detailRows.forEach(([icon, label, value], i) => {
+    const rowBg = i % 2 === 0 ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)';
+    ctx.fillStyle = rowBg;
+    _roundRect(ctx, PAD, y, W-PAD*2, rowH2-8, 10); ctx.fill();
+
+    ctx.textAlign = 'left';
+    ctx.font = '24px Arial, sans-serif';
+    ctx.fillText(icon, PAD+16, y+38);
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '700 13px Arial, sans-serif';
+    ctx.fillText(label.toUpperCase(), PAD+58, y+24);
+    ctx.fillStyle = label === 'Join Code' ? '#fde68a' : '#fff';
+    ctx.font = label === 'Join Code' ? '900 24px Arial, sans-serif' : '800 20px Arial, sans-serif';
+    ctx.fillText(String(value), PAD+58, y+50);
+
+    y += rowH2;
+  });
+
+  // Footer
+  y += 24;
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#e879f9';
+  ctx.font = '700 15px Arial, sans-serif';
+  ctx.fillText('Sasta entry, bada maza — miss mat karo! 🔥', W/2, y);
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '400 12px Arial, sans-serif';
+  ctx.fillText('Akmal Dream 11 Pak — ' + (typeof APP_URL!=='undefined'?APP_URL:''), W/2, y+22);
+
+  return await new Promise(resolve => canvas.toBlob(resolve, 'image/png', 0.95));
+}
+
+async function shareD11CustomContestWhatsApp(ccId) {
   const cc = d11CustomContests[ccId];
   if (!cc) return;
-  const entryText = cc.entryFee > 0 ? `\u{1F4B0} Entry Fee: Rs ${cc.entryFee}` : '\u{1F193} Free to Join';
-  const msg = `\u{1F3C6} *Dream11 Contest Invite!*\n\nMaine apna Dream11 contest banaya hai \u2014 join karo!\n\n${entryText}\n\n\u{1F511} Contest Code: *${cc.code}*\n\n\u{1F517} Official Website:\n${APP_URL}\n\n_Website per signup/login karo, contest code daalo aur apni Dream11 team banao!_`;
-  window.open('https://wa.me/?text=' + encodeURIComponent(msg), '_blank');
+  try {
+    const blob = await d11GenerateCustomContestInviteImageBlob(ccId);
+    if (!blob) return;
+
+    const fileName = `Dream11_Contest_Invite_${cc.code}.png`;
+    const shareText = `🛠️ My Dream11 Contest — Code: ${cc.code} 🏆`;
+    const file = new File([blob], fileName, { type: 'image/png' });
+
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: shareText, text: shareText });
+      showNotif('📤 Shared!');
+      return;
+    }
+
+    // Fallback: download image + open WhatsApp with text so user can attach manually
+    const entryText = cc.entryFee > 0 ? `💰 Entry Fee: Rs ${cc.entryFee}` : '🆓 Free to Join';
+    const msg = `🏆 *Dream11 Contest Invite!*\n\nMaine apna Dream11 contest banaya hai — join karo!\n\n${entryText}\n\n🔑 Contest Code: *${cc.code}*\n\n🔗 Official Website:\n${APP_URL}\n\n_Website per signup/login karo, contest code daalo aur apni Dream11 team banao! Image attach hai — download ho chuki hai 🖼️_`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fileName;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    showNotif('🖼️ Image downloaded! WhatsApp khol rahe hain — image attach karke bhejein 📲');
+    setTimeout(() => { window.open('https://wa.me/?text=' + encodeURIComponent(msg), '_blank'); }, 400);
+  } catch(e) {
+    if (e?.name !== 'AbortError') {
+      console.error(e);
+      showNotif('Contest invite image share nahi ho saka — dobara try karein', 'error');
+    }
+  }
 }
 
 // ── Completed Match Result IMAGE — drawn client-side on a <canvas>, shows
@@ -19869,7 +20004,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.11.2";
+const APP_VERSION = "3.12.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
