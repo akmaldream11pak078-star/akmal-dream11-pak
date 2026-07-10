@@ -751,10 +751,10 @@ function pkDate(ts) {
 // ⬇️ APK download — embedded directly in this HTML file (see apk_data.js), no separate hosting needed
 const APK_DOWNLOAD_URL = (typeof APK_BASE64_DATA !== 'undefined') ? APK_BASE64_DATA : "/app.apk";
 const MEGA_CONTEST_ENTRY_FEE = 10; // Rs 10 entry fee to join Mega Contest
-const MEGA_CONTEST_COMPANY_SHARE = 0.10; // 10% of mega pool goes to company, 90% admin distributes
+const MEGA_CONTEST_COMPANY_SHARE = 0.07; // 7% of mega pool goes to company, 93% admin distributes
 const H2H_ENTRY_FEE = 50; // Rs 50 per player
 const CUSTOM_CONTEST_MAX_PLAYERS = 5; // Max players allowed in a user-created contest
-const CUSTOM_CONTEST_COMPANY_SHARE = 0.10; // 10% company cut
+const CUSTOM_CONTEST_COMPANY_SHARE = 0.07; // 7% company cut
 const CUSTOM_CONTEST_SPLIT = [0.50, 0.30, 0.20]; // Top 3 prize split of distributable pool
 const H2H_PRIZE_POOL = 100; // Total prize
 const H2H_WINNER_PRIZE = 90; // Winner gets Rs 90
@@ -769,22 +769,22 @@ const MATCH_DELETE_PASSWORD = "Del1234"; // Required to delete any match (Predic
 
 // ── Dream11 Contest constants (separate from Prediction Mega/H2H) ──
 const D11_MEGA_ENTRY_FEE = 30; // Rs 30 entry fee to join Dream11 Mega Contest
-const D11_MEGA_COMPANY_SHARE = 0.10; // 10% of Dream11 mega pool goes to company, 90% split among winners
+const D11_MEGA_COMPANY_SHARE = 0.07; // 7% of Dream11 mega pool goes to company, 93% split among winners
 const D11_MINI_MEGA_ENTRY_FEE = 10; // Rs 10 entry fee to join Dream11 Mini Mega Contest (same rules/brackets as Mega, cheaper entry)
-const D11_MINI_MEGA_COMPANY_SHARE = 0.10; // 10% of Dream11 mini mega pool goes to company, 90% split among winners
+const D11_MINI_MEGA_COMPANY_SHARE = 0.07; // 7% of Dream11 mini mega pool goes to company, 93% split among winners
 const D11_H2H_ENTRY_FEE = 100; // Rs 100 per user for Dream11 H2H
 const D11_H2H_COMPANY_SHARE = 0.05; // 5% company cut, 95% to the winner
 const D11_CUSTOM_CONTEST_MAX_PLAYERS = 100; // Max players allowed in a user-created Dream11 contest
 const D11_CUSTOM_CONTEST_MAX_PER_USER = 2; // Max number of Custom Contests one user can create per match
-const D11_CUSTOM_CONTEST_COMPANY_SHARE = 0.10; // 10% company cut
+const D11_CUSTOM_CONTEST_COMPANY_SHARE = 0.07; // 7% company cut
 const D11_TOURNAMENT_CREATION_FEE = 0; // Rs creator pays the company to create a tournament (temporarily 0, raise later)
 const D11_TOURNAMENT_MAX_PARTICIPANTS = 100; // Max users allowed to join one tournament
-const D11_TOURNAMENT_COMPANY_SHARE = 0.10; // 10% company cut on the entry-fee pool (when creator sets a paid entry)
+const D11_TOURNAMENT_COMPANY_SHARE = 0.07; // 7% company cut on the entry-fee pool (when creator sets a paid entry)
 const D11_TOURNAMENT_SPLIT = [0.50, 0.30, 0.20]; // Top 3 prize split of distributable pool
 const D11_CUSTOM_CONTEST_SPLIT = [0.50, 0.30, 0.20]; // Top 3 prize split of distributable pool (used only when joiners < 4)
 
 // Custom Dream11 Contest — "Mega style" prize distribution.
-// 70% of joiners win a prize (rounded), remaining 90% of the pool (10% company
+// 70% of joiners win a prize (rounded), remaining 93% of the pool (7% company
 // cut) is split among winners using a weighted curve so rank 1 gets the
 // biggest share and it tapers down — same spirit as the Mega Contest brackets,
 // just scaled to a max of D11_CUSTOM_CONTEST_MAX_PLAYERS (100) joiners.
@@ -816,12 +816,12 @@ function buildD11CustomContestWeights(winnerCount) {
 // this tournament. Free to create. A 6-digit security password
 // (set once at creation) is required again to Publish a match or to
 // Submit/Finalize its result. Every match in a UT tournament has a
-// Rs 20-minimum entry fee the owner sets; 90% of the per-match pool
-// goes to the players who scored highest, 10% to the company.
+// Rs 20-minimum entry fee the owner sets; 93% of the per-match pool
+// goes to the players who scored highest, 7% to the company.
 // ════════════════════════════════════════════════════════════
 const UT_MIN_ENTRY_FEE = 20; // Rs — owner cannot set a contest fee below this
-const UT_COMPANY_SHARE = 0.10; // 10% company cut on every UT match's entry-fee pool
-const UT_PRIZE_SPLIT = [0.50, 0.30, 0.20]; // Top 3 prize split of the distributable 90%
+const UT_COMPANY_SHARE = 0.07; // 7% company cut on every UT match's entry-fee pool
+const UT_PRIZE_SPLIT = [0.50, 0.30, 0.20]; // Top 3 prize split of the distributable 93%
 const UT_TEAM_SIZE = 11;
 const UT_CREDIT_BUDGET = 100; // same 100-credit Dream11 budget system
 const UT_DEFAULT_CREDIT = 9.0;
@@ -2772,7 +2772,7 @@ async function _atomicJoinCustomContest({ contestId, contestCollection, maxPlaye
 }
 
 // Called automatically when admin finalizes scoring for a match.
-// Distributes each open custom contest tied to this match: top 3 by points get 50/30/20 of the 90% pool.
+// Distributes each open custom contest tied to this match: top 3 by points get 50/30/20 of the 93% pool.
 async function finalizeCustomContests(matchId) {
   const contests = Object.values(customContests).filter(c => c.matchId === matchId && c.status === 'open');
   if (contests.length === 0) return;
@@ -10417,7 +10417,7 @@ async function joinD11MegaContest(matchId) {
 // Mega Contest prize brackets — relative WEIGHTS per rank (not fixed PKR),
 // derived from the published "🏆 MEGA CONTEST DETAILS (30 PKR ENTRY) 🏆" table.
 // At finalization, weights are scaled to the ACTUAL distributable pool
-// (90% of total entry fees collected for this match), so the company always
+// (93% of total entry fees collected for this match), so the company always
 // keeps exactly 10% — never more, never less — regardless of how many users
 // joined within a bracket's range.
 // Each bracket is { min, max, weights: [rank1, rank2, rank3, ...] }.
@@ -10435,7 +10435,7 @@ function getD11MegaBracket(joinCount) {
 
 // Called by admin when finalizing Dream11 scoring — pays out the Mega Contest
 // using the bracket's rank WEIGHTS (correct winner count + relative split per
-// the rules), but scaled to exactly 90% of the real collected pool — so the
+// the rules), but scaled to exactly 93% of the real collected pool — so the
 // company's 10% share is always exact, never a fixed/mismatched amount.
 // Handles: 1-joiner auto-refund, proportional per-rank payout, and the tie rule
 // (players tied on points share the combined prize money of their tied ranks equally).
@@ -10479,7 +10479,7 @@ async function distributeD11MegaPrizes(matchId) {
     ? fullWeights.slice()
     : Array.from({length: winnerCount}, (_,k) => fullWeights[Math.floor(k * (fullWeights.length / winnerCount))]);
 
-  // Real pool collected for this match (entry fee × actual joiners), scaled to 90%.
+  // Real pool collected for this match (entry fee × actual joiners), scaled to 93%.
   const pool = d11m.megaPool || (parts.length * D11_MEGA_ENTRY_FEE);
   const distributable = Math.round(pool * (1 - D11_MEGA_COMPANY_SHARE));
   const weightSum = weightTable.reduce((a,b) => a+b, 0);
@@ -10492,7 +10492,7 @@ async function distributeD11MegaPrizes(matchId) {
 
   // Group consecutive ranks that are tied on points, so tied players split
   // the combined prize money of their ranks equally (per the Rank Tie Rule).
-  // Amounts are each rank's weight scaled to the real 90% distributable pool.
+  // Amounts are each rank's weight scaled to the real 93% distributable pool.
   const prizes = {};
   let i = 0;
   while (i < ranked.length && i < weightTable.length) {
@@ -10732,7 +10732,7 @@ async function giveD11FreeRewards(matchId) {
   render();
 }
 
-// ─── Dream11 H2H Contest: two users, winner takes 90% of pool ─
+// ─── Dream11 H2H Contest: two users, winner takes 95% of pool ─
 function newD11H2HContest(matchId) {
   return {
     id: uid(), matchId,
@@ -10878,7 +10878,7 @@ async function joinD11H2HContest(matchId) {
 }
 
 // Called when admin finalizes Dream11 scoring — resolves all 'full' H2H
-// contests for this match, pays the winner 90% of the pool, refunds on a tie,
+// contests for this match, pays the winner 95% of the pool, refunds on a tie,
 // and refunds/cancels any unmatched lone-player slots.
 async function finalizeD11H2HContests(matchId) {
   const d11m = dream11Matches[matchId];
@@ -10941,7 +10941,7 @@ async function finalizeD11H2HContests(matchId) {
   } catch(e){}
 }
 
-// ─── Dream11 user-created Custom Contest (same rules as Mega: 90%/10%, top-3 split) ───
+// ─── Dream11 user-created Custom Contest (same rules as Mega: 93%/7%, top-3 split) ───
 function genD11ContestCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
@@ -12167,7 +12167,7 @@ function renderD11JoinContest() {
       <div>
         <div style="font-weight:700;font-size:14px">🎯 Dream11 Mega Contest</div>
         <div style="font-size:11px;color:var(--dim);margin-top:2px">Entry Rs ${D11_MEGA_ENTRY_FEE} • ${(d11m.megaParticipants||[]).length} joined • Pool Rs ${d11m.megaPool||0}</div>
-        <div style="font-size:10.5px;color:var(--dim);margin-top:1px">90% winners ko, 10% app fee</div>
+        <div style="font-size:10.5px;color:var(--dim);margin-top:1px">${Math.round((1-D11_MEGA_COMPANY_SHARE)*100)}% winners ko, ${Math.round(D11_MEGA_COMPANY_SHARE*100)}% app fee</div>
       </div>
       ${inMega
         ? `<span style="font-size:11px;font-weight:700;color:#4ade80">✅ Joined</span>`
@@ -12183,7 +12183,7 @@ function renderD11JoinContest() {
       <div>
         <div style="font-weight:700;font-size:14px">🔸 Dream11 Mini Mega Contest</div>
         <div style="font-size:11px;color:var(--dim);margin-top:2px">Entry Rs ${D11_MINI_MEGA_ENTRY_FEE} • ${(d11m.miniMegaParticipants||[]).length} joined • Pool Rs ${d11m.miniMegaPool||0}</div>
-        <div style="font-size:10.5px;color:var(--dim);margin-top:1px">Mega jese hi rules, sasta entry — 90% winners ko, 10% app fee</div>
+        <div style="font-size:10.5px;color:var(--dim);margin-top:1px">Mega jese hi rules, sasta entry — ${Math.round((1-D11_MINI_MEGA_COMPANY_SHARE)*100)}% winners ko, ${Math.round(D11_MINI_MEGA_COMPANY_SHARE*100)}% app fee</div>
       </div>
       ${inMiniMega
         ? `<span style="font-size:11px;font-weight:700;color:#4ade80">✅ Joined</span>`
@@ -12199,7 +12199,7 @@ function renderD11JoinContest() {
       <div>
         <div style="font-weight:700;font-size:14px">🥊 Dream11 H2H Contest</div>
         <div style="font-size:11px;color:var(--dim);margin-top:2px">Entry Rs ${D11_H2H_ENTRY_FEE} • Winner gets Rs ${Math.round(D11_H2H_ENTRY_FEE*2*(1-D11_H2H_COMPANY_SHARE))}</div>
-        <div style="font-size:10.5px;color:var(--dim);margin-top:1px">90% winner ko, 10% app fee</div>
+        <div style="font-size:10.5px;color:var(--dim);margin-top:1px">${Math.round((1-D11_H2H_COMPANY_SHARE)*100)}% winner ko, ${Math.round(D11_H2H_COMPANY_SHARE*100)}% app fee</div>
       </div>
       ${inH2H
         ? `<span style="font-size:11px;font-weight:700;color:#4ade80">✅ Joined</span>`
@@ -12386,7 +12386,7 @@ function renderD11CustomContestSection(matchId, locked, myCustomContests) {
   return `
   <div class="card mb12" style="background:rgba(168,85,247,0.08);border-color:rgba(168,85,247,0.3)">
     <div style="font-weight:700;font-size:14px;color:#c084fc;margin-bottom:4px">🛠️ Create Your Own Dream11 Contest</div>
-    <div style="font-size:11px;color:var(--dim);margin-bottom:10px">Set an entry fee and invite up to ${D11_CUSTOM_CONTEST_MAX_PLAYERS} friends with a code. 10% app fee, remaining 90% pool shared among top ~70% players (Mega-style payout — more joiners, more winners). Max ${D11_CUSTOM_CONTEST_MAX_PER_USER} custom contests per match.</div>
+    <div style="font-size:11px;color:var(--dim);margin-bottom:10px">Set an entry fee and invite up to ${D11_CUSTOM_CONTEST_MAX_PLAYERS} friends with a code. ${Math.round(D11_CUSTOM_CONTEST_COMPANY_SHARE*100)}% app fee, remaining ${Math.round((1-D11_CUSTOM_CONTEST_COMPANY_SHARE)*100)}% pool shared among top ~70% players (Mega-style payout — more joiners, more winners). Max ${D11_CUSTOM_CONTEST_MAX_PER_USER} custom contests per match.</div>
     ${locked ? `<span style="font-size:11px;color:var(--dim)">🔒 Closed — contest is locked</span>` :
       limitReached ? `<span style="font-size:11px;color:#4ade80;font-weight:700">✅ You've created ${myCreatedCount}/${D11_CUSTOM_CONTEST_MAX_PER_USER} contests for this match — limit reached</span>` : `
     <div style="display:flex;gap:8px">
@@ -14732,7 +14732,7 @@ function renderDream11Leaderboard() {
       ${av}
       <div style="flex:1;min-width:0;margin-left:2px">
         <div style="font-weight:700;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${u?.name||'Unknown Player'}${t.userEmail===currentUser.email?' (You)':''}</div>
-        <div style="font-size:10.5px;color:var(--dim)">${u?.idNumber ? `ID: ${u.idNumber} · ` : ''}C: ${d11m?.players.find(p=>p.id===t.captain)?.name||'—'} · VC: ${d11m?.players.find(p=>p.id===t.viceCaptain)?.name||'—'}</div>
+        <div style="font-size:10.5px;color:var(--dim)">${u?.idNumber ? `ID: ${u.idNumber} · ` : ''}${(t.userEmail===currentUser.email || isAdmin() || isD11Locked(t.matchId)) ? `C: ${d11m?.players.find(p=>p.id===t.captain)?.name||'—'} · VC: ${d11m?.players.find(p=>p.id===t.viceCaptain)?.name||'—'}` : `🔒 C/VC hidden until deadline`}</div>
       </div>
       <div style="text-align:right">
         <div class="display" style="font-size:17px;color:var(--gold)">${t.totalPoints||0}</div>
@@ -14832,7 +14832,10 @@ function renderDream11ViewTeam() {
   </div>` : '';
 
   return `
-  <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="goDream11Hub()">← Back to Dream11</button>
+  <div style="display:flex;gap:8px;margin-bottom:14px">
+    <button class="btn-secondary" style="font-size:12px;padding:8px 14px;flex:1" onclick="goDream11Hub()">← Back to Dream11</button>
+    ${isOwnTeam && !isD11Locked(t.matchId) ? `<button class="btn-primary" style="font-size:12px;padding:8px 14px;background:linear-gradient(135deg,#f97316,#ea580c)" onclick="openDream11Match('${t.matchId}')">✏️ Edit Team</button>` : ''}
+  </div>
 
   <div class="card mb14">
     <div style="font-size:12px;color:var(--dim);text-align:center">${u?.name||'Unknown Player'}'s Team${u?.idNumber?` <span style="font-family:monospace">(ID: ${u.idNumber})</span>`:''}</div>
@@ -14864,10 +14867,31 @@ function renderDream11ViewTeam() {
         ${byRole[r].map(fieldPlayerCard).join('')}
       </div>
     </div>` : '').join('')}
+    ${(t.backups && t.backups.length) ? `
+    <div style="position:relative;margin-top:6px;padding-top:14px;border-top:1px dashed rgba(255,255,255,0.25)">
+      <div style="text-align:center;font-size:11px;font-weight:800;letter-spacing:0.5px;color:rgba(255,255,255,0.7);margin-bottom:12px">🔁 SUBSTITUTES (BENCH)</div>
+      <div style="display:flex;justify-content:center;gap:10px;flex-wrap:wrap">
+        ${t.backups.map(bid => {
+          const p = d11m?.players.find(x => x.id === bid);
+          if (!p) return '';
+          const isUsed = t.replacements && Object.values(t.replacements).includes(bid);
+          return `
+          <div style="display:flex;flex-direction:column;align-items:center;width:84px;opacity:${isUsed?'1':'0.55'}">
+            <div style="position:relative">
+              ${p.photo ? `<img src="${p.photo}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;border:2px dashed rgba(255,255,255,0.5)" />` : `<div style="width:48px;height:48px;border-radius:50%;background:rgba(255,255,255,0.08);border:2px dashed rgba(255,255,255,0.4);display:flex;align-items:center;justify-content:center;font-size:18px">👤</div>`}
+              <div style="position:absolute;top:-4px;right:-4px;width:17px;height:17px;border-radius:50%;background:${isUsed?'#2563eb':'rgba(255,255,255,0.3)'};color:#fff;font-size:9px;font-weight:800;display:flex;align-items:center;justify-content:center;border:1px solid rgba(0,0,0,0.3)" title="${isUsed?'In lineup now':'On the bench'}">🔁</div>
+            </div>
+            <div style="margin-top:5px;background:rgba(0,0,0,0.4);padding:2px 8px;border-radius:6px;font-size:10.5px;font-weight:700;color:rgba(255,255,255,0.85);white-space:nowrap;max-width:84px;overflow:hidden;text-overflow:ellipsis">${p.name}</div>
+            <div style="margin-top:2px;font-size:9.5px;font-weight:700;color:${isUsed?'#60a5fa':'rgba(255,255,255,0.5)'}">${isUsed ? 'In lineup' : 'Standby'}</div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
+    ` : ''}
   </div>
 
+  <div class="section-title">🔁 Backup Players ${(t.backups && t.backups.length) ? `(${t.backups.length}/${D11_MAX_BACKUPS})` : ''}</div>
   ${(t.backups && t.backups.length) ? `
-  <div class="section-title">🔁 Backup Players (${t.backups.length}/${D11_MAX_BACKUPS})</div>
   <div class="empty-state" style="padding:8px 4px;font-size:11px;text-align:left;margin-bottom:8px">Free picks. If a main player above isn't in the confirmed Playing XI, a backup of the same role auto-swaps in — look for the 🔁 badge on the field.</div>
   ${t.backups.map(bid => {
     const p = d11m?.players.find(x => x.id === bid);
@@ -14883,7 +14907,7 @@ function renderDream11ViewTeam() {
       <div style="font-size:11px;font-weight:700;color:${isUsed?'#60a5fa':'var(--dim)'}">${isUsed ? '🔁 In lineup' : 'Standby'}</div>
     </div>`;
   }).join('')}
-  ` : ''}
+  ` : `<div class="empty-state" style="padding:10px 4px;font-size:11px;margin-bottom:8px">No backup players were selected for this team${isOwnTeam && !isD11Locked(t.matchId) ? ' — tap "✏️ Edit Team" above to add up to '+D11_MAX_BACKUPS : ''}.</div>`}
 
   <div class="section-title">Playing 11</div>
   ${t.picks.map(pid => {
@@ -15124,7 +15148,7 @@ function renderAdminD11ParticipantsPanel(matchId) {
           <div style="color:#fbbf24;font-weight:700">💰 Prize Pool — ${megaList.length} joiners</div>
           ${megaList.length>0?`<button class="btn-block" style="width:auto;padding:5px 10px;font-size:10.5px;border:none;border-radius:8px;background:linear-gradient(135deg,#25D366,#1ea952);color:#fff;font-weight:700;cursor:pointer" onclick="d11ShareContestResult('${matchId}','mega',null,event)">📤 Image Result</button>`:''}
         </div>
-        <div style="color:var(--dim)">Total: <b style="color:var(--text)">Rs ${pool}</b> &nbsp;·&nbsp; Distribute (90%): <b style="color:#4ade80">Rs ${dist}</b> &nbsp;·&nbsp; Company (10%): <b style="color:#f87171">Rs ${pool-dist}</b></div>
+        <div style="color:var(--dim)">Total: <b style="color:var(--text)">Rs ${pool}</b> &nbsp;·&nbsp; Distribute (${Math.round((1-D11_MEGA_COMPANY_SHARE)*100)}%): <b style="color:#4ade80">Rs ${dist}</b> &nbsp;·&nbsp; Company (${Math.round(D11_MEGA_COMPANY_SHARE*100)}%): <b style="color:#f87171">Rs ${pool-dist}</b></div>
         ${prizeRows.length>0?`<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px">${prizeRows.map(p=>`<span style="font-size:10.5px;background:rgba(251,191,36,0.12);color:#fbbf24;padding:3px 8px;border-radius:12px">Rank ${p.rank}: Rs ${p.prize}</span>`).join('')}</div>`:''}
       </div>
       ${megaList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Kisi ne join nahi kiya</div>`:megaList.map((e,i)=>userRow(e,i,'251,191,36',true,'megaPrizes')).join('')}
@@ -15134,7 +15158,7 @@ function renderAdminD11ParticipantsPanel(matchId) {
           <div style="color:#60a5fa;font-weight:700">💰 Prize Pool — ${miniMegaList.length} joiners</div>
           ${miniMegaList.length>0?`<button class="btn-block" style="width:auto;padding:5px 10px;font-size:10.5px;border:none;border-radius:8px;background:linear-gradient(135deg,#25D366,#1ea952);color:#fff;font-weight:700;cursor:pointer" onclick="d11ShareContestResult('${matchId}','minimega',null,event)">📤 Image Result</button>`:''}
         </div>
-        <div style="color:var(--dim)">Total: <b style="color:var(--text)">Rs ${miniMegaPool}</b> &nbsp;·&nbsp; Distribute (90%): <b style="color:#4ade80">Rs ${miniMegaDist}</b> &nbsp;·&nbsp; Company (10%): <b style="color:#f87171">Rs ${miniMegaPool-miniMegaDist}</b></div>
+        <div style="color:var(--dim)">Total: <b style="color:var(--text)">Rs ${miniMegaPool}</b> &nbsp;·&nbsp; Distribute (${Math.round((1-D11_MINI_MEGA_COMPANY_SHARE)*100)}%): <b style="color:#4ade80">Rs ${miniMegaDist}</b> &nbsp;·&nbsp; Company (${Math.round(D11_MINI_MEGA_COMPANY_SHARE*100)}%): <b style="color:#f87171">Rs ${miniMegaPool-miniMegaDist}</b></div>
         ${miniMegaPrizeRows.length>0?`<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px">${miniMegaPrizeRows.map(p=>`<span style="font-size:10.5px;background:rgba(96,165,250,0.12);color:#60a5fa;padding:3px 8px;border-radius:12px">Rank ${p.rank}: Rs ${p.prize}</span>`).join('')}</div>`:''}
       </div>
       ${miniMegaList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Kisi ne join nahi kiya</div>`:miniMegaList.map((e,i)=>userRow(e,i,'96,165,250',true,'miniMegaPrizes')).join('')}
@@ -16452,8 +16476,8 @@ function renderAdminMegaDistribution(m) {
     <div style="font-weight:700;font-size:14px;color:var(--gold);margin-bottom:6px">🎯 Mega Contest — Prize Distribution</div>
     <div style="font-size:12px;color:var(--dim);line-height:1.7;margin-bottom:10px">
       💰 Total Pool: <b style="color:var(--text)">Rs ${pool}</b> (${parts.length} joined × Rs ${MEGA_CONTEST_ENTRY_FEE})<br/>
-      🏆 Distributable (90%): <b style="color:#4ade80">Rs ${distributable}</b><br/>
-      🏢 Company Share (10%): <b style="color:var(--text)">Rs ${companyShare}</b>
+      🏆 Distributable (${Math.round((1-MEGA_CONTEST_COMPANY_SHARE)*100)}%): <b style="color:#4ade80">Rs ${distributable}</b><br/>
+      🏢 Company Share (${Math.round(MEGA_CONTEST_COMPANY_SHARE*100)}%): <b style="color:var(--text)">Rs ${companyShare}</b>
     </div>
 
     ${m.megaDistributed ? `
@@ -16879,7 +16903,7 @@ function renderAdminCustomContests() {
 
       <div style="font-size:11.5px;color:var(--dim);line-height:1.8;margin-bottom:8px">
         💰 Entry: <b style="color:var(--text)">Rs ${cc.entryFee}</b> · Players: <b style="color:var(--text)">${cc.participants.length}/${CUSTOM_CONTEST_MAX_PLAYERS}</b><br/>
-        Pool: <b style="color:var(--text)">Rs ${cc.pool}</b> · Distributable (90%): <b style="color:#4ade80">Rs ${distributable}</b> · Company (10%): <b style="color:var(--text)">Rs ${companyShare}</b>
+        Pool: <b style="color:var(--text)">Rs ${cc.pool}</b> · Distributable (${Math.round((1-CUSTOM_CONTEST_COMPANY_SHARE)*100)}%): <b style="color:#4ade80">Rs ${distributable}</b> · Company (${Math.round(CUSTOM_CONTEST_COMPANY_SHARE*100)}%): <b style="color:var(--text)">Rs ${companyShare}</b>
       </div>
 
       <div style="display:flex;flex-direction:column;gap:4px">
@@ -16908,7 +16932,7 @@ function renderAdminCustomContests() {
 // only to that tournament: own teams/players, own matches, own
 // results. Publishing a match and finalizing its result both
 // require re-entering the password. Every match has an entry fee
-// (min Rs 20, owner's choice above that); 90% of the collected
+// (min Rs 20, owner's choice above that); 93% of the collected
 // pool splits to the top 3 scorers, 10% goes to the company.
 // ═══════════════════════════════════════════════════════════
 
@@ -17930,7 +17954,7 @@ function utRequestFinalize(matchId) {
   if (!isUtOwner(t)) { showNotif('Only the tournament owner can finalize results', 'error'); return; }
   const teamCount = Object.values(utTeams).filter(x => x.matchId === matchId).length;
   if (teamCount === 0) { showNotif('No users have joined yet — nothing to finalize', 'error'); return; }
-  if (!confirm(`Finalize result? This is final — ${UT_COMPANY_SHARE*100}% goes to company and 90% to top scorers. This cannot be undone.`)) return;
+  if (!confirm(`Finalize result? This is final — ${Math.round(UT_COMPANY_SHARE*100)}% goes to company and ${Math.round((1-UT_COMPANY_SHARE)*100)}% to top scorers. This cannot be undone.`)) return;
   utRequestPasswordFor('finalize', matchId);
 }
 async function utDoFinalizeResult(tId, matchId) {
@@ -17954,7 +17978,7 @@ async function utDoFinalizeResult(tId, matchId) {
 
   // ── 90/10 payout split ──
   const pool = teams.length * (m.entryFee || UT_MIN_ENTRY_FEE);
-  const distributable = pool * (1 - UT_COMPANY_SHARE); // 90%
+  const distributable = pool * (1 - UT_COMPANY_SHARE); // 93%
   const winners = teams.slice(0, Math.min(3, teams.length));
   // Re-normalize the split proportionally if fewer than 3 teams joined.
   const splitWeights = UT_PRIZE_SPLIT.slice(0, winners.length);
@@ -18533,7 +18557,7 @@ function renderUtDashboard() {
       <div class="mb18">
         <label class="label">Entry Fee per User (Rs) — minimum ${UT_MIN_ENTRY_FEE}</label>
         <input class="input" type="number" min="${UT_MIN_ENTRY_FEE}" value="${d.entryFee}" oninput="utUpdateCreateMatchField('entryFee', this.value)" />
-        <div style="font-size:10.5px;color:var(--dim);margin-top:4px">90% goes to top 3 scorers, 10% company share.</div>
+        <div style="font-size:10.5px;color:var(--dim);margin-top:4px">${Math.round((1-UT_COMPANY_SHARE)*100)}% goes to top 3 scorers, ${Math.round(UT_COMPANY_SHARE*100)}% company share.</div>
       </div>
       <button class="btn-primary btn-block" style="background:linear-gradient(135deg,#f97316,#ea580c)" onclick="utSaveNewMatch()">✅ Create Match</button>
     </div>`;
@@ -18771,7 +18795,7 @@ function utMatchCard(t, m, owner) {
     <div style="margin-bottom:6px">
       <span class="match-sport-tag tag-cricket">${m.format==='ODI'?'🔵':m.format==='Test'?'🏛️':'⚡'} ${m.format||'T20'}</span>
     </div>
-    <div style="font-size:11.5px;color:var(--dim);margin-bottom:6px">💰 Entry: Rs ${m.entryFee} · 🏆 90% to top 3 scorers · 📋 ${teamCount} joined</div>
+    <div style="font-size:11.5px;color:var(--dim);margin-bottom:6px">💰 Entry: Rs ${m.entryFee} · 🏆 ${Math.round((1-UT_COMPANY_SHARE)*100)}% to top 3 scorers · 📋 ${teamCount} joined</div>
     <div style="font-size:11px;color:var(--orange);margin-bottom:10px">⏰ ${dLocked ? '🔒 Deadline passed' : `Deadline: ${deadlineStr}`}</div>
     ${!m.scored && myTeam && dLocked ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(220,38,38,0.08);border:1px solid rgba(220,38,38,0.25);border-radius:10px;padding:8px 10px">
       <span style="font-size:11px;color:#f87171;flex:1">🔴 Live points updating${m.lastLiveUpdateAt ? ' — '+m.lastLiveUpdateAt : ''}</span>
@@ -19209,7 +19233,7 @@ function renderUtMatchManage() {
 
   ${!m.scored ? `
   <button class="btn-primary btn-block mb14" style="margin-top:10px" onclick="utRequestFinalize('${m.id}')">🏁 Match Ended — Finalize Scoring & Close</button>
-  <div class="empty-state" style="padding:10px;font-size:11px">Only tap this once the match has fully ended. It locks the contest, freezes the leaderboard, and pays out the prize pool (90% to top scorers / 10% platform cut) — this cannot be undone.</div>
+  <div class="empty-state" style="padding:10px;font-size:11px">Only tap this once the match has fully ended. It locks the contest, freezes the leaderboard, and pays out the prize pool (${Math.round((1-UT_COMPANY_SHARE)*100)}% to top scorers / ${Math.round(UT_COMPANY_SHARE*100)}% platform cut) — this cannot be undone.</div>
   ` : ''}
   `}
   `;
@@ -19460,7 +19484,7 @@ function renderUtLeaderboard() {
     <div style="text-align:center;margin-top:4px">
       ${m?.scored ? `<span class="match-status status-completed">🏁 FINAL RESULT</span>` : m?.lastLiveUpdateAt ? `<span class="match-status status-live">🔴 LIVE</span>` : `<span class="match-status status-upcoming">⏳ Scoring pending</span>`}
     </div>
-    ${m?.scored ? `<div style="text-align:center;font-size:10.5px;color:var(--dim);margin-top:6px">💰 90% pool distributed to top ${Math.min(3,teams.length)} · 10% company share</div>` : ''}
+    ${m?.scored ? `<div style="text-align:center;font-size:10.5px;color:var(--dim);margin-top:6px">💰 ${Math.round((1-UT_COMPANY_SHARE)*100)}% pool distributed to top ${Math.min(3,teams.length)} · ${Math.round(UT_COMPANY_SHARE*100)}% company share</div>` : ''}
   </div>
 
   <div class="section-title">🏅 Leaderboard (${teams.length})</div>
@@ -19476,7 +19500,7 @@ function renderUtLeaderboard() {
       ${av2}
       <div style="flex:1;min-width:0;margin-left:2px">
         <div style="font-weight:700;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${u?.name||'Unknown Player'}${currentUser && team.userEmail===currentUser.email?' (You)':''}</div>
-        <div style="font-size:10.5px;color:var(--dim)">${u?.idNumber ? `ID: ${u.idNumber} · ` : ''}C: ${m?.players.find(p=>p.id===team.captain)?.name||'—'} · VC: ${m?.players.find(p=>p.id===team.viceCaptain)?.name||'—'}</div>
+        <div style="font-size:10.5px;color:var(--dim)">${u?.idNumber ? `ID: ${u.idNumber} · ` : ''}${(currentUser && (team.userEmail===currentUser.email || isAdmin() || isUtLocked(t.id, utLeaderboardMatchId))) ? `C: ${m?.players.find(p=>p.id===team.captain)?.name||'—'} · VC: ${m?.players.find(p=>p.id===team.viceCaptain)?.name||'—'}` : `🔒 C/VC hidden until deadline`}</div>
       </div>
       <div style="text-align:right">
         <div class="display" style="font-size:17px;color:var(--gold)">${team.totalPoints||0}</div>
@@ -19845,7 +19869,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.10.2";
+const APP_VERSION = "3.11.2";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
