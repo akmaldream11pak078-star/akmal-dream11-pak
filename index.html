@@ -863,10 +863,24 @@ let viewedProfileEmail = null; // email of the user being viewed via search
 let _viewProfileReturnTab = 'profile'; // which tab the "← Back" button on viewProfile should return to
 let compareProfileEmail = null; // email of the user being compared via H2H Stats Compare
 let currentUser = null;
+// ── T-Pin app lock ──────────────────────────────────────────────────────
+// A user-set 4-digit PIN that must be entered before the app's content is
+// shown, so someone else picking up the phone can't open the account even
+// though the browser session is already logged in. Stored per-user
+// (users[email].tpin) so it survives logout/login on the same device.
+// _tpinUnlocked is per-session only (resets on full page reload) — this is
+// intentional: it's a "someone grabbed my unlocked phone" lock, not a
+// second login system, so it shouldn't require re-entering the PIN on
+// every single render, only once per fresh app open.
+let _tpinUnlocked = false;
+let _tpinEntry = ''; // digits typed so far on the lock screen
+let _tpinError = null;
+let _tpinSetupMode = null; // null | 'set' | 'change-current' | 'change-new' | 'change-confirm' | 'confirm-new' — drives the multi-step setup/change UI in Profile
+let _tpinSetupBuffer = { current:'', new1:'', new2:'' };
 let tab = 'home';
 let authMode = 'login';
 let _legacyMigrationEmail = ''; // set on startup if a pre-Firebase-Auth session needs one-time re-login
-let forgotStep = 'email'; // 'email' -> 'otp' (after OTP sent, user enters code + new password)
+let forgotStep = 'name'; // 'name' (enter username+email+T-Pin) -> 'newpass' (set new password after identity confirmed)
 let forgotEmailPending = ''; // holds the email the OTP was sent to, across steps
 let authError = '';
 let adminTab = 'dream11admin';
@@ -1768,6 +1782,9 @@ async function handleRefreshApp() {
 function handleLogout() {
   currentUser = null;
   clearSession();
+  _tpinUnlocked = false;
+  _tpinEntry = '';
+  _tpinError = null;
   if (window._fbAuthSignOut) window._fbAuthSignOut().catch(()=>{});
   tab = 'home';
   _navHistoryStack = ['home'];
@@ -1783,70 +1800,43 @@ function switchAuthMode(mode) {
   authMode = mode;
   authError='';
   if (mode !== 'login') { _legacyMigrationEmail = ''; }
-  if (mode === 'forgot') { forgotStep = 'email'; forgotEmailPending = ''; }
+  if (mode === 'forgot') { forgotStep = 'name'; forgotEmailPending = ''; }
   render();
 }
 
-async function handleSendOtp() {
+async function handleVerifyTpinReset() {
+  const name = (document.getElementById('a-forgot-name')?.value||'').trim();
   const email = (document.getElementById('a-forgot-email')?.value||'').toLowerCase().trim();
+  const tpin = (document.getElementById('a-forgot-tpin')?.value||'').trim();
+  if (!name) return setAuthError('Please enter your username');
   if (!email || !email.includes('@')) return setAuthError('Please enter a valid email');
+  if (!tpin || tpin.length !== 4) return setAuthError('Please enter your 4-digit T-Pin');
 
   let user = users[email];
   if (!user && window._firebaseReady) { await _loadAllUsersFromFirestore(); user = users[email]; }
   if (!user) return setAuthError('No account found with this email — check your email or register');
 
-  const btn = document.getElementById('a-send-otp-btn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
-
-  try {
-    const resp = await fetch('/.netlify/functions/send-otp', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email })
-    });
-    const data = await resp.json();
-    if (!resp.ok || data.error) {
-      if (btn) { btn.disabled = false; btn.textContent = '📧 Send Verification Code'; }
-      return setAuthError(data.error || 'Could not send code — please try again');
-    }
-  } catch (e) {
-    if (btn) { btn.disabled = false; btn.textContent = '📧 Send Verification Code'; }
-    return setAuthError('Could not send code — please check your connection and try again');
+  if ((user.name||'').trim().toLowerCase() !== name.toLowerCase()) {
+    return setAuthError('Username does not match this email');
+  }
+  if (!user.tpin) {
+    return setAuthError('This account has no T-Pin set, so it can\'t be reset this way — please contact admin for help.');
+  }
+  if (user.tpin !== tpin) {
+    return setAuthError('Incorrect T-Pin');
   }
 
+  // Identity confirmed via name + email + T-Pin — proceed straight to setting a new password.
   forgotEmailPending = email;
-  forgotStep = 'otp';
+  forgotStep = 'newpass';
   authError = '';
   render();
-  showNotif('📧 Verification code sent — check your email');
 }
 
-async function handleResendOtp() {
+async function handleSendResetLink() {
   const email = forgotEmailPending;
-  if (!email) { forgotStep = 'email'; return render(); }
-  try {
-    await fetch('/.netlify/functions/send-otp', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email })
-    });
-    showNotif('📧 A new code has been sent');
-  } catch (e) {
-    setAuthError('Could not resend code — please try again');
-  }
-}
+  if (!email) return setAuthError('Session expired — please start again');
 
-async function handleForgotPassword() {
-  const email = forgotEmailPending || (document.getElementById('a-forgot-email')?.value||'').toLowerCase().trim();
-  const otp = (document.getElementById('a-forgot-otp')?.value||'').trim();
-  const newPass = document.getElementById('a-forgot-newpass')?.value||'';
-  const confirmPass = document.getElementById('a-forgot-confirmpass')?.value||'';
-  if (!email) return setAuthError('Email daalna zaroori hai');
-  if (!otp || otp.length !== 6) return setAuthError('Please enter the 6-digit verification code');
-  if (!newPass || newPass.length < 6) return setAuthError('Password must be at least 6 characters');
-  if (newPass !== confirmPass) return setAuthError('Passwords do not match');
-
-  // Load user from Firestore if not in cache
   let user = users[email];
   if (!user && window._firebaseReady) {
     await _loadAllUsersFromFirestore();
@@ -1854,35 +1844,25 @@ async function handleForgotPassword() {
   }
   if (!user) return setAuthError('No account found with this email — check your email or register');
 
-  // Update the real Firebase Auth password (creates the account if this user
-  // never logged in since migration began) via the secure server-side function.
-  // The OTP proves the requester owns this email — verified server-side too.
+  // Identity was already confirmed by name + email + T-Pin in
+  // handleVerifyTpinReset. There's no server function anymore (GitHub Pages
+  // is static hosting), and Firebase Auth deliberately does not allow any
+  // client-side code to set another account's password directly — even one
+  // that has already verified identity another way — since that would let
+  // anyone who can read the client code hijack any account. The one
+  // client-safe way to finish a password reset is Firebase's own built-in
+  // reset-email flow: it sends a link only Firebase itself can generate and
+  // verify, and the user sets their new password on Firebase's own page.
+  if (!window._fbAuthSendPasswordReset) return setAuthError('Password reset is not available right now — please try again shortly');
   try {
-    const resp = await fetch('/.netlify/functions/admin-set-password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, newPassword: newPass, otp })
-    });
-    const data = await resp.json();
-    if (!resp.ok || data.error) {
-      return setAuthError('Password reset failed — ' + (data.error || 'please try again'));
-    }
+    await window._fbAuthSendPasswordReset(email);
   } catch (e) {
-    return setAuthError('Password reset failed — please check your connection and try again');
+    return setAuthError('Could not send reset email — ' + (e.message || 'please try again'));
   }
 
-  // Keep the legacy hash in sync too (used only as a migration fallback)
-  const newPassHash = await _sha256(newPass);
-  user.password = newPassHash;
-  users[email] = user;
-  await _saveUserToFirestore(email, user);
-
-  authMode = 'login';
-  forgotStep = 'email';
-  forgotEmailPending = '';
+  forgotStep = 'linksent';
   authError = '';
   render();
-  showNotif('✅ Password reset successful — please login with your new password');
 }
 </script>
 
@@ -3726,36 +3706,38 @@ function handleReceiptUpload(input) {
 function renderAuth() {
   // ── Forgot Password screen ──
   if (authMode === 'forgot') {
-    if (forgotStep === 'otp') {
+    if (forgotStep === 'linksent') {
+      return `
+  <div class="auth-wrap">
+    <div class="auth-logo"><div class="auth-logo-mark">📧</div></div>
+    <div class="auth-title">AKMAL <span>DREAM 11</span></div>
+    <div class="auth-sub">Check Your Email</div>
+
+    <div style="font-size:13px;color:var(--dim);margin-bottom:16px;text-align:center;line-height:1.6">
+      A password reset link has been sent to <b>${forgotEmailPending}</b>.<br/><br/>
+      Open it on this device and set your new password — then come back here and log in.
+    </div>
+
+    <button class="btn-primary btn-orange" onclick="switchAuthMode('login')">← Back to Login</button>
+  </div>`;
+    }
+    if (forgotStep === 'newpass') {
       return `
   <div class="auth-wrap">
     <div class="auth-logo"><div class="auth-logo-mark">🔒</div></div>
     <div class="auth-title">AKMAL <span>DREAM 11</span></div>
-    <div class="auth-sub">Enter Verification Code</div>
+    <div class="auth-sub">Identity Confirmed</div>
 
     ${authError ? `<div class="err">⚠️ ${authError}</div>` : ''}
 
-    <div style="font-size:13px;color:var(--dim);margin-bottom:16px;text-align:center">
-      We sent a 6-digit code to <b>${forgotEmailPending}</b>. Enter it below along with your new password.
+    <div style="font-size:13px;color:var(--dim);margin-bottom:20px;text-align:center;line-height:1.6">
+      ✅ Verified for <b>${forgotEmailPending}</b>.<br/><br/>
+      We'll send a secure password-reset link to this email — open it to choose your new password.
     </div>
 
-    <div class="mb14">
-      <label class="label">Verification Code</label>
-      <input class="input" id="a-forgot-otp" type="text" inputmode="numeric" maxlength="6" placeholder="123456" />
-    </div>
-    <div class="mb14">
-      <label class="label">New Password</label>
-      <input class="input" id="a-forgot-newpass" type="password" placeholder="New password" />
-    </div>
-    <div class="mb18">
-      <label class="label">Confirm New Password</label>
-      <input class="input" id="a-forgot-confirmpass" type="password" placeholder="Confirm new password" />
-    </div>
-
-    <button class="btn-primary btn-orange" onclick="handleForgotPassword()">🔑 Reset Password</button>
-    <div style="text-align:center;margin-top:14px;display:flex;justify-content:center;gap:16px">
-      <button onclick="handleResendOtp()" style="background:none;border:none;color:var(--dim);font-size:12.5px;cursor:pointer;text-decoration:underline">↻ Resend Code</button>
-      <button onclick="forgotStep='email';authError='';render();" style="background:none;border:none;color:var(--dim);font-size:12.5px;cursor:pointer;text-decoration:underline">← Change Email</button>
+    <button class="btn-primary btn-orange" onclick="handleSendResetLink()">📧 Send Reset Link</button>
+    <div style="text-align:center;margin-top:14px">
+      <button onclick="forgotStep='name';authError='';render();" style="background:none;border:none;color:var(--dim);font-size:12.5px;cursor:pointer;text-decoration:underline">← Back</button>
     </div>
   </div>`;
     }
@@ -3769,15 +3751,24 @@ function renderAuth() {
     ${authError ? `<div class="err">⚠️ ${authError}</div>` : ''}
 
     <div style="font-size:13px;color:var(--dim);margin-bottom:16px;text-align:center">
-      Enter your registered email — we'll send you a verification code.
+      Confirm your identity with your username, email, and T-Pin — no code needed.
     </div>
 
-    <div class="mb18">
+    <div class="mb14">
+      <label class="label">Username</label>
+      <input class="input" id="a-forgot-name" type="text" placeholder="Your username" />
+    </div>
+    <div class="mb14">
       <label class="label">Registered Email</label>
       <input class="input" id="a-forgot-email" type="email" placeholder="you@example.com" />
     </div>
+    <div class="mb18">
+      <label class="label">T-Pin</label>
+      <input class="input" id="a-forgot-tpin" type="password" inputmode="numeric" maxlength="4" placeholder="4-digit T-Pin" />
+    </div>
 
-    <button class="btn-primary btn-orange" onclick="handleSendOtp()" id="a-send-otp-btn">📧 Send Verification Code</button>
+    <button class="btn-primary btn-orange" onclick="handleVerifyTpinReset()" id="a-verify-tpin-btn">✅ Verify &amp; Continue</button>
+    <div style="font-size:11px;color:var(--dim);margin-top:10px;text-align:center">Don't have a T-Pin set? Contact admin for help resetting your password.</div>
     <div style="text-align:center;margin-top:14px">
       <button onclick="switchAuthMode('login')" style="background:none;border:none;color:var(--dim);font-size:12.5px;cursor:pointer;text-decoration:underline">← ← Back to Login</button>
     </div>
@@ -3838,10 +3829,70 @@ function renderAuth() {
 // ═══════════════════════════════════════════════════════════
 // MAIN RENDER ROUTER
 // ═══════════════════════════════════════════════════════════
+// ── T-Pin lock screen ────────────────────────────────────────────────────
+function renderTpinLockScreen() {
+  const u = users[currentUser.email] || currentUser;
+  const dots = [0,1,2,3].map(i => `<div style="width:16px;height:16px;border-radius:50%;background:${i < _tpinEntry.length ? 'var(--orange)' : 'var(--input-bg)'};border:1.5px solid ${i < _tpinEntry.length ? 'var(--orange)' : 'var(--card-b)'};transition:all 0.15s"></div>`).join('');
+  const keypadBtn = (label, onclick) => `<button onclick="${onclick}" style="height:64px;border-radius:16px;border:1px solid var(--card-b);background:var(--card);color:var(--text);font-size:22px;font-weight:700;font-family:Rajdhani,sans-serif">${label}</button>`;
+  return `
+  <div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--bg);padding:24px">
+    <div style="width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--orange));display:flex;align-items:center;justify-content:center;font-size:26px;margin-bottom:16px">🔒</div>
+    <div class="display" style="font-size:18px;margin-bottom:4px">Enter T-Pin</div>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:22px">${u.name ? `Welcome back, ${u.name}` : 'Enter your 4-digit PIN to continue'}</div>
+    <div style="display:flex;gap:14px;margin-bottom:16px">${dots}</div>
+    ${_tpinError ? `<div style="font-size:12px;color:#f87171;margin-bottom:14px">${_tpinError}</div>` : `<div style="height:29px"></div>`}
+    <div style="display:grid;grid-template-columns:repeat(3,64px);gap:14px;width:max-content">
+      ${[1,2,3,4,5,6,7,8,9].map(n => keypadBtn(n, `tpinKeyPress('${n}')`)).join('')}
+      <div></div>
+      ${keypadBtn(0, `tpinKeyPress('0')`)}
+      ${keypadBtn('⌫', `tpinBackspace()`)}
+    </div>
+    <button onclick="tpinForgotFlow()" style="margin-top:28px;background:none;border:none;color:var(--blue-l);font-size:12.5px;text-decoration:underline">Forgot T-Pin?</button>
+    <button onclick="handleLogout()" style="margin-top:14px;background:none;border:none;color:var(--dim);font-size:11.5px">Log out instead</button>
+  </div>`;
+}
+function tpinKeyPress(digit) {
+  if (_tpinEntry.length >= 4) return;
+  _tpinEntry += digit;
+  _tpinError = null;
+  if (_tpinEntry.length === 4) {
+    const u = users[currentUser.email] || currentUser;
+    if (_tpinEntry === u.tpin) {
+      _tpinUnlocked = true;
+      _tpinEntry = '';
+      render();
+    } else {
+      _tpinError = 'Wrong PIN, try again';
+      const wrongEntry = _tpinEntry;
+      render();
+      setTimeout(() => { if (_tpinEntry === wrongEntry) { _tpinEntry = ''; render(); } }, 500);
+      return;
+    }
+  }
+  render();
+}
+function tpinBackspace() {
+  _tpinEntry = _tpinEntry.slice(0, -1);
+  _tpinError = null;
+  render();
+}
+function tpinForgotFlow() {
+  // T-Pin only guards local access to an already-logged-in session, not
+  // account security itself — the account password is the real credential.
+  // So "forgot" just means re-authenticating with the password resets it.
+  if (!confirm('Log out and sign back in with your password to reset your T-Pin?')) return;
+  handleLogout();
+}
+
 function render() {
   const app = document.getElementById('app');
   if (!currentUser) {
     app.innerHTML = renderAuth();
+    return;
+  }
+  const u0 = users[currentUser.email] || currentUser;
+  if (u0.tpin && !_tpinUnlocked) {
+    app.innerHTML = renderTpinLockScreen();
     return;
   }
   _navPushIfChanged(tab);
@@ -3890,6 +3941,7 @@ function render() {
     ${_d11SyncDebugData ? renderD11SyncDebugModal() : ''}
     ${_receiptModalImage ? renderReceiptImageModal() : ''}
     ${d11CleanupPoolMatchId ? renderD11CleanupPoolModal() : ''}
+    ${_tpinSetupMode ? renderTpinSetupModal() : ''}
   `;
 }
 
@@ -4009,9 +4061,12 @@ function renderHome() {
       const d11m = dream11Matches[m.id];
       return d11m && d11m.published && d11m.players.length >= D11_TEAM_SIZE;
     });
-    const homeUpcoming = publishedD11.filter(m => m.status !== 'live' && !isD11Locked(m.id) && !dream11Matches[m.id].scored);
-    const homeLive = publishedD11.filter(m => (m.status === 'live' || isD11Locked(m.id)) && !dream11Matches[m.id].scored);
-    const homeCompleted = publishedD11.filter(m => dream11Matches[m.id].scored && d11UserHasJoinedAnyContest(m.id, currentUser.email));
+    const homeUpcoming = publishedD11.filter(m => m.status !== 'live' && !isD11Locked(m.id) && !dream11Matches[m.id].scored)
+      .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0)); // soonest upcoming first
+    const homeLive = publishedD11.filter(m => (m.status === 'live' || isD11Locked(m.id)) && !dream11Matches[m.id].scored)
+      .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
+    const homeCompleted = publishedD11.filter(m => dream11Matches[m.id].scored && d11UserHasJoinedAnyContest(m.id, currentUser.email))
+      .sort((a,b) => new Date(b.deadline||0) - new Date(a.deadline||0)); // most recently played first
 
     function d11ContestCard(m) {
       const d11m = dream11Matches[m.id];
@@ -4122,8 +4177,10 @@ function renderD11MyMatchesPage() {
   const eligible = Object.values(matches).filter(m => m.sport === 'cricket' || dream11Matches[m.id]);
   const myMatches = eligible.filter(m => d11UserHasJoinedAnyContest(m.id, currentUser.email));
 
-  const upcoming = myMatches.filter(m => !dream11Matches[m.id]?.scored);
-  const completed = myMatches.filter(m => dream11Matches[m.id]?.scored);
+  const upcoming = myMatches.filter(m => !dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
+  const completed = myMatches.filter(m => dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(b.deadline||0) - new Date(a.deadline||0));
 
   function contestRows(matchId) {
     const d11m = dream11Matches[matchId];
@@ -4721,6 +4778,96 @@ function renderGlobalLeaderboard() {
 // ═══════════════════════════════════════════════════════════
 // PROFILE
 // ═══════════════════════════════════════════════════════════
+// ── T-Pin setup / change (from Profile page) ────────────────────────────
+function tpinOpenSetup() {
+  _tpinSetupMode = 'new1';
+  _tpinSetupBuffer = { current:'', new1:'', new2:'' };
+  render();
+}
+function tpinOpenChange() {
+  _tpinSetupMode = 'current';
+  _tpinSetupBuffer = { current:'', new1:'', new2:'' };
+  render();
+}
+function tpinCloseSetup() {
+  _tpinSetupMode = null;
+  _tpinSetupBuffer = { current:'', new1:'', new2:'' };
+  render();
+}
+function tpinRemove() {
+  if (!confirm('Remove your T-Pin? Anyone with access to your logged-in phone will be able to open the app without a PIN.')) return;
+  const u = users[currentUser.email];
+  if (u) { delete u.tpin; _saveUserToFirestore(currentUser.email, u); }
+  currentUser = { ...currentUser }; delete currentUser.tpin;
+  showNotif('T-Pin removed.');
+  render();
+}
+function tpinSetupKeyPress(digit) {
+  const step = _tpinSetupMode;
+  const field = step === 'current' ? 'current' : step === 'new1' ? 'new1' : 'new2';
+  if (_tpinSetupBuffer[field].length >= 4) return;
+  _tpinSetupBuffer[field] += digit;
+  if (_tpinSetupBuffer[field].length === 4) {
+    if (step === 'current') {
+      const u = users[currentUser.email] || currentUser;
+      if (_tpinSetupBuffer.current !== u.tpin) {
+        showNotif('Wrong current T-Pin', 'error');
+        _tpinSetupBuffer.current = '';
+        render();
+        return;
+      }
+      _tpinSetupMode = 'new1';
+    } else if (step === 'new1') {
+      _tpinSetupMode = 'new2';
+    } else if (step === 'new2') {
+      if (_tpinSetupBuffer.new1 !== _tpinSetupBuffer.new2) {
+        showNotif('PINs didn\'t match — try again', 'error');
+        _tpinSetupBuffer.new1 = '';
+        _tpinSetupBuffer.new2 = '';
+        _tpinSetupMode = 'new1';
+        render();
+        return;
+      }
+      const u = users[currentUser.email];
+      if (u) { u.tpin = _tpinSetupBuffer.new1; _saveUserToFirestore(currentUser.email, u); }
+      currentUser = { ...currentUser, tpin: _tpinSetupBuffer.new1 };
+      _tpinUnlocked = true; // don't immediately re-lock the person who just set it
+      showNotif('✅ T-Pin saved!');
+      tpinCloseSetup();
+      return;
+    }
+  }
+  render();
+}
+function tpinSetupBackspace() {
+  const field = _tpinSetupMode === 'current' ? 'current' : _tpinSetupMode === 'new1' ? 'new1' : 'new2';
+  _tpinSetupBuffer[field] = _tpinSetupBuffer[field].slice(0, -1);
+  render();
+}
+function renderTpinSetupModal() {
+  const step = _tpinSetupMode;
+  const field = step === 'current' ? 'current' : step === 'new1' ? 'new1' : 'new2';
+  const value = _tpinSetupBuffer[field];
+  const title = step === 'current' ? 'Enter Current T-Pin' : step === 'new1' ? 'Choose a New T-Pin' : 'Confirm New T-Pin';
+  const dots = [0,1,2,3].map(i => `<div style="width:15px;height:15px;border-radius:50%;background:${i < value.length ? 'var(--orange)' : 'var(--input-bg)'};border:1.5px solid ${i < value.length ? 'var(--orange)' : 'var(--card-b)'}"></div>`).join('');
+  const keypadBtn = (label, onclick) => `<button onclick="${onclick}" style="height:56px;border-radius:14px;border:1px solid var(--card-b);background:var(--input-bg);color:var(--text);font-size:19px;font-weight:700;font-family:Rajdhani,sans-serif">${label}</button>`;
+  return `
+  <div style="position:fixed;inset:0;z-index:2200;background:rgba(5,10,20,0.85);display:flex;align-items:center;justify-content:center;padding:20px" onclick="if(event.target===this) tpinCloseSetup()">
+    <div class="card" style="width:100%;max-width:340px;padding:24px;text-align:center" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:flex-end"><button onclick="tpinCloseSetup()" style="background:none;border:none;color:var(--dim);font-size:16px">✕</button></div>
+      <div style="font-size:15px;font-weight:700;margin-bottom:4px">${title}</div>
+      <div style="font-size:11px;color:var(--dim);margin-bottom:16px">${step==='new1' ? 'Pick 4 digits only you know' : step==='new2' ? 'Type the same 4 digits again' : ''}</div>
+      <div style="display:flex;gap:12px;justify-content:center;margin-bottom:20px">${dots}</div>
+      <div style="display:grid;grid-template-columns:repeat(3,56px);gap:12px;justify-content:center;margin:0 auto">
+        ${[1,2,3,4,5,6,7,8,9].map(n => keypadBtn(n, `tpinSetupKeyPress('${n}')`)).join('')}
+        <div></div>
+        ${keypadBtn(0, `tpinSetupKeyPress('0')`)}
+        ${keypadBtn('⌫', `tpinSetupBackspace()`)}
+      </div>
+    </div>
+  </div>`;
+}
+
 function renderProfile() {
   const u = users[currentUser.email] || currentUser;
   const lb = getGlobalLeaderboard();
@@ -4752,6 +4899,16 @@ function renderProfile() {
     <button onclick="toggleAppTheme()" style="width:52px;height:30px;border-radius:16px;border:none;cursor:pointer;position:relative;background:${getCurrentAppTheme()==='light'?'#e2e8f0':'#2563eb'};transition:background 0.2s">
       <span style="position:absolute;top:3px;left:${getCurrentAppTheme()==='light'?'3px':'25px'};width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 2px 4px rgba(0,0,0,0.25);transition:left 0.2s;display:flex;align-items:center;justify-content:center;font-size:12px">${getCurrentAppTheme()==='light'?'☀️':'🌙'}</span>
     </button>
+  </div>
+
+  <div class="card mb14" style="display:flex;align-items:center;justify-content:space-between">
+    <div>
+      <div style="font-size:13px;font-weight:700">🔒 T-Pin Lock</div>
+      <div style="font-size:11px;color:var(--dim);margin-top:2px">${u.tpin ? 'On — asked every time the app opens' : 'Off — set a 4-digit PIN to protect your account'}</div>
+    </div>
+    ${u.tpin
+      ? `<div style="display:flex;gap:6px"><button class="btn-secondary" style="width:auto;padding:8px 12px;font-size:11.5px" onclick="tpinOpenChange()">Change</button><button class="btn-secondary" style="width:auto;padding:8px 12px;font-size:11.5px;background:rgba(220,38,38,0.1);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="tpinRemove()">Remove</button></div>`
+      : `<button class="btn-primary" style="width:auto;padding:9px 16px;font-size:12px" onclick="tpinOpenSetup()">Set PIN</button>`}
   </div>
 
   <div class="card mb14" style="background:rgba(37,99,235,0.06);border-color:rgba(37,99,235,0.2)">
@@ -13087,8 +13244,10 @@ function renderD11CricbuzzHub() {
     </div>`;
   }
 
-  const notScored = linked.filter(m => !dream11Matches[m.id]?.scored);
-  const scoredList = linked.filter(m => dream11Matches[m.id]?.scored);
+  const notScored = linked.filter(m => !dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
+  const scoredList = linked.filter(m => dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(b.deadline||0) - new Date(a.deadline||0));
 
   return `
   ${renderD11Hero('Auto-import fixtures from Cricbuzz — no manual typing')}
@@ -13161,7 +13320,8 @@ function renderDream11Hub() {
     <button class="btn-secondary btn-block mb14" style="background:rgba(168,85,247,0.1);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="goD11Tournaments()">🏆 Tournaments (multi-match contests)</button>
     <button class="btn-secondary btn-block mb14" style="background:rgba(249,115,22,0.1);border-color:rgba(249,115,22,0.3);color:#fb923c" onclick="goUtHub()">👑 User Tournaments (owner-run contests)</button>
     ${(() => {
-      const manualEligible = eligible.filter(m => !m.cricketDataMatchId);
+      const manualEligible = eligible.filter(m => !m.cricketDataMatchId)
+        .sort((a,b) => new Date(b.deadline||0) - new Date(a.deadline||0));
       return manualEligible.length === 0 ? `<div class="empty-state"><div class="empty-icon">🎮</div>No manually-created cricket matches yet.<br/>Tap above to create one, or use Cricbuzz Matches for auto-import.</div>` : manualEligible.map(m => {
       const d11m = dream11Matches[m.id];
       const playerCount = d11m ? d11m.players.length : 0;
@@ -13322,7 +13482,7 @@ function renderDream11CompletedMatches() {
   const completed = eligible.filter(m => {
     const d11m = dream11Matches[m.id];
     return d11m && d11m.published && d11m.scored;
-  }).sort((a,b) => (b.deadline||0) - (a.deadline||0));
+  }).sort((a,b) => new Date(b.deadline||0) - new Date(a.deadline||0));
 
   return `
   <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="goDream11Hub()">← Back to Dream11</button>
@@ -15399,7 +15559,8 @@ function renderAdminD11MatchesList() {
   // excluded here, so any match created via Cricbuzz import never showed up
   // in the Active Matches list even while live/open. Now all non-scored
   // eligible matches (manual + Cricbuzz-imported) show together.
-  const active = eligible.filter(m => !dream11Matches[m.id]?.scored);
+  const active = eligible.filter(m => !dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
 
   return `
   <div style="margin-bottom:14px">
@@ -15417,7 +15578,8 @@ function renderAdminD11MatchesList() {
 //    matches live here, kept separate from the active matches list ──
 function renderAdminD11CompletedMatchesList() {
   const eligible = Object.values(matches).filter(m => m.sport === 'cricket' || dream11Matches[m.id]);
-  const completed = eligible.filter(m => dream11Matches[m.id]?.scored);
+  const completed = eligible.filter(m => dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(b.deadline||0) - new Date(a.deadline||0));
 
   return `
   <div style="font-size:12px;font-weight:700;color:#94a3b8;margin-bottom:10px">✅ Completed / Scored Matches (${completed.length})</div>
@@ -20004,7 +20166,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.12.0";
+const APP_VERSION = "3.16.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
