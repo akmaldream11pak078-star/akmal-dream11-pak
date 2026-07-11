@@ -1208,6 +1208,24 @@ async function _loadAllUsersFromFirestore() {
   } catch(e){ return false; }
 }
 
+// ── Fetch ONE user by email directly (1 read), instead of downloading the
+// whole pp_users collection just to check if one email exists or to
+// refresh one user's data. Falls back to null on any error/missing doc. ──
+async function _loadOneUserFromFirestore(email) {
+  if (!window._fbDb || !window._fbFns) return null;
+  const { doc, getDoc } = window._fbFns;
+  if (!getDoc) return null; // getDoc not exposed in this build — caller should fall back to _loadAllUsersFromFirestore
+  try {
+    const safeKey = email.replace(/\./g, '_');
+    const snap = await getDoc(doc(window._fbDb, 'pp_users', safeKey));
+    if (snap.exists()) {
+      users[email] = snap.data();
+      return users[email];
+    }
+    return null;
+  } catch(e){ return null; }
+}
+
 // ── Live listener for the admin "Users" tab ──
 // _loadAllUsersFromFirestore() above is a one-time snapshot, used all over
 // login/referral flows. That's fine for those, but it meant the admin Users
@@ -1323,27 +1341,56 @@ async function _loadAllDeletedD11MatchesFromFirestore() {
 // goes hidden and automatically re-attached (with a fresh snapshot) when
 // the tab becomes visible again — same data on screen, but zero cost
 // while nobody's actually looking.
+//
+// This also covers the case where the tab stays VISIBLE but the person
+// has simply stopped touching the phone (screen on, app open, nobody
+// there) — e.g. left open overnight on a desk. visibilitychange alone
+// wouldn't catch that since the tab never goes "hidden". A 15-minute
+// no-interaction timer detaches listeners the same way; any tap/scroll
+// reattaches them immediately.
 const _liveCollections = {}; // collectionName -> unsub function
 const _liveCollectionSpecs = {}; // collectionName -> {targetSetter, cacheKey, opts} for reattaching
 let _visibilityGuardInstalled = false;
+const D11_IDLE_DETACH_MS = 15 * 60 * 1000; // 15 minutes of no touch/click/scroll
+let _idleDetachTimer = null;
+function _detachAllLiveCollections() {
+  Object.keys(_liveCollections).forEach(name => {
+    try { _liveCollections[name](); } catch(e){}
+    delete _liveCollections[name];
+  });
+}
+function _reattachAllLiveCollections() {
+  Object.keys(_liveCollectionSpecs).forEach(name => {
+    const spec = _liveCollectionSpecs[name];
+    _liveLoadCollection(name, null, spec.targetSetter, spec.cacheKey, spec.opts);
+  });
+}
+function _resetIdleDetachTimer() {
+  if (_idleDetachTimer) clearTimeout(_idleDetachTimer);
+  // If listeners were detached by inactivity and the user just interacted, bring them back.
+  if (Object.keys(_liveCollections).length === 0 && Object.keys(_liveCollectionSpecs).length > 0 && !document.hidden) {
+    _reattachAllLiveCollections();
+  }
+  _idleDetachTimer = setTimeout(() => {
+    if (!document.hidden) _detachAllLiveCollections(); // hidden case already handled by visibilitychange
+  }, D11_IDLE_DETACH_MS);
+}
 function _installVisibilityGuard() {
   if (_visibilityGuardInstalled) return;
   _visibilityGuardInstalled = true;
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
-      // Detach every live collection listener while tab is backgrounded.
-      Object.keys(_liveCollections).forEach(name => {
-        try { _liveCollections[name](); } catch(e){}
-        delete _liveCollections[name];
-      });
+      _detachAllLiveCollections();
     } else {
-      // Tab active again — reattach listeners for anything that was loaded before.
-      Object.keys(_liveCollectionSpecs).forEach(name => {
-        const spec = _liveCollectionSpecs[name];
-        _liveLoadCollection(name, null, spec.targetSetter, spec.cacheKey, spec.opts);
-      });
+      _reattachAllLiveCollections();
+      _resetIdleDetachTimer();
     }
   });
+  // Any real user interaction resets the idle clock and reattaches if needed.
+  ['click', 'touchstart', 'scroll', 'keydown'].forEach(evt => {
+    document.addEventListener(evt, _resetIdleDetachTimer, { passive: true });
+  });
+  _resetIdleDetachTimer();
 }
 function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKey, opts) {
   opts = opts || {};
@@ -1648,7 +1695,7 @@ async function handleRegister() {
     }
   }
 
-  if (!users[email]) await _loadAllUsersFromFirestore();
+  if (!users[email]) await _loadOneUserFromFirestore(email);
   if (users[email]) return setAuthError("This email is already registered");
 
   let referredBy = null;
@@ -1720,7 +1767,7 @@ async function handleLogin() {
     if (e.code === 'auth/user-not-found' || e.code === 'auth/invalid-credential' || e.code === 'auth/wrong-password') {
       // ── Step 2: Legacy account — verify against old Firestore SHA-256 hash, then migrate ──
       let user = users[email];
-      if (!user) { await _loadAllUsersFromFirestore(); user = users[email]; }
+      if (!user) { await _loadOneUserFromFirestore(email); user = users[email]; }
 
       const passHash = user ? await _sha256(pass) : null;
 
@@ -1751,7 +1798,7 @@ async function handleLogin() {
 
   // ── Auth succeeded (fresh login or just-migrated) — load the matching Firestore profile ──
   let user = users[email];
-  if (!user) { await _loadAllUsersFromFirestore(); user = users[email]; }
+  if (!user) { await _loadOneUserFromFirestore(email); user = users[email]; }
   if (!user) return setAuthError("Account data not found — please contact support");
 
   currentUser = { ...user, email };
@@ -1847,7 +1894,7 @@ async function handleVerifyTpinReset() {
   if (!tpin || tpin.length !== 4) return setAuthError('Please enter your 4-digit T-Pin');
 
   let user = users[email];
-  if (!user && window._firebaseReady) { await _loadAllUsersFromFirestore(); user = users[email]; }
+  if (!user && window._firebaseReady) { await _loadOneUserFromFirestore(email); user = users[email]; }
   if (!user) return setAuthError('No account found with this email — check your email or register');
 
   if ((user.name||'').trim().toLowerCase() !== name.toLowerCase()) {
@@ -1873,7 +1920,7 @@ async function handleSendResetLink() {
 
   let user = users[email];
   if (!user && window._firebaseReady) {
-    await _loadAllUsersFromFirestore();
+    await _loadOneUserFromFirestore(email);
     user = users[email];
   }
   if (!user) return setAuthError('No account found with this email — check your email or register');
@@ -2507,7 +2554,7 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
     if (e.message === 'ALREADY_JOINED') showNotif(alreadyJoinedMsg, 'error');
     else if (e.message === 'INSUFFICIENT_BALANCE') showNotif(`Insufficient balance — Rs ${entryFeeAmount} required`, 'error');
     else if (e.message === 'MATCH_NOT_FOUND' || e.message === 'USER_NOT_FOUND') showNotif('Could not find match or user data — please refresh', 'error');
-    else { console.error('Contest join transaction failed:', e); showNotif('Join failed — please check your connection and try again', 'error'); }
+    else { console.error('Contest join transaction failed:', e); showNotif(`Join failed: ${e.code || e.message || 'unknown error'}`, 'error'); }
     return null;
   }
 }
@@ -2798,7 +2845,7 @@ async function _atomicJoinCustomContest({ contestId, contestCollection, maxPlaye
     else if (e.message === 'CONTEST_CLOSED') showNotif('This contest has already finished', 'error');
     else if (e.message === 'INSUFFICIENT_BALANCE') showNotif('Insufficient balance to join this contest', 'error');
     else if (e.message === 'CONTEST_NOT_FOUND' || e.message === 'USER_NOT_FOUND') showNotif('Could not find contest or user data — please refresh', 'error');
-    else { console.error('Custom contest join transaction failed:', e); showNotif('Join failed — please check your connection and try again', 'error'); }
+    else { console.error('Custom contest join transaction failed:', e); showNotif(`Join failed: ${e.code || e.message || 'unknown error'}`, 'error'); }
     return null;
   }
 }
@@ -3362,7 +3409,7 @@ async function _atomicClaimH2HLock(matchId) {
     if (e.message === 'ALREADY_JOINED') showNotif('You already joined an H2H contest for this match!', 'error');
     else if (e.message === 'INSUFFICIENT_BALANCE') showNotif(`Insufficient balance — Rs ${H2H_ENTRY_FEE} required`, 'error');
     else if (e.message === 'USER_NOT_FOUND') showNotif('Could not find user data — please refresh', 'error');
-    else { console.error('H2H join transaction failed:', e); showNotif('Join failed — please check your connection and try again', 'error'); }
+    else { console.error('H2H join transaction failed:', e); showNotif(`Join failed: ${e.code || e.message || 'unknown error'}`, 'error'); }
     return null;
   }
 }
@@ -3637,7 +3684,12 @@ async function adminApproveDeposit(email, txId) {
   }
 
   await _saveUserToFirestore(email, u);
-  await _loadAllUsersFromFirestore();
+  // NOTE: previously re-downloaded the ENTIRE pp_users collection here via
+  // _loadAllUsersFromFirestore() just to reflect a change to ONE user we
+  // already have in memory. At scale (many users, many deposits approved
+  // per day) that's a huge number of wasted reads for a single-doc change.
+  // The users[] object is already updated in place via `u` above.
+  users[email] = u;
   try { localStorage.setItem('pp_users_cache', JSON.stringify(users)); } catch(e){}
   showNotif(`✅ Deposit of Rs ${tx.amount} approved for ${u.name}`);
   refreshAdminPanel();
@@ -3651,7 +3703,7 @@ async function adminRejectDeposit(email, txId) {
   if (!tx || tx.status !== 'pending') return showNotif('Already processed', 'error');
   tx.status = 'rejected';
   await _saveUserToFirestore(email, u);
-  await _loadAllUsersFromFirestore();
+  users[email] = u;
   try { localStorage.setItem('pp_users_cache', JSON.stringify(users)); } catch(e){}
   showNotif('Deposit rejected', 'error');
   refreshAdminPanel();
@@ -3666,7 +3718,7 @@ async function adminApproveWithdraw(email, txId) {
   tx.status = 'confirmed';
   u.totalWithdrawn = (u.totalWithdrawn || 0) + (tx.netAmount || tx.amount);
   await _saveUserToFirestore(email, u);
-  await _loadAllUsersFromFirestore();
+  users[email] = u;
   try { localStorage.setItem('pp_users_cache', JSON.stringify(users)); } catch(e){}
   showNotif(`✅ Withdrawal of Rs ${tx.netAmount || tx.amount} approved for ${u.name}`);
   refreshAdminPanel();
@@ -3681,7 +3733,7 @@ async function adminRejectWithdraw(email, txId) {
   tx.status = 'rejected';
   u.balance = (u.balance || 0) + tx.amount; // refund held amount
   await _saveUserToFirestore(email, u);
-  await _loadAllUsersFromFirestore();
+  users[email] = u;
   try { localStorage.setItem('pp_users_cache', JSON.stringify(users)); } catch(e){}
   showNotif('Withdrawal rejected — amount refunded to balance', 'error');
   refreshAdminPanel();
@@ -4174,7 +4226,7 @@ function renderHome() {
                  </div>`
               : `<div style="text-align:center;font-size:12px;color:var(--dim);padding:8px">🔒 Contest locked — joining closed</div>`
         }
-        ${!isCompletedCard && !dLocked ? `<button class="btn-orange btn-block" style="font-size:12px;padding:9px;margin-top:8px" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">🎪 Join Mega / H2H / Custom Contest</button>` : ''}
+        <button class="btn-orange btn-block" style="font-size:12px;padding:9px;margin-top:8px" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">${!isCompletedCard && !dLocked ? '🎪 Join Mega / H2H / Custom Contest' : '🎪 View Contests'}</button>
         ${(() => {
           const badges = [];
           if ((d11m.freeParticipants||[]).includes(currentUser.email)) {
@@ -11199,7 +11251,7 @@ async function joinD11H2HContest(matchId, teamId) {
     if (e.message === 'ALREADY_JOINED') showNotif('You have already joined Dream11 H2H for this match!', 'error');
     else if (e.message === 'INSUFFICIENT_BALANCE') showNotif(`Insufficient balance — Rs ${D11_H2H_ENTRY_FEE} required`, 'error');
     else if (e.message === 'USER_NOT_FOUND') showNotif('Could not find user data — please refresh', 'error');
-    else { console.error('D11 H2H join transaction failed:', e); showNotif('Join failed — please check your connection and try again', 'error'); }
+    else { console.error('D11 H2H join transaction failed:', e); showNotif(`Join failed: ${e.code || e.message || 'unknown error'}`, 'error'); }
   } finally {
     _joinInFlight.delete(guardKey);
   }
@@ -11384,7 +11436,12 @@ async function createD11CustomContest(matchId, entryFee) {
     if (e.message === 'LIMIT_REACHED') showNotif(`You can only create up to ${D11_CUSTOM_CONTEST_MAX_PER_USER} Custom Contests per match!`, 'error');
     else if (e.message === 'INSUFFICIENT_BALANCE') showNotif(`Insufficient balance — Rs ${entryFee} required`, 'error');
     else if (e.message === 'USER_NOT_FOUND') showNotif('Could not find user data — please refresh', 'error');
-    else { console.error('D11 custom contest create transaction failed:', e); showNotif('Create failed — please check your connection and try again', 'error'); }
+    else {
+      console.error('D11 custom contest create transaction failed:', e);
+      // Surface the actual Firestore error code (e.g. permission-denied) so it's
+      // visible without opening devtools — helps pinpoint rules issues fast.
+      showNotif(`Create failed: ${e.code || e.message || 'unknown error'}`, 'error');
+    }
   } finally {
     _joinInFlight.delete(guardKey);
   }
@@ -12539,18 +12596,50 @@ function renderD11JoinContest() {
   const myCustomContests = Object.values(d11CustomContests).filter(c => c.matchId === matchId && c.participants.includes(currentUser.email));
   const myPoints = myTeam?.totalPoints || 0;
 
+  const squadA = d11GetTeamSquad ? d11GetTeamSquad(m.teamA) : null;
+  const squadB = d11GetTeamSquad ? d11GetTeamSquad(m.teamB) : null;
+  const flagA = squadA?.flag || '🏏';
+  const flagB = squadB?.flag || '🏏';
+  const deadlineMs = m.deadline ? new Date(m.deadline).getTime() : null;
+  const countdownStr = deadlineMs ? d11FormatCountdown(deadlineMs - Date.now()) : '';
+  const deadlineClockStr = m.deadline ? pkDateTime(m.deadline) : '';
+  const activeContestTab = window._d11ContestSubTab || 'all';
+
   return `
+  <div style="padding-bottom:70px">
   <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="goDream11Hub()">← Back to Dream11</button>
 
-  <div class="card mb14">
-    <div class="match-teams" style="margin-bottom:4px">
-      <span class="team-name">${m.teamA||'TBD'}</span>
-      <span class="vs-badge">VS</span>
-      <span class="team-name">${m.teamB||'TBD'}</span>
+  <!-- Dark match-info header bar -->
+  <div class="card mb0" style="background:linear-gradient(135deg,#161b2e,#1e2542);border-color:rgba(255,255,255,0.08);padding:16px 14px;border-radius:14px 14px 0 0">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+      <div style="flex:1;text-align:center">
+        <div style="font-size:26px;line-height:1">${flagA}</div>
+        <div style="font-size:12.5px;font-weight:800;color:#fff;margin-top:4px">${m.teamA||'TBD'}</div>
+      </div>
+      <div style="text-align:center;flex-shrink:0;padding:0 6px">
+        ${deadlineClockStr ? `<div style="font-size:10.5px;color:rgba(255,255,255,0.55)">${deadlineClockStr}</div>` : ''}
+        ${!locked && countdownStr ? `<div class="d11-countdown" data-deadline="${m.deadline}" style="font-size:11.5px;font-weight:700;color:#fb923c;margin-top:2px">⏱ ${countdownStr}</div>` : locked ? `<div style="font-size:11.5px;font-weight:700;color:#f87171;margin-top:2px">🔒 Locked</div>` : ''}
+      </div>
+      <div style="flex:1;text-align:center">
+        <div style="font-size:26px;line-height:1">${flagB}</div>
+        <div style="font-size:12.5px;font-weight:800;color:#fff;margin-top:4px">${m.teamB||'TBD'}</div>
+      </div>
     </div>
-    <div style="text-align:center;font-size:11px;color:var(--dim)">✅ ${myTeams.length>1 ? `${myTeams.length} teams submitted` : 'Your team submitted'}${myTeams.length===1 && myTeam?.totalPoints ? ' · '+myTeam.totalPoints+' pts' : ''}</div>
-    ${myTeams.length < D11_MAX_TEAMS_PER_MATCH && !locked ? `<div style="text-align:center;margin-top:8px"><button class="btn-secondary" style="font-size:11px;padding:6px 12px" onclick="tab='dream11TeamPicker';d11ActiveMatchId='${matchId}';render();window.scrollTo(0,0)">➕ Manage Teams (${myTeams.length}/${D11_MAX_TEAMS_PER_MATCH})</button></div>` : ''}
   </div>
+
+  <!-- Sub-tabs row -->
+  <div class="card mb14" style="padding:0;border-radius:0 0 14px 14px;border-top:none">
+    <div style="display:flex;overflow-x:auto;scrollbar-width:none">
+      <button onclick="window._d11ContestSubTab='all';render()" style="flex-shrink:0;padding:11px 16px;font-size:12px;font-weight:700;border:none;background:transparent;cursor:pointer;color:${activeContestTab==='all'?'var(--orange)':'var(--dim)'};border-bottom:2px solid ${activeContestTab==='all'?'var(--orange)':'transparent'}">All Contests</button>
+      <button onclick="window._d11ContestSubTab='mine';render()" style="flex-shrink:0;padding:11px 16px;font-size:12px;font-weight:700;border:none;background:transparent;cursor:pointer;color:${activeContestTab==='mine'?'var(--orange)':'var(--dim)'};border-bottom:2px solid ${activeContestTab==='mine'?'var(--orange)':'transparent'}">My Contests</button>
+    </div>
+  </div>
+
+  <div class="card mb14">
+    <div style="text-align:center;font-size:11px;color:var(--dim)">✅ ${myTeams.length>1 ? `${myTeams.length} teams submitted` : 'Your team submitted'}${myTeams.length===1 && myTeam?.totalPoints ? ' · '+myTeam.totalPoints+' pts' : ''}</div>
+  </div>
+
+  ${activeContestTab === 'mine' ? '' : ''}
 
   ${(() => {
     // Helper: renders one "My Contest" row with points + winning amount
@@ -12652,72 +12741,134 @@ function renderD11JoinContest() {
     </div>`;
   })()}
 
+  ${activeContestTab === 'mine' && (!inMega && !inMiniMega && !inH2H && !inFree && myCustomContests.length === 0) ? `
+  <div class="empty-state">
+    <div class="empty-icon">🎮</div>
+    Aap ne abhi tak kisi contest mein join nahi kiya.<br/>"All Contests" tab se join karein.
+  </div>` : ''}
+
+  ${activeContestTab === 'all' ? `
   <div class="section-title">🏟️ Join a Dream11 Contest</div>
 
-  <div class="card mb12" style="background:linear-gradient(135deg,rgba(251,191,36,0.1),rgba(249,115,22,0.05));border-color:rgba(251,191,36,0.25)">
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <div>
-        <div style="font-weight:700;font-size:14px">🎯 Dream11 Mega Contest</div>
-        <div style="font-size:11px;color:var(--dim);margin-top:2px">Entry Rs ${D11_MEGA_ENTRY_FEE} • ${(d11m.megaParticipants||[]).length} joined • Pool Rs ${d11m.megaPool||0}</div>
-        <div style="font-size:10.5px;color:var(--dim);margin-top:1px">${Math.round((1-D11_MEGA_COMPANY_SHARE)*100)}% winners ko, ${Math.round(D11_MEGA_COMPANY_SHARE*100)}% app fee</div>
-      </div>
-      ${inMega
-        ? `<span style="font-size:11px;font-weight:700;color:#4ade80">✅ Joined</span>`
-        : locked
-          ? `<span style="font-size:11px;color:var(--dim)">🔒 Closed</span>`
-          : `<button class="btn-primary" style="width:auto;padding:9px 16px;font-size:12px" onclick="joinD11MegaContest('${matchId}')">Join Rs ${D11_MEGA_ENTRY_FEE}</button>`
-      }
-    </div>
-  </div>
+  ${(() => {
+    // ── Big Dream11-style contest card: large prize headline, spots
+    // progress bar, badges row, then a full-width join/status button. ──
+    function bigContestCard({ tag, tagColor, headlinePrize, subLabel, spotsLeft, spotsTotal, badges, gradient, borderColor, joined, statusExtra, joinBtn }) {
+      const pct = spotsTotal > 0 ? Math.max(2, 100 - Math.round((spotsLeft/spotsTotal)*100)) : 2;
+      return `
+      <div class="card mb14" style="background:${gradient};border-color:${borderColor};padding:0;overflow:hidden">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px 0">
+          <span style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:0.5px;color:${tagColor};background:rgba(255,255,255,0.08);padding:3px 9px;border-radius:6px">${tag}</span>
+          ${joined ? `<span style="font-size:11px;font-weight:700;color:#4ade80">✅ Joined</span>` : ''}
+        </div>
+        <div style="padding:10px 14px 0">
+          <div style="font-size:22px;font-weight:900;line-height:1.1">${headlinePrize}</div>
+          <div style="font-size:11px;color:var(--dim);margin-top:2px">${subLabel}</div>
+        </div>
+        ${spotsTotal > 0 ? `
+        <div style="padding:12px 14px 0">
+          <div style="height:5px;border-radius:3px;background:rgba(255,255,255,0.08);overflow:hidden">
+            <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,#f87171,#fb923c);border-radius:3px"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:9.5px;color:var(--dim);margin-top:4px">
+            <span>${spotsLeft.toLocaleString()} spots left</span>
+            <span>${spotsTotal.toLocaleString()} spots</span>
+          </div>
+        </div>` : ''}
+        <div style="display:flex;gap:0;margin-top:12px;border-top:1px solid rgba(255,255,255,0.06)">
+          ${badges.map((b,i) => `<div style="flex:1;text-align:center;padding:8px 4px;font-size:9.5px;color:var(--dim);${i<badges.length-1?'border-right:1px solid rgba(255,255,255,0.06)':''}">${b}</div>`).join('')}
+        </div>
+        <div style="padding:12px 14px 14px">
+          ${joinBtn}
+        </div>
+      </div>`;
+    }
 
-  <div class="card mb12" style="background:linear-gradient(135deg,rgba(96,165,250,0.1),rgba(37,99,235,0.05));border-color:rgba(96,165,250,0.25)">
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <div>
-        <div style="font-weight:700;font-size:14px">🔸 Dream11 Mini Mega Contest</div>
-        <div style="font-size:11px;color:var(--dim);margin-top:2px">Entry Rs ${D11_MINI_MEGA_ENTRY_FEE} • ${(d11m.miniMegaParticipants||[]).length} joined • Pool Rs ${d11m.miniMegaPool||0}</div>
-        <div style="font-size:10.5px;color:var(--dim);margin-top:1px">Mega jese hi rules, sasta entry — ${Math.round((1-D11_MINI_MEGA_COMPANY_SHARE)*100)}% winners ko, ${Math.round(D11_MINI_MEGA_COMPANY_SHARE*100)}% app fee</div>
-      </div>
-      ${inMiniMega
-        ? `<span style="font-size:11px;font-weight:700;color:#4ade80">✅ Joined</span>`
-        : locked
-          ? `<span style="font-size:11px;color:var(--dim)">🔒 Closed</span>`
-          : `<button class="btn-primary" style="width:auto;padding:9px 16px;font-size:12px;background:linear-gradient(135deg,#60a5fa,#2563eb)" onclick="joinD11MiniMegaContest('${matchId}')">Join Rs ${D11_MINI_MEGA_ENTRY_FEE}</button>`
-      }
-    </div>
-  </div>
+    let html = '';
 
-  <div class="card mb12" style="background:linear-gradient(135deg,rgba(249,115,22,0.1),rgba(37,99,235,0.07));border-color:rgba(249,115,22,0.3)">
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <div>
-        <div style="font-weight:700;font-size:14px">🥊 Dream11 H2H Contest</div>
-        <div style="font-size:11px;color:var(--dim);margin-top:2px">Entry Rs ${D11_H2H_ENTRY_FEE} • Winner gets Rs ${Math.round(D11_H2H_ENTRY_FEE*2*(1-D11_H2H_COMPANY_SHARE))}</div>
-        <div style="font-size:10.5px;color:var(--dim);margin-top:1px">${Math.round((1-D11_H2H_COMPANY_SHARE)*100)}% winner ko, ${Math.round(D11_H2H_COMPANY_SHARE*100)}% app fee</div>
-      </div>
-      ${inH2H
-        ? `<span style="font-size:11px;font-weight:700;color:#4ade80">✅ Joined</span>`
+    // Mega Contest — big card
+    html += bigContestCard({
+      tag: 'Mega Contest', tagColor: '#fbbf24',
+      headlinePrize: `Rs ${(d11m.megaPool||0).toLocaleString()}`,
+      subLabel: `Entry Rs ${D11_MEGA_ENTRY_FEE} • Prize pool`,
+      spotsLeft: 0, spotsTotal: 0,
+      badges: [`👥 ${(d11m.megaParticipants||[]).length} joined`, `🏆 ${Math.round((1-D11_MEGA_COMPANY_SHARE)*100)}% to winners`, `✅ ${Math.round(D11_MEGA_COMPANY_SHARE*100)}% app fee`],
+      gradient: 'linear-gradient(135deg,rgba(251,191,36,0.14),rgba(249,115,22,0.06))',
+      borderColor: 'rgba(251,191,36,0.3)',
+      joined: inMega,
+      joinBtn: inMega
+        ? `<button class="btn-secondary btn-block" disabled style="opacity:0.7">✅ Already Joined</button>`
         : locked
-          ? `<span style="font-size:11px;color:var(--dim)">🔒 Closed</span>`
-          : `<button class="btn-primary btn-orange" style="width:auto;padding:9px 16px;font-size:12px" onclick="joinD11H2HContest('${matchId}')">Join Rs ${D11_H2H_ENTRY_FEE}</button>`
-      }
-    </div>
-  </div>
+          ? `<button class="btn-secondary btn-block" disabled>🔒 Closed</button>`
+          : `<button class="btn-primary btn-block" onclick="joinD11MegaContest('${matchId}')">Join Rs ${D11_MEGA_ENTRY_FEE}</button>`
+    });
 
-  <div class="card mb12" style="background:rgba(34,197,94,0.08);border-color:rgba(34,197,94,0.25)">
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <div>
-        <div style="font-weight:700;font-size:14px">🎁 Dream11 Free Contest</div>
-        <div style="font-size:11px;color:var(--dim);margin-top:2px">Free entry • ${(d11m.freeParticipants||[]).length} joined • Admin gives rewards</div>
-      </div>
-      ${inFree
-        ? `<span style="font-size:11px;font-weight:700;color:#4ade80">✅ Joined</span>`
+    // Mini Mega Contest — big card
+    html += bigContestCard({
+      tag: 'Mini Mega Contest', tagColor: '#60a5fa',
+      headlinePrize: `Rs ${(d11m.miniMegaPool||0).toLocaleString()}`,
+      subLabel: `Entry Rs ${D11_MINI_MEGA_ENTRY_FEE} • Mega jese hi rules, sasta entry`,
+      spotsLeft: 0, spotsTotal: 0,
+      badges: [`👥 ${(d11m.miniMegaParticipants||[]).length} joined`, `🏆 ${Math.round((1-D11_MINI_MEGA_COMPANY_SHARE)*100)}% to winners`, `✅ ${Math.round(D11_MINI_MEGA_COMPANY_SHARE*100)}% app fee`],
+      gradient: 'linear-gradient(135deg,rgba(96,165,250,0.14),rgba(37,99,235,0.06))',
+      borderColor: 'rgba(96,165,250,0.3)',
+      joined: inMiniMega,
+      joinBtn: inMiniMega
+        ? `<button class="btn-secondary btn-block" disabled style="opacity:0.7">✅ Already Joined</button>`
         : locked
-          ? `<span style="font-size:11px;color:var(--dim)">🔒 Closed</span>`
-          : `<button class="btn-secondary" style="width:auto;padding:9px 16px;font-size:12px;color:#4ade80;border-color:rgba(34,197,94,0.3)" onclick="joinD11FreeContest('${matchId}')">Join Free</button>`
-      }
-    </div>
-  </div>
+          ? `<button class="btn-secondary btn-block" disabled>🔒 Closed</button>`
+          : `<button class="btn-primary btn-block" style="background:linear-gradient(135deg,#60a5fa,#2563eb)" onclick="joinD11MiniMegaContest('${matchId}')">Join Rs ${D11_MINI_MEGA_ENTRY_FEE}</button>`
+    });
+
+    // H2H Contest — big card
+    html += bigContestCard({
+      tag: 'H2H Contest', tagColor: '#fb923c',
+      headlinePrize: `Rs ${Math.round(D11_H2H_ENTRY_FEE*2*(1-D11_H2H_COMPANY_SHARE))}`,
+      subLabel: `Entry Rs ${D11_H2H_ENTRY_FEE} • Winner takes it all`,
+      spotsLeft: 0, spotsTotal: 0,
+      badges: [`⚔️ 1 vs 1`, `🏆 ${Math.round((1-D11_H2H_COMPANY_SHARE)*100)}% to winner`, `✅ ${Math.round(D11_H2H_COMPANY_SHARE*100)}% app fee`],
+      gradient: 'linear-gradient(135deg,rgba(249,115,22,0.14),rgba(37,99,235,0.05))',
+      borderColor: 'rgba(249,115,22,0.35)',
+      joined: inH2H,
+      joinBtn: inH2H
+        ? `<button class="btn-secondary btn-block" disabled style="opacity:0.7">✅ Already Joined</button>`
+        : locked
+          ? `<button class="btn-secondary btn-block" disabled>🔒 Closed</button>`
+          : `<button class="btn-primary btn-orange btn-block" onclick="joinD11H2HContest('${matchId}')">Join Rs ${D11_H2H_ENTRY_FEE}</button>`
+    });
+
+    // Free Contest — big card, no entry fee
+    html += bigContestCard({
+      tag: 'Free Contest', tagColor: '#4ade80',
+      headlinePrize: `Free Entry`,
+      subLabel: `Admin gives rewards to top performers`,
+      spotsLeft: 0, spotsTotal: 0,
+      badges: [`👥 ${(d11m.freeParticipants||[]).length} joined`, `🎁 Admin rewards`],
+      gradient: 'linear-gradient(135deg,rgba(34,197,94,0.14),rgba(16,185,129,0.05))',
+      borderColor: 'rgba(34,197,94,0.3)',
+      joined: inFree,
+      joinBtn: inFree
+        ? `<button class="btn-secondary btn-block" disabled style="opacity:0.7">✅ Already Joined</button>`
+        : locked
+          ? `<button class="btn-secondary btn-block" disabled>🔒 Closed</button>`
+          : `<button class="btn-secondary btn-block" style="color:#4ade80;border-color:rgba(34,197,94,0.4)" onclick="joinD11FreeContest('${matchId}')">Join Free</button>`
+    });
+
+    return html;
+  })()}
 
   ${renderD11CustomContestSection(matchId, locked, myCustomContests)}
+  ` : ''}
+  </div>
+
+  <!-- Fixed bottom bar: My Teams / Create Team, sits just above the main bottom nav -->
+  <div style="position:fixed;left:0;right:0;bottom:58px;z-index:49;display:flex;gap:8px;padding:9px 12px;background:var(--nav-bg);backdrop-filter:blur(18px);border-top:1px solid var(--card-b)">
+    <button class="btn-secondary" style="flex:1;padding:11px 8px;font-size:12.5px;font-weight:700" onclick="tab='dream11TeamPicker';d11ActiveMatchId='${matchId}';render();window.scrollTo(0,0)">My Teams (${myTeams.length})</button>
+    ${myTeams.length < D11_MAX_TEAMS_PER_MATCH && !locked
+      ? `<button class="btn-primary" style="flex:1.4;padding:11px 8px;font-size:12.5px;font-weight:700" onclick="d11OpenTeamSlot('${matchId}',${myTeams.length+1})">+ Create Team ${myTeams.length+1}</button>`
+      : `<button class="btn-secondary" style="flex:1.4;padding:11px 8px;font-size:12.5px;font-weight:700;opacity:0.6" disabled>${locked ? '🔒 Locked' : `Max ${D11_MAX_TEAMS_PER_MATCH} Teams`}</button>`
+    }
+  </div>
   `;
 }
 
@@ -20211,7 +20362,7 @@ async function initApp() {
     if (authUser && authUser.email) {
       // Real, valid Firebase Auth session exists — this is the source of truth
       const authEmail = authUser.email.toLowerCase();
-      if (!users[authEmail]) await _loadAllUsersFromFirestore();
+      if (!users[authEmail]) await _loadOneUserFromFirestore(authEmail);
       if (users[authEmail]) {
         currentUser = { ...users[authEmail], email: authEmail };
         saveSession(authEmail); // keep cache in sync for next instant paint
@@ -20224,7 +20375,7 @@ async function initApp() {
       } else {
         // Firebase Auth session is valid but user profile not found in Firestore yet.
         // Retry once before giving up — avoids clearing valid sessions on new browsers.
-        await _loadAllUsersFromFirestore();
+        await _loadOneUserFromFirestore(authEmail);
         if (users[authEmail]) {
           currentUser = { ...users[authEmail], email: authEmail };
           saveSession(authEmail);
@@ -20338,6 +20489,10 @@ if ('serviceWorker' in navigator) {
   setInterval(function(){
     if(!currentUser||!window._fbAuthCurrentUser||!window._fbAuthCurrentUser())return;
     if(document.hidden)return;
+    // Also skip if the tab is visible but idle (nobody's touched it in 15+
+    // min — see D11_IDLE_DETACH_MS) — no point running Firestore writes for
+    // a phone sitting untouched on a desk.
+    if(Object.keys(_liveCollections).length===0 && Object.keys(_liveCollectionSpecs).length>0)return;
     if(currentUser&&currentUser.email&&users[currentUser.email])
       currentUser={...users[currentUser.email],email:currentUser.email};
     render();
@@ -20440,7 +20595,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.18.1";
+const APP_VERSION = "3.20.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
