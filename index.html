@@ -1116,6 +1116,25 @@ function toggleAppTheme() {
 }
 function isAdmin() { return currentUser && currentUser.email === OWNER_EMAIL; }
 
+// ── Admin-only collections: loaded lazily, not on every app open ──
+// pp_deleted_matches and pp_deleted_dream11_matches (the trash/undo
+// screen) and the Cricbuzz API call log are only ever read from admin
+// screens. Loading them for every regular user on every app open was
+// pure waste at scale. This is called once, the first time the admin
+// actually opens a screen that needs this data (see renderAdminPanel),
+// and is a no-op afterwards since the live listeners started here stay
+// in sync on their own.
+let _adminDataLoadStarted = false;
+function _ensureAdminDataLoaded() {
+  if (!isAdmin() || _adminDataLoadStarted) return;
+  _adminDataLoadStarted = true;
+  Promise.all([
+    _loadAllDeletedMatchesFromFirestore(),
+    _loadAllDeletedD11MatchesFromFirestore(),
+    typeof _loadCricbuzzApiLog === 'function' ? _loadCricbuzzApiLog() : Promise.resolve(),
+  ]).then(() => render()).catch(() => {});
+}
+
 async function _sha256(text) {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
@@ -1283,16 +1302,81 @@ async function _loadAllDeletedD11MatchesFromFirestore() {
     return true;
   } catch(e){ return false; }
 }
+// ── Generic live-listener loader ──────────────────────────────────────
+// Replaces repeated getDocs() polling (which re-downloads a whole
+// collection every call — expensive at scale, e.g. 7 collections polled
+// every few minutes across hundreds of open tabs can blow the Firestore
+// free-tier daily read quota) with a single onSnapshot listener per
+// collection. Firestore then only sends changed docs after the first
+// load, and every caller of the same _loadAllXFromFirestore() function
+// keeps working unchanged — they just get a resolved promise once the
+// first snapshot arrives, and the target object stays live-synced after.
+//
+// Idle-tab guard: a listener left open in a backgrounded/minimized tab
+// still costs reads on every remote change even though nobody's looking
+// at it. At hundreds of users, tabs left open overnight are a silent
+// quota drain. So each collection's listener is detached when the tab
+// goes hidden and automatically re-attached (with a fresh snapshot) when
+// the tab becomes visible again — same data on screen, but zero cost
+// while nobody's actually looking.
+const _liveCollections = {}; // collectionName -> unsub function
+const _liveCollectionSpecs = {}; // collectionName -> {targetSetter, cacheKey, opts} for reattaching
+let _visibilityGuardInstalled = false;
+function _installVisibilityGuard() {
+  if (_visibilityGuardInstalled) return;
+  _visibilityGuardInstalled = true;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      // Detach every live collection listener while tab is backgrounded.
+      Object.keys(_liveCollections).forEach(name => {
+        try { _liveCollections[name](); } catch(e){}
+        delete _liveCollections[name];
+      });
+    } else {
+      // Tab active again — reattach listeners for anything that was loaded before.
+      Object.keys(_liveCollectionSpecs).forEach(name => {
+        const spec = _liveCollectionSpecs[name];
+        _liveLoadCollection(name, null, spec.targetSetter, spec.cacheKey, spec.opts);
+      });
+    }
+  });
+}
+function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKey, opts) {
+  opts = opts || {};
+  _installVisibilityGuard();
+  _liveCollectionSpecs[collectionName] = { targetSetter, cacheKey, opts };
+  return new Promise((resolve) => {
+    if (!window._fbDb || !window._fbFns || !window._fbFns.onSnapshot) { resolve(false); return; }
+    if (_liveCollections[collectionName]) {
+      // Listener already running — resolve immediately with current data.
+      resolve(true);
+      return;
+    }
+    const { collection, onSnapshot } = window._fbFns;
+    let firstSnapshot = true;
+    try {
+      const unsub = onSnapshot(collection(window._fbDb, collectionName), snap => {
+        const obj = {};
+        snap.forEach(d => { obj[d.id] = d.data(); });
+        targetSetter(obj);
+        try { localStorage.setItem(cacheKey, JSON.stringify(obj)); } catch(e){}
+        if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
+        if (firstSnapshot) { firstSnapshot = false; resolve(true); }
+        else if (opts.rerenderOnUpdate) { try { render(); } catch(e){} }
+      }, err => {
+        console.error(collectionName + ' live-sync error:', err);
+        if (firstSnapshot) { firstSnapshot = false; resolve(false); }
+      });
+      _liveCollections[collectionName] = unsub;
+    } catch(e) {
+      console.error('Failed to start live-sync for ' + collectionName, e);
+      resolve(false);
+    }
+  });
+}
+
 async function _loadAllMatchesFromFirestore() {
-  if (!window._fbDb || !window._fbFns) return false;
-  const { collection, getDocs } = window._fbFns;
-  try {
-    const snap = await getDocs(collection(window._fbDb, 'pp_matches'));
-    matches = {};
-    snap.forEach(d => { matches[d.id] = d.data(); });
-    try { localStorage.setItem('pp_matches_cache', JSON.stringify(matches)); } catch(e){}
-    return true;
-  } catch(e){ return false; }
+  return _liveLoadCollection('pp_matches', () => matches, (v) => { matches = v; }, 'pp_matches_cache', { rerenderOnUpdate: true });
 }
 async function _saveH2HToFirestore(h2hId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1301,15 +1385,7 @@ async function _saveH2HToFirestore(h2hId, data) {
     .catch(e => console.error('H2H save error:', e));
 }
 async function _loadAllH2HFromFirestore() {
-  if (!window._fbDb || !window._fbFns) return false;
-  const { collection, getDocs } = window._fbFns;
-  try {
-    const snap = await getDocs(collection(window._fbDb, 'pp_h2h'));
-    h2hContests = {};
-    snap.forEach(d => { h2hContests[d.id] = d.data(); });
-    try { localStorage.setItem('pp_h2h_cache', JSON.stringify(h2hContests)); } catch(e){}
-    return true;
-  } catch(e){ return false; }
+  return _liveLoadCollection('pp_h2h', () => h2hContests, (v) => { h2hContests = v; }, 'pp_h2h_cache', { rerenderOnUpdate: true });
 }
 async function _saveCustomContestToFirestore(ccId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1318,15 +1394,7 @@ async function _saveCustomContestToFirestore(ccId, data) {
     .catch(e => console.error('Custom contest save error:', e));
 }
 async function _loadAllCustomContestsFromFirestore() {
-  if (!window._fbDb || !window._fbFns) return false;
-  const { collection, getDocs } = window._fbFns;
-  try {
-    const snap = await getDocs(collection(window._fbDb, 'pp_custom_contests'));
-    customContests = {};
-    snap.forEach(d => { customContests[d.id] = d.data(); });
-    try { localStorage.setItem('pp_custom_contests_cache', JSON.stringify(customContests)); } catch(e){}
-    return true;
-  } catch(e){ return false; }
+  return _liveLoadCollection('pp_custom_contests', () => customContests, (v) => { customContests = v; }, 'pp_custom_contests_cache', { rerenderOnUpdate: true });
 }
 async function _saveDream11MatchToFirestore(matchId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1335,19 +1403,7 @@ async function _saveDream11MatchToFirestore(matchId, data) {
     .catch(e => console.error('Dream11 match save error:', e));
 }
 async function _loadAllDream11MatchesFromFirestore() {
-  if (!window._fbDb || !window._fbFns) return false;
-  const { collection, getDocs } = window._fbFns;
-  try {
-    const snap = await getDocs(collection(window._fbDb, 'pp_dream11_matches'));
-    dream11Matches = {};
-    snap.forEach(d => { dream11Matches[d.id] = d.data(); });
-    try { localStorage.setItem('pp_dream11_matches_cache', JSON.stringify(dream11Matches)); } catch(e){}
-    console.log('[D11] Matches loaded:', Object.keys(dream11Matches).length);
-    return true;
-  } catch(e){
-    console.error('[D11] Failed to load dream11 matches:', e.code || e.message);
-    return false;
-  }
+  return _liveLoadCollection('pp_dream11_matches', () => dream11Matches, (v) => { dream11Matches = v; console.log('[D11] Matches loaded:', Object.keys(v).length); }, 'pp_dream11_matches_cache', { rerenderOnUpdate: true });
 }
 async function _saveTeamSquadToFirestore(teamKey, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1385,19 +1441,7 @@ async function _saveDream11TeamToFirestore(teamId, data) {
   }
 }
 async function _loadAllDream11TeamsFromFirestore() {
-  if (!window._fbDb || !window._fbFns) return false;
-  const { collection, getDocs } = window._fbFns;
-  try {
-    const snap = await getDocs(collection(window._fbDb, 'pp_dream11_teams'));
-    dream11Teams = {};
-    snap.forEach(d => { dream11Teams[d.id] = d.data(); });
-    try { localStorage.setItem('pp_dream11_teams_cache', JSON.stringify(dream11Teams)); } catch(e){}
-    console.log('[D11] Teams loaded:', Object.keys(dream11Teams).length);
-    return true;
-  } catch(e){
-    console.error('[D11] Failed to load dream11 teams:', e.code || e.message);
-    return false;
-  }
+  return _liveLoadCollection('pp_dream11_teams', () => dream11Teams, (v) => { dream11Teams = v; console.log('[D11] Teams loaded:', Object.keys(v).length); }, 'pp_dream11_teams_cache', { rerenderOnUpdate: true });
 }
 async function _saveD11H2HToFirestore(h2hId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1406,15 +1450,7 @@ async function _saveD11H2HToFirestore(h2hId, data) {
     .catch(e => console.error('Dream11 H2H save error:', e));
 }
 async function _loadAllD11H2HFromFirestore() {
-  if (!window._fbDb || !window._fbFns) return false;
-  const { collection, getDocs } = window._fbFns;
-  try {
-    const snap = await getDocs(collection(window._fbDb, 'pp_dream11_h2h'));
-    d11h2hContests = {};
-    snap.forEach(d => { d11h2hContests[d.id] = d.data(); });
-    try { localStorage.setItem('pp_dream11_h2h_cache', JSON.stringify(d11h2hContests)); } catch(e){}
-    return true;
-  } catch(e){ return false; }
+  return _liveLoadCollection('pp_dream11_h2h', () => d11h2hContests, (v) => { d11h2hContests = v; }, 'pp_dream11_h2h_cache', { rerenderOnUpdate: true });
 }
 async function _saveD11CustomContestToFirestore(ccId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1423,15 +1459,7 @@ async function _saveD11CustomContestToFirestore(ccId, data) {
     .catch(e => console.error('Dream11 custom contest save error:', e));
 }
 async function _loadAllD11CustomContestsFromFirestore() {
-  if (!window._fbDb || !window._fbFns) return false;
-  const { collection, getDocs } = window._fbFns;
-  try {
-    const snap = await getDocs(collection(window._fbDb, 'pp_dream11_custom_contests'));
-    d11CustomContests = {};
-    snap.forEach(d => { d11CustomContests[d.id] = d.data(); });
-    try { localStorage.setItem('pp_dream11_custom_contests_cache', JSON.stringify(d11CustomContests)); } catch(e){}
-    return true;
-  } catch(e){ return false; }
+  return _liveLoadCollection('pp_dream11_custom_contests', () => d11CustomContests, (v) => { d11CustomContests = v; }, 'pp_dream11_custom_contests_cache', { rerenderOnUpdate: true });
 }
 async function _saveD11TournamentToFirestore(tId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1741,6 +1769,7 @@ async function handleLogin() {
   ]).then(() => {
     if(currentUser&&currentUser.email&&users[currentUser.email])
       currentUser={...users[currentUser.email],email:currentUser.email};
+    if (isAdmin()) _ensureAdminDataLoaded();
     render();
   });
 }
@@ -1766,6 +1795,7 @@ async function handleRefreshApp() {
       typeof _loadAllUtTournamentsFromFirestore === 'function' ? _loadAllUtTournamentsFromFirestore() : Promise.resolve(),
       typeof _loadAllUtTeamsFromFirestore === 'function' ? _loadAllUtTeamsFromFirestore() : Promise.resolve(),
     ]);
+    if (isAdmin()) _ensureAdminDataLoaded();
     if (currentUser && currentUser.email && typeof users !== 'undefined' && users[currentUser.email]) {
       currentUser = { ...users[currentUser.email], email: currentUser.email };
     }
@@ -15265,6 +15295,7 @@ function renderDream11ViewTeam() {
 // ═══════════════════════════════════════════════════════════
 function renderAdminPanel() {
   _migrateMissingUserIdNumbers(); // one-time backfill, silent — no-op after first successful run
+  _ensureAdminDataLoaded(); // lazy-loads pp_team_squads / deleted-matches / cricbuzz log, once
   const allMatches = Object.values(matches);
   const pendingDep = getAllPendingDeposits();
   const pendingWd = getAllPendingWithdraws();
@@ -20008,6 +20039,15 @@ async function initApp() {
     render();
     return;
   }
+  // NOTE: Previously ALL 14 collections loaded here for every user on every
+  // app open — including truly admin-only data (pp_deleted_matches,
+  // pp_deleted_dream11_matches, cricbuzz API log) that regular users never
+  // see. At hundreds of users, that's wasted full-collection reads per day
+  // for data nobody's looking at. pp_team_squads stays in the core load —
+  // regular users' Dream11 team-build screens read player squads from it
+  // (see d11GetTeamSquad). Only the pure admin/debug collections are now
+  // lazy-loaded, the first time the admin actually opens that screen (see
+  // _ensureAdminDataLoaded), so a regular user's session never touches them.
   await Promise.all([
     _loadAllUsersFromFirestore(),_loadAllMatchesFromFirestore(),
     _loadAllH2HFromFirestore(),_loadAllCustomContestsFromFirestore(),
@@ -20015,9 +20055,11 @@ async function initApp() {
     _loadAllDream11TeamsFromFirestore(),_loadAllD11H2HFromFirestore(),
     _loadAllD11CustomContestsFromFirestore(),_loadAllD11TournamentsFromFirestore(),
     _loadAllUtTournamentsFromFirestore(),_loadAllUtTeamsFromFirestore(),
-    _loadAllDeletedMatchesFromFirestore(),_loadAllDeletedD11MatchesFromFirestore(),
-    _loadCricbuzzApiLog(),
   ]);
+  if (isAdmin()) {
+    // Admin needs everything, including admin-only screens' data, right away.
+    _ensureAdminDataLoaded();
+  }
   render();
   // Live Sync is fully manual now — no polling to resume on startup.
   // Refreshing/reopening the app never triggers a Cricbuzz API call.
@@ -20054,22 +20096,24 @@ if ('serviceWorker' in navigator) {
 }
 
 (function startBackgroundRefresh(){
+  // NOTE: this used to poll 7 full collections via getDocs() every 3 min,
+  // per open tab. With hundreds of users that alone can exceed the
+  // Firestore free-tier daily read quota (50K reads/day). Those 7
+  // collections (_loadAllMatchesFromFirestore etc.) are now backed by
+  // onSnapshot live listeners (see _liveLoadCollection near line ~1286),
+  // so they already stay in sync in real time without polling — this
+  // loop just needs to periodically re-run the two lightweight
+  // "auto-check" tasks that aren't tied to a collection listener, and
+  // do a light re-render/currentUser refresh as a safety net.
   setInterval(function(){
     if(!currentUser||!window._fbAuthCurrentUser||!window._fbAuthCurrentUser())return;
     if(document.hidden)return;
-    Promise.all([
-      _loadAllMatchesFromFirestore(),_loadAllDream11MatchesFromFirestore(),
-      _loadAllDream11TeamsFromFirestore(),_loadAllH2HFromFirestore(),
-      _loadAllD11H2HFromFirestore(),_loadAllCustomContestsFromFirestore(),
-      _loadAllD11CustomContestsFromFirestore(),
-    ]).then(function(){
-      if(currentUser&&currentUser.email&&users[currentUser.email])
-        currentUser={...users[currentUser.email],email:currentUser.email};
-      render();
-      if (typeof d11AutoCheckPlayingXI === 'function') d11AutoCheckPlayingXI().catch(function(){});
-      if (typeof d11AutoFetchFinalResult === 'function') d11AutoFetchFinalResult().catch(function(){});
-    }).catch(function(){});
-  },3*60*1000);
+    if(currentUser&&currentUser.email&&users[currentUser.email])
+      currentUser={...users[currentUser.email],email:currentUser.email};
+    render();
+    if (typeof d11AutoCheckPlayingXI === 'function') d11AutoCheckPlayingXI().catch(function(){});
+    if (typeof d11AutoFetchFinalResult === 'function') d11AutoFetchFinalResult().catch(function(){});
+  },20*60*1000);
 })();
 
 // ── Live countdown ticker ──
@@ -20166,7 +20210,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.16.0";
+const APP_VERSION = "3.17.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
