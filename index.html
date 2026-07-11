@@ -1022,6 +1022,10 @@ let d11ViewTournamentId = null; // which tournament's detail screen is showing
 let d11AddMatchesOpen = false; // true while creator is adding more matches to an already-created tournament
 let d11AddMatchesSelected = []; // matchIds ticked in the "add more matches" panel
 let d11TeamDraft = null; // user's in-progress team selection { matchId, picks:[], captain, viceCaptain }
+// Team-selection modal shown when a user with 2+ teams for a match joins a
+// contest — lets them pick WHICH team (Team 1/2/3) to enter into THIS
+// specific contest. { matchId, onConfirm(teamId) } or null when closed.
+let d11JoinTeamPicker = null;
 let d11BuildTeamRoleTab = 'ALL'; // active role-filter tab on the Create Team screen: 'ALL' | 'WK' | 'BAT' | 'AR' | 'BOWL'
 let d11ViewTeamId = null; // for viewing a submitted team detail
 let d11ContestMatchId = null; // which Dream11 match's "Join Contest" screen is showing
@@ -2431,7 +2435,7 @@ async function joinMegaContest(matchId) {
 // the first to commit succeeds — the second sees the updated participants
 // list on retry and fails cleanly with "already joined", instead of both
 // silently succeeding and double-charging the user. ──
-async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection, participantsField, poolField, txType, alreadyJoinedMsg, participantsAreObjectMap = false }) {
+async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection, participantsField, poolField, txType, alreadyJoinedMsg, participantsAreObjectMap = false, teamId = null }) {
   if (!window._fbDb || !window._fbFns?.runTransaction) {
     showNotif('Connection not ready — please try again', 'error');
     return null;
@@ -2440,6 +2444,8 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
   const matchRef = doc(window._fbDb, matchCollection, matchId);
   const safeKey = currentUser.email.replace(/\./g, '_');
   const userRef = doc(window._fbDb, 'pp_users', safeKey);
+  // participantTeams field name mirrors participantsField, e.g. 'megaParticipants' -> 'megaParticipantTeams'
+  const teamsField = participantsField + 'Teams';
 
   try {
     const outcome = await runTransaction(window._fbDb, async (tx) => {
@@ -2476,6 +2482,9 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
       if (Array.isArray(updatedMatchData.participants) && !updatedMatchData.participants.includes(currentUser.email)) {
         updatedMatchData.participants = [...updatedMatchData.participants, currentUser.email];
       }
+      if (teamId) {
+        updatedMatchData[teamsField] = { ...(matchData[teamsField] || {}), [currentUser.email]: teamId };
+      }
 
       const updatedUserData = { ...userData, balance: newBalance, transactions: newTransactions };
 
@@ -2483,11 +2492,13 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
       // This prevents the "1 user joined 4 times" issue where a full tx.set would
       // stomp changes made by another concurrent transaction.
       tx.update(userRef, { balance: newBalance, transactions: newTransactions });
-      tx.update(matchRef, {
+      const matchUpdate = {
         [participantsField]: updatedMatchData[participantsField],
         [poolField]: updatedMatchData[poolField],
         participants: updatedMatchData.participants
-      });
+      };
+      if (teamId) matchUpdate[teamsField] = updatedMatchData[teamsField];
+      tx.update(matchRef, matchUpdate);
 
       return { balance: newBalance, transactions: newTransactions, matchData: updatedMatchData };
     });
@@ -2508,7 +2519,7 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
 // duplicate entries (the old code just did a local array.push + save,
 // which let two near-simultaneous joins both pass the "already joined"
 // check before either had saved). ──
-async function _atomicJoinFreeContest({ matchId, matchCollection, participantsField, alreadyJoinedMsg }) {
+async function _atomicJoinFreeContest({ matchId, matchCollection, participantsField, alreadyJoinedMsg, teamId = null }) {
   if (!window._fbDb || !window._fbFns) {
     showNotif('Connection not ready — please try again', 'error');
     return null;
@@ -2519,6 +2530,7 @@ async function _atomicJoinFreeContest({ matchId, matchCollection, participantsFi
     return null;
   }
   const matchRef = doc(window._fbDb, matchCollection, matchId);
+  const teamsField = participantsField + 'Teams';
 
   try {
     // Read latest data directly (no transaction needed for free join — no money involved)
@@ -2538,11 +2550,18 @@ async function _atomicJoinFreeContest({ matchId, matchCollection, participantsFi
     }
 
     const updatedParticipants = [...participants, currentUser.email];
+    const updateFields = { [participantsField]: updatedParticipants };
+    let updatedTeams = matchData[teamsField];
+    if (teamId) {
+      updatedTeams = { ...(matchData[teamsField] || {}), [currentUser.email]: teamId };
+      updateFields[teamsField] = updatedTeams;
+    }
 
-    // updateDoc only writes the one field — safe, no overwrite of other fields
-    await updateDoc(matchRef, { [participantsField]: updatedParticipants });
+    // updateDoc only writes the changed fields — safe, no overwrite of other fields
+    await updateDoc(matchRef, updateFields);
 
     const updatedMatchData = { ...matchData, [participantsField]: updatedParticipants };
+    if (teamId) updatedMatchData[teamsField] = updatedTeams;
     return { matchData: updatedMatchData };
 
   } catch (e) {
@@ -2722,7 +2741,7 @@ async function joinCustomContestByCode(rawCode) {
 // THE CONTEST DOC ITSELF (creator-chosen, not a fixed constant) — then
 // writes both updates together. Mirrors _atomicJoinPaidContest's race-safety
 // for the Mega Contest, applied here to creator-made contests. ──
-async function _atomicJoinCustomContest({ contestId, contestCollection, maxPlayers }) {
+async function _atomicJoinCustomContest({ contestId, contestCollection, maxPlayers, teamId = null }) {
   if (!window._fbDb || !window._fbFns?.runTransaction) {
     showNotif('Connection not ready — please try again', 'error');
     return null;
@@ -2763,6 +2782,9 @@ async function _atomicJoinCustomContest({ contestId, contestCollection, maxPlaye
         participants: [...participants, currentUser.email],
         pool: (contestData.pool || 0) + entryFee
       };
+      if (teamId) {
+        updatedContestData.participantTeams = { ...(contestData.participantTeams || {}), [currentUser.email]: teamId };
+      }
 
       tx.set(userRef, { ...userData, balance: newBalance, transactions: newTransactions });
       tx.set(contestRef, updatedContestData);
@@ -3079,16 +3101,16 @@ function getUserD11MatchHistoryStats(email) {
     const d11m = dream11Matches[mId];
     if (!m || !d11m) return null;
 
-    const myTeam = d11GetUserTeam(mId, email);
+    const myTeam = d11GetUserTeam(mId, email); // headline points shown = user's Team 1 / first team, for a simple profile summary
     const myPoints = myTeam?.totalPoints || 0;
 
     const joinedFree = (d11m.freeParticipants||[]).includes(email);
     const joinedMega = (d11m.megaParticipants||[]).includes(email);
     const joinedMiniMega = (d11m.miniMegaParticipants||[]).includes(email);
 
-    function rankWithin(participantEmails) {
+    function rankWithin(participantEmails, teamsMap) {
       const ranked = participantEmails
-        .map(e => ({ email: e, points: d11GetUserTeam(mId, e)?.totalPoints || 0 }))
+        .map(e => ({ email: e, points: d11GetTeamForContest(mId, e, teamsMap)?.totalPoints || 0 }))
         .sort((a,b) => b.points - a.points);
       const rank = ranked.findIndex(p => p.email === email) + 1;
       // Win = finishing in the top 50% of all contest participants (rounded up),
@@ -3097,15 +3119,15 @@ function getUserD11MatchHistoryStats(email) {
       return { rank: rank || null, total: ranked.length, isWin: rank > 0 && rank <= threshold, threshold };
     }
 
-    const freeRank = joinedFree ? rankWithin(d11m.freeParticipants||[]) : null;
-    const megaRank = joinedMega ? rankWithin(d11m.megaParticipants||[]) : null;
-    const miniMegaRank = joinedMiniMega ? rankWithin(d11m.miniMegaParticipants||[]) : null;
+    const freeRank = joinedFree ? rankWithin(d11m.freeParticipants||[], d11m.freeParticipantsTeams) : null;
+    const megaRank = joinedMega ? rankWithin(d11m.megaParticipants||[], d11m.megaParticipantsTeams) : null;
+    const miniMegaRank = joinedMiniMega ? rankWithin(d11m.miniMegaParticipants||[], d11m.miniMegaParticipantsTeams) : null;
     // Fallback: if the user submitted a team but never explicitly joined a
     // Free/Mega/Mini Mega contest list (e.g. older data, or contest-join step skipped),
     // still rank them fairly against everyone who submitted a team for this match —
     // otherwise their win/loss can never be computed ("of 0" players).
     const allTeamEmails = Object.values(dream11Teams).filter(t => t.matchId === mId).map(t => t.userEmail);
-    const fallbackRank = (!joinedFree && !joinedMega && !joinedMiniMega && allTeamEmails.length > 0) ? rankWithin(allTeamEmails) : null;
+    const fallbackRank = (!joinedFree && !joinedMega && !joinedMiniMega && allTeamEmails.length > 0) ? rankWithin(allTeamEmails, null) : null;
 
     const isWin = (freeRank?.isWin) || (megaRank?.isWin) || (miniMegaRank?.isWin) || (fallbackRank?.isWin) || false;
     const bestRank = [freeRank, megaRank, miniMegaRank, fallbackRank].filter(Boolean).sort((a,b)=>(a.rank||999)-(b.rank||999))[0];
@@ -3941,6 +3963,7 @@ function render() {
       ${tab==='d11LiveScorecard' ? renderD11LiveScorecard() : ''}
       ${tab==='dream11Pool' ? renderDream11AdminPool() : ''}
       ${tab==='dream11Build' ? renderDream11BuildTeam() : ''}
+      ${tab==='dream11TeamPicker' ? renderD11TeamPicker() : ''}
       ${tab==='dream11JoinContest' ? renderD11JoinContest() : ''}
       ${tab==='dream11ContestParticipants' ? renderD11ContestParticipants() : ''}
       ${tab==='dream11Tournaments' ? renderD11Tournaments() : ''}
@@ -3971,6 +3994,7 @@ function render() {
     ${_d11SyncDebugData ? renderD11SyncDebugModal() : ''}
     ${_receiptModalImage ? renderReceiptImageModal() : ''}
     ${d11CleanupPoolMatchId ? renderD11CleanupPoolModal() : ''}
+    ${d11JoinTeamPicker ? renderD11JoinTeamPickerModal() : ''}
     ${_tpinSetupMode ? renderTpinSetupModal() : ''}
   `;
 }
@@ -5790,9 +5814,10 @@ function recalcDream11MatchPoints(d11m) {
   (d11m.players||[]).forEach(p => { p.points = calcDream11PlayerPoints(p.stats, d11ActiveMatchId); });
 }
 
-function newDream11TeamTemplate(matchId, userEmail) {
+function newDream11TeamTemplate(matchId, userEmail, teamSlot) {
   return {
     id: uid(), matchId, userEmail,
+    teamSlot: teamSlot || 1, // 1, 2, or 3 — which of the user's up-to-3 teams this is for this match
     picks: [],          // array of player ids (length 11) — this is the LIVE lineup; ids here may get swapped by auto-replace
     originalPicks: [],  // the user's original 11 picks, exactly as submitted — never changes, used to know who was replaced
     backups: [],         // array of up to D11_MAX_BACKUPS backup player ids — free (no credit cost), same-role auto-replace
@@ -5802,6 +5827,15 @@ function newDream11TeamTemplate(matchId, userEmail) {
     totalPoints: 0,
     submittedAt: getDateTime()
   };
+}
+
+const D11_MAX_TEAMS_PER_MATCH = 3;
+
+// ── All of a user's teams for a match (up to D11_MAX_TEAMS_PER_MATCH), sorted by slot ──
+function d11GetUserTeams(matchId, email) {
+  return Object.values(dream11Teams)
+    .filter(t => t.matchId === matchId && t.userEmail === email)
+    .sort((a, b) => (a.teamSlot||1) - (b.teamSlot||1));
 }
 
 function calcDream11TeamPoints(team, d11m) {
@@ -6368,11 +6402,31 @@ function openDream11Match(matchId) {
     d11AdminTab = 'pool';
     tab = 'dream11Pool';
   } else {
-    const existingTeam = Object.values(dream11Teams).find(t => t.matchId === matchId && t.userEmail === currentUser.email);
-    d11TeamDraft = existingTeam ? { ...existingTeam, picks: [...existingTeam.picks] } : newDream11TeamTemplate(matchId, currentUser.email);
-    d11BuildTeamRoleTab = 'ALL';
-    tab = 'dream11Build';
+    const myTeams = d11GetUserTeams(matchId, currentUser.email);
+    if (myTeams.length === 0) {
+      // No teams yet — go straight into building Team 1, same as before.
+      d11TeamDraft = newDream11TeamTemplate(matchId, currentUser.email, 1);
+      d11BuildTeamRoleTab = 'ALL';
+      tab = 'dream11Build';
+    } else {
+      // User already has at least one team — show the team picker
+      // (Team 1 / Team 2 / Team 3) instead of silently editing Team 1.
+      tab = 'dream11TeamPicker';
+    }
   }
+  render();
+  window.scrollTo(0,0);
+}
+
+// ── Open a specific team slot (1, 2, or 3) for a match: edits the
+// existing team in that slot, or starts a fresh draft if the slot is
+// still empty. Called from the Team Picker screen. ──
+function d11OpenTeamSlot(matchId, slot) {
+  const myTeams = d11GetUserTeams(matchId, currentUser.email);
+  const existingTeam = myTeams.find(t => (t.teamSlot||1) === slot);
+  d11TeamDraft = existingTeam ? { ...existingTeam, picks: [...existingTeam.picks] } : newDream11TeamTemplate(matchId, currentUser.email, slot);
+  d11BuildTeamRoleTab = 'ALL';
+  tab = 'dream11Build';
   render();
   window.scrollTo(0,0);
 }
@@ -10532,6 +10586,76 @@ function d11GetUserTeam(matchId, email) {
   return Object.values(dream11Teams).find(t => t.matchId === matchId && t.userEmail === email);
 }
 
+// ── Resolve which of a user's teams was entered into a SPECIFIC contest.
+// contestTeamsMap is e.g. d11m.megaParticipantTeams — { email: teamId }.
+// Falls back to the user's Team 1 (or their only team) for older entries
+// made before per-contest team selection existed, so nothing that
+// already joined a contest breaks. ──
+function d11GetTeamForContest(matchId, email, contestTeamsMap) {
+  const teamId = contestTeamsMap && contestTeamsMap[email];
+  if (teamId && dream11Teams[teamId]) return dream11Teams[teamId];
+  // Fallback: no team recorded for this contest (pre-multi-team entry) —
+  // use the user's Team 1, or whichever single team they have.
+  const myTeams = d11GetUserTeams(matchId, email);
+  return myTeams.find(t => (t.teamSlot||1) === 1) || myTeams[0] || null;
+}
+
+// ── Entry point for ALL "Join Contest" buttons: figures out which team
+// to enter. If the user has only 1 team for this match, uses it directly
+// (no extra step — same UX as before multi-team existed). If they have
+// 2 or 3 teams, opens a picker modal and calls `onConfirm(teamId)` once
+// they choose. ──
+function d11JoinWithTeamPicker(matchId, onConfirm) {
+  const myTeams = d11GetUserTeams(matchId, currentUser.email);
+  if (myTeams.length === 0) {
+    showNotif('Please submit your Dream11 team first!', 'error');
+    return;
+  }
+  if (myTeams.length === 1) {
+    onConfirm(myTeams[0].id);
+    return;
+  }
+  d11JoinTeamPicker = { matchId, onConfirm };
+  render();
+}
+function d11ConfirmJoinTeamPick(teamId) {
+  const picker = d11JoinTeamPicker;
+  d11JoinTeamPicker = null;
+  if (picker && picker.onConfirm) picker.onConfirm(teamId);
+  else render();
+}
+function d11CancelJoinTeamPick() {
+  d11JoinTeamPicker = null;
+  render();
+}
+function renderD11JoinTeamPickerModal() {
+  if (!d11JoinTeamPicker) return '';
+  const { matchId } = d11JoinTeamPicker;
+  const myTeams = d11GetUserTeams(matchId, currentUser.email);
+  const d11m = dream11Matches[matchId];
+  const rows = myTeams.map(t => {
+    const capName = (d11m?.players||[]).find(p=>p.id===t.captain)?.name || '—';
+    const vcName = (d11m?.players||[]).find(p=>p.id===t.viceCaptain)?.name || '—';
+    return `
+    <div onclick="d11ConfirmJoinTeamPick('${t.id}')" style="cursor:pointer;padding:12px;border-radius:12px;background:rgba(249,115,22,0.08);border:1px solid rgba(249,115,22,0.3);margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div style="font-weight:700;font-size:13.5px">Team ${t.teamSlot||1}</div>
+        <div style="font-size:11px;color:var(--dim)">${t.picks.length}/${D11_TEAM_SIZE} players</div>
+      </div>
+      <div style="font-size:10.5px;color:var(--dim);margin-top:4px">C: ${capName} • VC: ${vcName}</div>
+    </div>`;
+  }).join('');
+  return `
+  <div style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this)d11CancelJoinTeamPick()">
+    <div style="background:var(--card-bg,#1a1a2e);width:100%;max-width:480px;border-radius:20px 20px 0 0;padding:18px;max-height:80vh;overflow-y:auto">
+      <div style="font-weight:800;font-size:15px;margin-bottom:2px">Konsi team is contest mein use karni hai?</div>
+      <div style="font-size:11px;color:var(--dim);margin-bottom:12px">Har contest ke liye alag team choose kar sakte hain</div>
+      ${rows}
+      <button class="btn-secondary btn-block" style="margin-top:6px" onclick="d11CancelJoinTeamPick()">Cancel</button>
+    </div>
+  </div>`;
+}
+
 // ── True if the user joined ANY Dream11 contest (Mega/Free/H2H/Custom) for this match ──
 function d11UserHasJoinedAnyContest(matchId, email) {
   const d11m = dream11Matches[matchId];
@@ -10547,7 +10671,7 @@ function d11UserHasJoinedAnyContest(matchId, email) {
 }
 
 // ─── Dream11 Mega Contest: paid entry, pool split by Admin ───
-async function joinD11MegaContest(matchId) {
+async function joinD11MegaContest(matchId, teamId) {
   const d11m = dream11Matches[matchId];
   if (!d11m) return showNotif('Match not found — please refresh', 'error');
   if (isD11Locked(matchId)) return showNotif('This Dream11 contest is locked', 'error');
@@ -10557,6 +10681,10 @@ async function joinD11MegaContest(matchId) {
 
   if (!d11HasUserSubmittedTeam(matchId, currentUser.email)) {
     return showNotif('Please submit your Dream11 team first!', 'error');
+  }
+  if (!teamId) {
+    // No team chosen yet — open the picker (auto-picks if user only has 1 team) then re-call ourselves.
+    return d11JoinWithTeamPicker(matchId, (chosenTeamId) => joinD11MegaContest(matchId, chosenTeamId));
   }
   // Fast local check (UX only — not relied on for correctness)
   if ((d11m.megaParticipants||[]).includes(currentUser.email)) {
@@ -10579,7 +10707,8 @@ async function joinD11MegaContest(matchId) {
       participantsField: 'megaParticipants',
       poolField: 'megaPool',
       txType: 'd11_mega_entry',
-      alreadyJoinedMsg: 'You have already joined the Dream11 Mega Contest!'
+      alreadyJoinedMsg: 'You have already joined the Dream11 Mega Contest!',
+      teamId
     });
     if (!result) return;
 
@@ -10672,7 +10801,7 @@ async function distributeD11MegaPrizes(matchId) {
   const weightSum = weightTable.reduce((a,b) => a+b, 0);
 
   const ranked = parts
-    .map(email => ({ email, team: d11GetUserTeam(matchId, email) }))
+    .map(email => ({ email, team: d11GetTeamForContest(matchId, email, d11m.megaParticipantsTeams) }))
     .filter(x => x.team)
     .map(x => ({ email: x.email, points: x.team.totalPoints || 0 }))
     .sort((a,b) => b.points - a.points);
@@ -10711,7 +10840,7 @@ async function distributeD11MegaPrizes(matchId) {
 }
 
 // ─── Dream11 Mini Mega Contest: same rules as Mega, cheaper Rs 10 entry ───
-async function joinD11MiniMegaContest(matchId) {
+async function joinD11MiniMegaContest(matchId, teamId) {
   const d11m = dream11Matches[matchId];
   if (!d11m) return showNotif('Match not found — please refresh', 'error');
   if (isD11Locked(matchId)) return showNotif('This Dream11 contest is locked', 'error');
@@ -10721,6 +10850,9 @@ async function joinD11MiniMegaContest(matchId) {
 
   if (!d11HasUserSubmittedTeam(matchId, currentUser.email)) {
     return showNotif('Please submit your Dream11 team first!', 'error');
+  }
+  if (!teamId) {
+    return d11JoinWithTeamPicker(matchId, (chosenTeamId) => joinD11MiniMegaContest(matchId, chosenTeamId));
   }
   // Fast local check (UX only — not relied on for correctness)
   if ((d11m.miniMegaParticipants||[]).includes(currentUser.email)) {
@@ -10743,7 +10875,8 @@ async function joinD11MiniMegaContest(matchId) {
       participantsField: 'miniMegaParticipants',
       poolField: 'miniMegaPool',
       txType: 'd11_mini_mega_entry',
-      alreadyJoinedMsg: 'You have already joined the Dream11 Mini Mega Contest!'
+      alreadyJoinedMsg: 'You have already joined the Dream11 Mini Mega Contest!',
+      teamId
     });
     if (!result) return;
 
@@ -10764,6 +10897,7 @@ async function joinD11MiniMegaContest(matchId) {
     _joinInFlight.delete(guardKey);
   }
 }
+
 
 // Mini Mega uses the exact same bracket shape/weights as Mega (per user request
 // "same rules as Mega Contest") — reuse getD11MegaBracket() directly, just at
@@ -10807,7 +10941,7 @@ async function distributeD11MiniMegaPrizes(matchId) {
   const weightSum = weightTable.reduce((a,b) => a+b, 0);
 
   const ranked = parts
-    .map(email => ({ email, team: d11GetUserTeam(matchId, email) }))
+    .map(email => ({ email, team: d11GetTeamForContest(matchId, email, d11m.miniMegaParticipantsTeams) }))
     .filter(x => x.team)
     .map(x => ({ email: x.email, points: x.team.totalPoints || 0 }))
     .sort((a,b) => b.points - a.points);
@@ -10843,13 +10977,16 @@ async function distributeD11MiniMegaPrizes(matchId) {
 }
 
 // ─── Dream11 Free Contest: free entry, admin rewards manually ─
-async function joinD11FreeContest(matchId) {
+async function joinD11FreeContest(matchId, teamId) {
   const d11m = dream11Matches[matchId];
   if (!d11m) return showNotif('Match not found — please refresh', 'error');
   if (isD11Locked(matchId)) return showNotif('This Dream11 contest is locked', 'error');
 
   if (!d11HasUserSubmittedTeam(matchId, currentUser.email)) {
     return showNotif('Please submit your Dream11 team first!', 'error');
+  }
+  if (!teamId) {
+    return d11JoinWithTeamPicker(matchId, (chosenTeamId) => joinD11FreeContest(matchId, chosenTeamId));
   }
   // Fast local check (UX only — not relied on for correctness)
   if ((d11m.freeParticipants||[]).includes(currentUser.email)) {
@@ -10866,7 +11003,8 @@ async function joinD11FreeContest(matchId) {
       matchId,
       matchCollection: 'pp_dream11_matches',
       participantsField: 'freeParticipants',
-      alreadyJoinedMsg: 'You already joined the Dream11 Free Contest for this match!'
+      alreadyJoinedMsg: 'You already joined the Dream11 Free Contest for this match!',
+      teamId
     });
     if (!result) return;
 
@@ -10940,7 +11078,7 @@ function hasUserJoinedD11H2H(matchId, email) {
     c.matchId === matchId && (c.player1?.email === email || c.player2?.email === email)
   );
 }
-async function joinD11H2HContest(matchId) {
+async function joinD11H2HContest(matchId, teamId) {
   const d11m = dream11Matches[matchId];
   if (!d11m) return;
   if (isD11Locked(matchId)) return showNotif('This Dream11 contest is locked', 'error');
@@ -10957,6 +11095,9 @@ async function joinD11H2HContest(matchId) {
   }
   if (!d11HasUserSubmittedTeam(matchId, currentUser.email)) {
     return showNotif('Please submit your Dream11 team first!', 'error');
+  }
+  if (!teamId) {
+    return d11JoinWithTeamPicker(matchId, (chosenTeamId) => joinD11H2HContest(matchId, chosenTeamId));
   }
 
   // Guard against double-tap / spam-click firing this twice before re-render
@@ -11016,7 +11157,7 @@ async function joinD11H2HContest(matchId) {
       });
       tx.set(userRef, { ...userData, balance: newBalance, transactions: newTransactions });
 
-      const playerData = { email: currentUser.email, name: userData.name || u.name, submittedAt: getDateTime() };
+      const playerData = { email: currentUser.email, name: userData.name || u.name, submittedAt: getDateTime(), teamId };
 
       if (targetData) {
         const updatedContest = { ...targetData, player2: playerData, status: 'full' };
@@ -11077,8 +11218,8 @@ async function finalizeD11H2HContests(matchId) {
     const p2 = users[contest.player2?.email];
     if (!p1 || !p2) continue;
 
-    const p1Team = d11GetUserTeam(matchId, contest.player1.email);
-    const p2Team = d11GetUserTeam(matchId, contest.player2.email);
+    const p1Team = contest.player1.teamId ? dream11Teams[contest.player1.teamId] : d11GetUserTeam(matchId, contest.player1.email);
+    const p2Team = contest.player2.teamId ? dream11Teams[contest.player2.teamId] : d11GetUserTeam(matchId, contest.player2.email);
     const p1Score = p1Team?.totalPoints || 0;
     const p2Score = p2Team?.totalPoints || 0;
 
@@ -11320,7 +11461,7 @@ async function d11JoinFromSearch(ccId) {
   }
 }
 
-async function joinD11CustomContestByCode(rawCode) {
+async function joinD11CustomContestByCode(rawCode, teamId) {
   const code = (rawCode||'').trim().toUpperCase();
   if (!code) return showNotif('Please enter a contest code', 'error');
 
@@ -11350,6 +11491,9 @@ async function joinD11CustomContestByCode(rawCode) {
   if ((u.balance || 0) < cc.entryFee) {
     return showNotif(`Rs ${cc.entryFee} balance is required to join this contest`, 'error');
   }
+  if (!teamId) {
+    return d11JoinWithTeamPicker(cc.matchId, (chosenTeamId) => joinD11CustomContestByCode(rawCode, chosenTeamId));
+  }
 
   // Guard against double-tap / spam-click firing this twice before re-render
   const guardKey = `join_custom_d11_${cc.id}`;
@@ -11360,7 +11504,8 @@ async function joinD11CustomContestByCode(rawCode) {
     const result = await _atomicJoinCustomContest({
       contestId: cc.id,
       contestCollection: 'pp_dream11_custom_contests',
-      maxPlayers: D11_CUSTOM_CONTEST_MAX_PLAYERS
+      maxPlayers: D11_CUSTOM_CONTEST_MAX_PLAYERS,
+      teamId
     });
     if (!result) return;
 
@@ -11392,7 +11537,7 @@ async function finalizeD11CustomContests(matchId) {
   for (const cc of contests) {
     const ranked = cc.participants
       .map(email => {
-        const team = d11GetUserTeam(matchId, email);
+        const team = d11GetTeamForContest(matchId, email, cc.participantTeams);
         return { email, points: team?.totalPoints || 0 };
       })
       .sort((a,b) => b.points - a.points);
@@ -11477,6 +11622,10 @@ function d11TournamentUserPoints(t, email) {
   const activeMatches = t.activeMatches || [];
   return t.matchIds.reduce((sum, mid) => {
     if (activeMatches.length > 0 && !activeMatches.includes(mid)) return sum;
+    // Tournaments span multiple matches and aren't tied to one specific
+    // Mega/H2H/Custom contest per match, so there's no single "team entered
+    // into this tournament" to look up — use the user's Team 1 (or their
+    // only team) for each match, same as the profile summary screen.
     const team = d11GetUserTeam(mid, email);
     return sum + (team?.totalPoints || 0);
   }, 0);
@@ -12377,7 +12526,8 @@ function renderD11JoinContest() {
   const d11m = dream11Matches[matchId];
   if (!m || !d11m) return `<div class="empty-state">Match not found. <button class="btn-secondary" onclick="goDream11Hub()" style="margin-top:10px">← Back</button></div>`;
 
-  const myTeam = d11GetUserTeam(matchId, currentUser.email);
+  const myTeams = d11GetUserTeams(matchId, currentUser.email);
+  const myTeam = myTeams[0] || null; // used only as a general fallback, not for any specific contest's score
   const locked = d11m.locked;
   const inMega = (d11m.megaParticipants||[]).includes(currentUser.email);
   const inMiniMega = (d11m.miniMegaParticipants||[]).includes(currentUser.email);
@@ -12398,19 +12548,20 @@ function renderD11JoinContest() {
       <span class="vs-badge">VS</span>
       <span class="team-name">${m.teamB||'TBD'}</span>
     </div>
-    <div style="text-align:center;font-size:11px;color:var(--dim)">✅ Your team submitted${myTeam?.totalPoints ? ' · '+myTeam.totalPoints+' pts' : ''}</div>
+    <div style="text-align:center;font-size:11px;color:var(--dim)">✅ ${myTeams.length>1 ? `${myTeams.length} teams submitted` : 'Your team submitted'}${myTeams.length===1 && myTeam?.totalPoints ? ' · '+myTeam.totalPoints+' pts' : ''}</div>
+    ${myTeams.length < D11_MAX_TEAMS_PER_MATCH && !locked ? `<div style="text-align:center;margin-top:8px"><button class="btn-secondary" style="font-size:11px;padding:6px 12px" onclick="tab='dream11TeamPicker';d11ActiveMatchId='${matchId}';render();window.scrollTo(0,0)">➕ Manage Teams (${myTeams.length}/${D11_MAX_TEAMS_PER_MATCH})</button></div>` : ''}
   </div>
 
   ${(() => {
     // Helper: renders one "My Contest" row with points + winning amount
-    function myContestRow({ icon, color, label, prize, extra, onClick, shareType, shareRef }) {
+    function myContestRow({ icon, color, label, prize, extra, onClick, shareType, shareRef, points }) {
       const shareBtn = shareType ? `<button onclick="event.stopPropagation();d11ShareContestResult('${matchId}','${shareType}'${shareRef?`,'${shareRef}'`:',null'},event)" title="Result Share Karo 🤪" style="flex-shrink:0;width:30px;height:30px;border-radius:8px;border:none;background:linear-gradient(135deg,#25D366,#1ea952);color:#fff;font-size:14px;display:flex;align-items:center;justify-content:center;cursor:pointer;margin-left:4px">📤</button>` : '';
       return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
       <div onclick="${onClick}" style="cursor:pointer;flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:10px;background:rgba(${color},0.08);border:1px solid rgba(${color},0.25)">
         <div style="width:32px;height:32px;border-radius:9px;background:rgba(${color},0.18);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">${icon}</div>
         <div style="flex:1;min-width:0">
           <div style="font-size:12.5px;font-weight:700">${label}</div>
-          <div style="font-size:10.5px;color:var(--dim);margin-top:1px">${myPoints} pts${extra?' · '+extra:''}</div>
+          <div style="font-size:10.5px;color:var(--dim);margin-top:1px">${points!=null?points:myPoints} pts${extra?' · '+extra:''}</div>
         </div>
         ${prize>0 ? `<div style="font-size:12.5px;font-weight:700;color:#4ade80;flex-shrink:0">+Rs ${prize}</div>` : locked ? `<div style="font-size:10px;color:var(--dim);flex-shrink:0">⏳ Pending</div>` : ''}
       </div>
@@ -12421,45 +12572,64 @@ function renderD11JoinContest() {
     const rows = [];
     if (inMega) {
       const prize = d11m.megaPrizes?.[currentUser.email] || 0;
+      const megaTeam = d11GetTeamForContest(matchId, currentUser.email, d11m.megaParticipantsTeams);
       rows.push(myContestRow({
         icon:'🎯', color:'251,191,36', label:'Mega Contest', prize,
+        points: megaTeam?.totalPoints || 0,
+        extra: (megaTeam?.teamSlot||1) > 1 ? `Team ${megaTeam.teamSlot}` : '',
         onClick:`openD11ContestParticipants('${matchId}','mega')`,
         shareType:'mega'
       }));
     }
     if (inMiniMega) {
       const prize = d11m.miniMegaPrizes?.[currentUser.email] || 0;
+      const miniTeam = d11GetTeamForContest(matchId, currentUser.email, d11m.miniMegaParticipantsTeams);
       rows.push(myContestRow({
         icon:'🔸', color:'96,165,250', label:'Mini Mega Contest', prize,
+        points: miniTeam?.totalPoints || 0,
+        extra: (miniTeam?.teamSlot||1) > 1 ? `Team ${miniTeam.teamSlot}` : '',
         onClick:`openD11ContestParticipants('${matchId}','minimega')`,
         shareType:'minimega'
       }));
     }
     if (inH2H) {
       const prize = (myH2HContest.status==='completed' && myH2HContest.winnerId===currentUser.email) ? (myH2HContest.winnerPrize||0) : 0;
-      const extra = myH2HContest.status==='completed'
+      const h2hTeam = myH2HContest.player1?.email===currentUser.email
+        ? (myH2HContest.player1.teamId ? dream11Teams[myH2HContest.player1.teamId] : d11GetUserTeam(matchId, currentUser.email))
+        : (myH2HContest.player2?.teamId ? dream11Teams[myH2HContest.player2.teamId] : d11GetUserTeam(matchId, currentUser.email));
+      let extra = myH2HContest.status==='completed'
         ? (myH2HContest.winnerId===currentUser.email ? '🏆 Won' : myH2HContest.winnerId ? '❌ Lost' : '🤝 Draw')
         : (myH2HContest.status||'open');
+      if ((h2hTeam?.teamSlot||1) > 1) extra += ` · Team ${h2hTeam.teamSlot}`;
       rows.push(myContestRow({
         icon:'🥊', color:'249,115,22', label:'H2H Contest', prize, extra,
+        points: h2hTeam?.totalPoints || 0,
         onClick:`openD11ContestParticipants('${matchId}','h2h')`,
         shareType:'h2h'
       }));
     }
     if (inFree) {
       const prize = d11m.freeRewards?.[currentUser.email] || 0;
+      const freeTeam = d11GetTeamForContest(matchId, currentUser.email, d11m.freeParticipantsTeams);
+      let extra = prize>0 ? 'Admin reward' : '';
+      if ((freeTeam?.teamSlot||1) > 1) extra = (extra ? extra+' · ' : '') + `Team ${freeTeam.teamSlot}`;
       rows.push(myContestRow({
         icon:'🎁', color:'34,197,94', label:'Free Contest', prize,
-        extra: prize>0 ? 'Admin reward' : '',
+        points: freeTeam?.totalPoints || 0,
+        extra,
         onClick:`openD11ContestParticipants('${matchId}','free')`,
         shareType:'free'
       }));
     }
     myCustomContests.forEach(cc => {
       const prize = cc.prizes?.[currentUser.email] || 0;
+      const ccTeam = d11GetTeamForContest(matchId, currentUser.email, cc.participantTeams);
+      let extra = cc.cancelled ? 'Cancelled · refunded' : `Rs ${cc.entryFee||0} entry`;
+      if ((ccTeam?.teamSlot||1) > 1) extra += ` · Team ${ccTeam.teamSlot}`;
       rows.push(myContestRow({
         icon:'🛠️', color:'168,85,247', label:`Custom: ${cc.code}`, prize,
-        extra: cc.cancelled ? 'Cancelled · refunded' : `Rs ${cc.entryFee||0} entry`,
+        points: ccTeam?.totalPoints || 0,
+        extra,
         onClick:`openD11ContestParticipants('${matchId}','custom','${cc.id}')`,
         shareType:'custom', shareRef: cc.id
       }));
@@ -12581,13 +12751,13 @@ function renderD11ContestParticipants() {
   </div>`;
 
   // Renders a simple ranked list of email + (points, if team submitted)
-  const renderUserList = (emails, title, color) => {
+  const renderUserList = (emails, title, color, teamsMap) => {
     if (emails.length === 0) {
       return `<div class="card mb14"><div style="font-weight:700;font-size:14px;color:${color};margin-bottom:8px">${title}</div><div style="font-size:12px;color:var(--dim)">Koi bhi join nahi hua abhi.</div></div>`;
     }
     const rows = emails.map(email => {
       const u = users[email];
-      const team = d11GetUserTeam(matchId, email);
+      const team = d11GetTeamForContest(matchId, email, teamsMap);
       const name = u?.name || email;
       const isMe = email === currentUser.email;
       return { name, email, isMe, points: team?.totalPoints };
@@ -12631,7 +12801,7 @@ function renderD11ContestParticipants() {
           ${prizeRows.map((p,i)=>`<span style="font-size:11px;padding:4px 10px;border-radius:14px;background:rgba(251,191,36,0.12);color:#fbbf24">${i===0?'🥇':i===1?'🥈':i===2?'🥉':'🏅'} Rank ${p.rank}: Rs ${p.prize}</span>`).join('')}
         </div>
       </div>`;
-    return `${backBtn}${matchHeader}${prizeBox}${renderUserList(megaParts, '🎯 Mega Contest Participants', 'var(--gold)')}`;
+    return `${backBtn}${matchHeader}${prizeBox}${renderUserList(megaParts, '🎯 Mega Contest Participants', 'var(--gold)', d11m.megaParticipantsTeams)}`;
   }
 
   if (contestType === 'minimega') {
@@ -12662,11 +12832,11 @@ function renderD11ContestParticipants() {
           ${prizeRows.map((p,i)=>`<span style="font-size:11px;padding:4px 10px;border-radius:14px;background:rgba(96,165,250,0.12);color:#60a5fa">${i===0?'🥇':i===1?'🥈':i===2?'🥉':'🏅'} Rank ${p.rank}: Rs ${p.prize}</span>`).join('')}
         </div>
       </div>`;
-    return `${backBtn}${matchHeader}${prizeBox}${renderUserList(miniParts, '🔸 Mini Mega Contest Participants', '#60a5fa')}`;
+    return `${backBtn}${matchHeader}${prizeBox}${renderUserList(miniParts, '🔸 Mini Mega Contest Participants', '#60a5fa', d11m.miniMegaParticipantsTeams)}`;
   }
 
   if (contestType === 'free') {
-    return `${backBtn}${matchHeader}${renderUserList(d11m.freeParticipants||[], '🎁 Free Contest Participants', '#4ade80')}`;
+    return `${backBtn}${matchHeader}${renderUserList(d11m.freeParticipants||[], '🎁 Free Contest Participants', '#4ade80', d11m.freeParticipantsTeams)}`;
   }
 
   if (contestType === 'h2h') {
@@ -12695,7 +12865,7 @@ function renderD11ContestParticipants() {
     <div class="card mb14" style="background:rgba(168,85,247,0.06);border-color:rgba(168,85,247,0.25)">
       <div style="font-weight:700;font-size:14px;color:#c084fc;margin-bottom:4px">🛠️ Custom Contest: ${cc.code}</div>
       <div style="font-size:11px;color:var(--dim);margin-bottom:8px">Entry Rs ${cc.entryFee} • Pool Rs ${cc.pool} • Created by ${users[cc.creatorEmail]?.name || cc.creatorEmail}</div>
-      ${renderUserList(cc.participants||[], `Participants`, '#c084fc')}
+      ${renderUserList(cc.participants||[], `Participants`, '#c084fc', cc.participantTeams)}
     </div>`;
   }
 
@@ -14824,7 +14994,7 @@ function renderD11FreeRewards(d11m) {
   const matchId = d11ActiveMatchId;
   const rewards = d11m.freeRewards || {};
   const sorted = parts.map(email => {
-    const team = d11GetUserTeam(matchId, email);
+    const team = d11GetTeamForContest(matchId, email, d11m.freeParticipantsTeams);
     return { email, name: users[email]?.name || email, points: team?.totalPoints || 0 };
   }).sort((a,b) => b.points - a.points);
 
@@ -14842,6 +15012,66 @@ function renderD11FreeRewards(d11m) {
 }
 
 // ── USER: Build team screen ──
+// ── Team Picker: shows the user's up to D11_MAX_TEAMS_PER_MATCH teams for
+// a match, lets them create new ones (up to the max) or edit existing
+// ones. Reached when a user who already has ≥1 team for this match opens
+// it again from the hub (see openDream11Match). ──
+function renderD11TeamPicker() {
+  const matchId = d11ActiveMatchId;
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m) return `<div class="empty-state">Match not found. <button class="btn-secondary" onclick="goDream11Hub()" style="margin-top:10px">← Back</button></div>`;
+
+  const dLocked = isD11Locked(matchId);
+  const myTeams = d11GetUserTeams(matchId, currentUser.email);
+  const bySlot = {};
+  myTeams.forEach(t => { bySlot[t.teamSlot||1] = t; });
+
+  const slotCard = (slot) => {
+    const t = bySlot[slot];
+    if (t) {
+      return `
+      <div class="card mb10" style="border-color:rgba(249,115,22,0.3)">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div style="font-weight:700;font-size:13px">Team ${slot}</div>
+            <div style="font-size:11px;color:var(--dim)">${t.picks.length}/${D11_TEAM_SIZE} players picked${t.captain ? ' • C/VC set' : ''}</div>
+          </div>
+          <button class="btn-secondary" style="font-size:12px;padding:8px 14px" onclick="d11OpenTeamSlot('${matchId}',${slot})">${dLocked ? '👁 View' : '✏️ Edit'}</button>
+        </div>
+      </div>`;
+    }
+    if (dLocked) return ''; // don't offer creating new teams after deadline
+    return `
+      <div class="card mb10" style="border:1px dashed rgba(249,115,22,0.4);background:transparent">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div style="font-weight:700;font-size:13px;color:var(--dim)">Team ${slot} — not created yet</div>
+          <button class="btn-primary" style="font-size:12px;padding:8px 14px" onclick="d11OpenTeamSlot('${matchId}',${slot})">+ Create</button>
+        </div>
+      </div>`;
+  };
+
+  let slots = '';
+  for (let s = 1; s <= D11_MAX_TEAMS_PER_MATCH; s++) slots += slotCard(s);
+
+  return `
+  <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="goDream11Hub()">← Back to Dream11</button>
+
+  <div class="card mb14">
+    <div class="match-teams" style="margin-bottom:4px">
+      <span class="team-name">${m.teamA||'TBD'}</span>
+      <span class="vs-badge">VS</span>
+      <span class="team-name">${m.teamB||'TBD'}</span>
+    </div>
+    <div style="text-align:center;font-size:11px;color:var(--dim)">You can create up to ${D11_MAX_TEAMS_PER_MATCH} teams for this match — pick which one to use when you join a contest</div>
+  </div>
+
+  ${slots}
+
+  ${myTeams.length > 0 ? `<button class="btn-primary btn-block" style="margin-top:8px" onclick="d11ContestMatchId='${matchId}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">🎪 Join Mega / H2H / Custom Contest</button>` : ''}
+  `;
+}
+
 function renderDream11BuildTeam() {
   const m = matches[d11TeamDraft.matchId];
   const d11m = dream11Matches[d11TeamDraft.matchId];
@@ -14878,7 +15108,7 @@ function renderDream11BuildTeam() {
       <span class="vs-badge">VS</span>
       <span class="team-name">${m.teamB||'TBD'}</span>
     </div>
-    <div style="text-align:center;font-size:11px;color:var(--dim)">Build your Dream11 — select ${D11_TEAM_SIZE} players</div>
+    <div style="text-align:center;font-size:11px;color:var(--dim)">Build your Dream11 — select ${D11_TEAM_SIZE} players ${(d11TeamDraft.teamSlot||1) > 1 || d11GetUserTeams(d11TeamDraft.matchId, currentUser.email).length > 1 ? `<span style="color:var(--orange);font-weight:700">— Team ${d11TeamDraft.teamSlot||1}</span>` : ''}</div>
     ${deadlineStr ? `<div class="match-deadline">${dLocked ? '🔒 Deadline passed — team can no longer be submitted' : `⏰ Deadline: ${deadlineStr}`}</div>${!dLocked && m.deadline ? `<div class="d11-countdown" data-deadline="${m.deadline}" style="font-size:12px;font-weight:700;color:var(--orange);text-align:center;margin-top:4px">${d11FormatCountdown(m.deadline - Date.now())}</div>` : ''}` : ''}
     ${xiCount > 0 ? `<div style="text-align:center;font-size:10.5px;color:#4ade80;margin-top:4px">🏏 Playing XI confirmed for ${xiCount} player${xiCount===1?'':'s'} — look for the green tick below</div>` : `<div style="text-align:center;font-size:10.5px;color:var(--dim);margin-top:4px">Playing XI not confirmed yet — pick from the full squad for now</div>`}
   </div>
@@ -15056,7 +15286,7 @@ function renderDream11Leaderboard() {
       <div class="d11-rank-badge" style="background:${rankColor};color:${rankText}">${i+1}</div>
       ${av}
       <div style="flex:1;min-width:0;margin-left:2px">
-        <div style="font-weight:700;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${u?.name||'Unknown Player'}${t.userEmail===currentUser.email?' (You)':''}</div>
+        <div style="font-weight:700;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${u?.name||'Unknown Player'}${t.userEmail===currentUser.email?' (You)':''}${(t.teamSlot||1) > 1 ? ` · Team ${t.teamSlot}` : ''}</div>
         <div style="font-size:10.5px;color:var(--dim)">${u?.idNumber ? `ID: ${u.idNumber} · ` : ''}${(t.userEmail===currentUser.email || isAdmin() || isD11Locked(t.matchId)) ? `C: ${d11m?.players.find(p=>p.id===t.captain)?.name||'—'} · VC: ${d11m?.players.find(p=>p.id===t.viceCaptain)?.name||'—'}` : `🔒 C/VC hidden until deadline`}</div>
       </div>
       <div style="text-align:right">
@@ -20210,7 +20440,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.17.0";
+const APP_VERSION = "3.18.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
