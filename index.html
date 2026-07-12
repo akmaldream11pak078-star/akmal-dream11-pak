@@ -1433,7 +1433,45 @@ function _installVisibilityGuard() {
   });
   _resetIdleDetachTimer();
 }
-function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKey, opts) {
+// Cross-session read strategy — the fixes above (idle-detach cooldown)
+// only cover staying-open-in-one-tab. If the user fully closes and
+// reopens the app, logs out/in, or refreshes (F5) many times a day, that
+// used to mean a fresh onSnapshot registration every time — each one
+// re-reading every doc in the collection, since Firestore's first
+// snapshot callback always delivers the whole collection. That's what
+// was actually driving reads far higher than the in-session idle cycling
+// alone could explain.
+//
+// Fix: on any AUTOMATIC load (app open, refresh, re-login — anything that
+// isn't the user explicitly tapping the 🔄 button), show whatever's in
+// localStorage cache and stop there — never touch Firestore on its own,
+// no matter how much time has passed (10 hours, 10 days, doesn't matter).
+// The only way this reads from Firestore automatically is if the cache is
+// genuinely empty (first-ever load on this device, or the browser/app
+// cache was cleared) — there's nothing to show otherwise.
+//
+// The 🔄 refresh button is the only way to get a fresh read on demand,
+// and it bypasses all of this — but it has its own per-collection 10-min
+// cooldown so rapid repeated taps can't multiply reads either. Once that
+// button attaches a live listener, real-time updates keep streaming in
+// for the rest of the session same as before — this only governs the
+// "initial full read" moment, not ongoing sync.
+const _MANUAL_REFRESH_COOLDOWN_MS = 10 * 60 * 1000; // 🔄 button: at most one real Firestore hit per collection per 10 min
+function _getLastManualRefreshAt(collectionName) {
+  try { return parseInt(localStorage.getItem('pp_lastmanual_' + collectionName) || '0', 10) || 0; } catch(e) { return 0; }
+}
+function _setLastManualRefreshAt(collectionName, ts) {
+  try { localStorage.setItem('pp_lastmanual_' + collectionName, String(ts)); } catch(e) {}
+}
+function _loadFromCacheOnly(collectionName, targetSetter, cacheKey) {
+  try {
+    const cached = localStorage.getItem(cacheKey);
+    if (cached) { targetSetter(JSON.parse(cached)); return true; }
+  } catch(e) {}
+  return false;
+}
+
+function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKey, opts, bypassThrottle) {
   opts = opts || {};
   _installVisibilityGuard();
   _liveCollectionSpecs[collectionName] = { targetSetter, cacheKey, opts };
@@ -1443,6 +1481,30 @@ function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKe
       // Listener already running — resolve immediately with current data.
       resolve(true);
       return;
+    }
+    const isAdminUser = typeof isAdmin === 'function' && isAdmin();
+
+    if (bypassThrottle && !isAdminUser) {
+      // Manual 🔄 tap: only apply its own cooldown (spam-tap protection),
+      // never the "cache forever" rule above.
+      const lastManual = _getLastManualRefreshAt(collectionName);
+      const elapsed = Date.now() - lastManual;
+      if (lastManual && elapsed < _MANUAL_REFRESH_COOLDOWN_MS) {
+        // Tapped again too soon — just keep showing whatever's already
+        // loaded (cache or the live listener's last data); don't hit
+        // Firestore again until the cooldown clears.
+        const gotCache = _loadFromCacheOnly(collectionName, targetSetter, cacheKey);
+        resolve(gotCache);
+        return;
+      }
+      _setLastManualRefreshAt(collectionName, Date.now());
+    } else if (!bypassThrottle && !isAdminUser) {
+      // Automatic load (app open/refresh/re-login) — cache-only, forever,
+      // until the cache itself is empty. Never auto-hits Firestore.
+      const gotCache = _loadFromCacheOnly(collectionName, targetSetter, cacheKey);
+      if (gotCache) { resolve(true); return; }
+      // No cache at all (first-ever load on this device) — fall through
+      // and do the one real Firestore read needed to populate it.
     }
     const { collection, onSnapshot } = window._fbFns;
     let firstSnapshot = true;
@@ -1467,8 +1529,8 @@ function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKe
   });
 }
 
-async function _loadAllMatchesFromFirestore() {
-  return _liveLoadCollection('pp_matches', () => matches, (v) => { matches = v; }, 'pp_matches_cache', { rerenderOnUpdate: true });
+async function _loadAllMatchesFromFirestore(forceRefresh) {
+  return _liveLoadCollection('pp_matches', () => matches, (v) => { matches = v; }, 'pp_matches_cache', { rerenderOnUpdate: true }, forceRefresh);
 }
 async function _saveH2HToFirestore(h2hId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1476,8 +1538,8 @@ async function _saveH2HToFirestore(h2hId, data) {
   setDoc(doc(window._fbDb, 'pp_h2h', h2hId), data)
     .catch(e => console.error('H2H save error:', e));
 }
-async function _loadAllH2HFromFirestore() {
-  return _liveLoadCollection('pp_h2h', () => h2hContests, (v) => { h2hContests = v; }, 'pp_h2h_cache', { rerenderOnUpdate: true });
+async function _loadAllH2HFromFirestore(forceRefresh) {
+  return _liveLoadCollection('pp_h2h', () => h2hContests, (v) => { h2hContests = v; }, 'pp_h2h_cache', { rerenderOnUpdate: true }, forceRefresh);
 }
 async function _saveCustomContestToFirestore(ccId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1485,8 +1547,8 @@ async function _saveCustomContestToFirestore(ccId, data) {
   setDoc(doc(window._fbDb, 'pp_custom_contests', ccId), data)
     .catch(e => console.error('Custom contest save error:', e));
 }
-async function _loadAllCustomContestsFromFirestore() {
-  return _liveLoadCollection('pp_custom_contests', () => customContests, (v) => { customContests = v; }, 'pp_custom_contests_cache', { rerenderOnUpdate: true });
+async function _loadAllCustomContestsFromFirestore(forceRefresh) {
+  return _liveLoadCollection('pp_custom_contests', () => customContests, (v) => { customContests = v; }, 'pp_custom_contests_cache', { rerenderOnUpdate: true }, forceRefresh);
 }
 async function _saveDream11MatchToFirestore(matchId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1494,8 +1556,8 @@ async function _saveDream11MatchToFirestore(matchId, data) {
   setDoc(doc(window._fbDb, 'pp_dream11_matches', matchId), data)
     .catch(e => console.error('Dream11 match save error:', e));
 }
-async function _loadAllDream11MatchesFromFirestore() {
-  return _liveLoadCollection('pp_dream11_matches', () => dream11Matches, (v) => { dream11Matches = v; console.log('[D11] Matches loaded:', Object.keys(v).length); }, 'pp_dream11_matches_cache', { rerenderOnUpdate: true });
+async function _loadAllDream11MatchesFromFirestore(forceRefresh) {
+  return _liveLoadCollection('pp_dream11_matches', () => dream11Matches, (v) => { dream11Matches = v; console.log('[D11] Matches loaded:', Object.keys(v).length); }, 'pp_dream11_matches_cache', { rerenderOnUpdate: true }, forceRefresh);
 }
 async function _saveTeamSquadToFirestore(teamKey, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1532,8 +1594,8 @@ async function _saveDream11TeamToFirestore(teamId, data) {
     throw e;
   }
 }
-async function _loadAllDream11TeamsFromFirestore() {
-  return _liveLoadCollection('pp_dream11_teams', () => dream11Teams, (v) => { dream11Teams = v; console.log('[D11] Teams loaded:', Object.keys(v).length); }, 'pp_dream11_teams_cache', { rerenderOnUpdate: true });
+async function _loadAllDream11TeamsFromFirestore(forceRefresh) {
+  return _liveLoadCollection('pp_dream11_teams', () => dream11Teams, (v) => { dream11Teams = v; console.log('[D11] Teams loaded:', Object.keys(v).length); }, 'pp_dream11_teams_cache', { rerenderOnUpdate: true }, forceRefresh);
 }
 async function _saveD11H2HToFirestore(h2hId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1541,8 +1603,8 @@ async function _saveD11H2HToFirestore(h2hId, data) {
   setDoc(doc(window._fbDb, 'pp_dream11_h2h', h2hId), data)
     .catch(e => console.error('Dream11 H2H save error:', e));
 }
-async function _loadAllD11H2HFromFirestore() {
-  return _liveLoadCollection('pp_dream11_h2h', () => d11h2hContests, (v) => { d11h2hContests = v; }, 'pp_dream11_h2h_cache', { rerenderOnUpdate: true });
+async function _loadAllD11H2HFromFirestore(forceRefresh) {
+  return _liveLoadCollection('pp_dream11_h2h', () => d11h2hContests, (v) => { d11h2hContests = v; }, 'pp_dream11_h2h_cache', { rerenderOnUpdate: true }, forceRefresh);
 }
 async function _saveD11CustomContestToFirestore(ccId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1550,8 +1612,8 @@ async function _saveD11CustomContestToFirestore(ccId, data) {
   setDoc(doc(window._fbDb, 'pp_dream11_custom_contests', ccId), data)
     .catch(e => console.error('Dream11 custom contest save error:', e));
 }
-async function _loadAllD11CustomContestsFromFirestore() {
-  return _liveLoadCollection('pp_dream11_custom_contests', () => d11CustomContests, (v) => { d11CustomContests = v; }, 'pp_dream11_custom_contests_cache', { rerenderOnUpdate: true });
+async function _loadAllD11CustomContestsFromFirestore(forceRefresh) {
+  return _liveLoadCollection('pp_dream11_custom_contests', () => d11CustomContests, (v) => { d11CustomContests = v; }, 'pp_dream11_custom_contests_cache', { rerenderOnUpdate: true }, forceRefresh);
 }
 async function _saveD11TournamentToFirestore(tId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1875,14 +1937,14 @@ async function handleRefreshApp() {
   try {
     await Promise.all([
       typeof _loadAllUsersFromFirestore === 'function' ? _loadAllUsersFromFirestore() : Promise.resolve(),
-      typeof _loadAllMatchesFromFirestore === 'function' ? _loadAllMatchesFromFirestore() : Promise.resolve(),
-      typeof _loadAllDream11MatchesFromFirestore === 'function' ? _loadAllDream11MatchesFromFirestore() : Promise.resolve(),
-      typeof _loadAllDream11TeamsFromFirestore === 'function' ? _loadAllDream11TeamsFromFirestore() : Promise.resolve(),
+      typeof _loadAllMatchesFromFirestore === 'function' ? _loadAllMatchesFromFirestore(true) : Promise.resolve(),
+      typeof _loadAllDream11MatchesFromFirestore === 'function' ? _loadAllDream11MatchesFromFirestore(true) : Promise.resolve(),
+      typeof _loadAllDream11TeamsFromFirestore === 'function' ? _loadAllDream11TeamsFromFirestore(true) : Promise.resolve(),
       typeof _loadAllTeamSquadsFromFirestore === 'function' ? _loadAllTeamSquadsFromFirestore() : Promise.resolve(),
-      typeof _loadAllH2HFromFirestore === 'function' ? _loadAllH2HFromFirestore() : Promise.resolve(),
-      typeof _loadAllD11H2HFromFirestore === 'function' ? _loadAllD11H2HFromFirestore() : Promise.resolve(),
-      typeof _loadAllCustomContestsFromFirestore === 'function' ? _loadAllCustomContestsFromFirestore() : Promise.resolve(),
-      typeof _loadAllD11CustomContestsFromFirestore === 'function' ? _loadAllD11CustomContestsFromFirestore() : Promise.resolve(),
+      typeof _loadAllH2HFromFirestore === 'function' ? _loadAllH2HFromFirestore(true) : Promise.resolve(),
+      typeof _loadAllD11H2HFromFirestore === 'function' ? _loadAllD11H2HFromFirestore(true) : Promise.resolve(),
+      typeof _loadAllCustomContestsFromFirestore === 'function' ? _loadAllCustomContestsFromFirestore(true) : Promise.resolve(),
+      typeof _loadAllD11CustomContestsFromFirestore === 'function' ? _loadAllD11CustomContestsFromFirestore(true) : Promise.resolve(),
       typeof _loadAllD11TournamentsFromFirestore === 'function' ? _loadAllD11TournamentsFromFirestore() : Promise.resolve(),
       typeof _loadAllUtTournamentsFromFirestore === 'function' ? _loadAllUtTournamentsFromFirestore() : Promise.resolve(),
       typeof _loadAllUtTeamsFromFirestore === 'function' ? _loadAllUtTeamsFromFirestore() : Promise.resolve(),
@@ -20776,7 +20838,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.22.0";
+const APP_VERSION = "3.25.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
