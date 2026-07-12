@@ -498,6 +498,13 @@
   .d11-dual-toggle { position:absolute; top:4px; right:4px; width:20px; height:20px; border-radius:50%; font-size:12px; font-weight:800; display:flex; align-items:center; justify-content:center; background:rgba(37,99,235,0.2); color:var(--blue-l); border:1px solid rgba(37,99,235,0.4); z-index:2; }
   .d11-dual-toggle.active { background:var(--red); color:#fff; border-color:var(--red); }
   .d11-dual-backup-toggle { position:absolute; top:26px; right:4px; z-index:1; }
+  /* ── Single-column full-width player list (replaces old Team A|Team B split) ── */
+  .d11-single-list { margin-bottom:14px; }
+  .d11-single-list-header { display:flex; justify-content:space-between; padding:0 8px 6px; font-size:9.5px; color:var(--dim); text-transform:uppercase; letter-spacing:0.5px; }
+  .d11-single-row { display:flex; align-items:center; gap:8px; padding:9px 10px; border-radius:12px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06); margin-bottom:7px; }
+  .d11-single-row.picked { border-color:rgba(37,99,235,0.5); background:rgba(37,99,235,0.1); }
+  .d11-single-row .d11-dual-toggle { position:static; width:24px; height:24px; }
+  .d11-single-row .d11-dual-backup-toggle { position:static; }
   .d11-team-card {
     padding:13px 14px; border-radius:13px; background:rgba(255,255,255,0.04);
     border:1px solid rgba(255,255,255,0.08); margin-bottom:9px;
@@ -15292,15 +15299,18 @@ function renderDream11BuildTeam() {
     ${roleTab('BOWL', `BOWL (${sideAAll.concat(sideBAll).filter(p=>p.role==='BOWL').length})`)}
   </div>
 
-  <div class="d11-dual-col">
-    <div class="d11-dual-col-half">
-      <div class="d11-dual-header">${m.teamA||'Team A'}</div>
-      ${sideA.length === 0 ? `<div class="empty-state" style="padding:16px 4px;font-size:11px">No players</div>` : sideA.map((p,i) => d11DualPlayerCard(p, i+1, selCounts, selTotal)).join('')}
+  <div class="d11-single-list">
+    <div class="d11-single-list-header">
+      <span>Player</span>
+      <span>Sel by</span>
+      <span>Credits</span>
+      <span></span>
     </div>
-    <div class="d11-dual-col-half">
-      <div class="d11-dual-header">${m.teamB||'Team B'}</div>
-      ${sideB.length === 0 ? `<div class="empty-state" style="padding:16px 4px;font-size:11px">No players</div>` : sideB.map((p,i) => d11DualPlayerCard(p, i+1, selCounts, selTotal)).join('')}
-    </div>
+    ${sideA.length === 0 && sideB.length === 0
+      ? `<div class="empty-state" style="padding:16px 4px;font-size:11px">No players</div>`
+      : sideA.map((p,i) => d11SinglePlayerRow(p, i+1, m.teamA, selCounts, selTotal)).join('')
+        + sideB.map((p,i) => d11SinglePlayerRow(p, i+1, m.teamB, selCounts, selTotal)).join('')
+    }
   </div>
 
   ${d11TeamDraft.picks.length === D11_TEAM_SIZE ? `
@@ -15369,6 +15379,38 @@ function renderDream11BuildTeam() {
 // ── Dream11-style player card for the dual-column Create Team screen.
 // Shows photo, name, role, "% selected by" (from real submitted teams),
 // and a points/credit indicator — with a +/✕ toggle button like the official app.
+// ── Full-width single-row player card (Image 2 style): photo, name,
+// team tag, sel%, credits, and a +/x pick button, all in one row. Used
+// instead of the old side-by-side Team A | Team B dual-column layout. ──
+function d11SinglePlayerRow(p, rank, teamName, selCounts, selTotal) {
+  const picked = d11TeamDraft.picks.includes(p.id);
+  const isBackup = (d11TeamDraft.backups||[]).includes(p.id);
+  const selPct = selTotal > 0 ? Math.round(((selCounts[p.id]||0) / selTotal) * 100) : 0;
+  const avatar = p.photo
+    ? `<img src="${p.photo}" style="width:44px;height:44px;border-radius:50%;object-fit:cover;flex-shrink:0" />`
+    : `<div style="width:44px;height:44px;border-radius:50%;background:linear-gradient(135deg,#6366f1,#a855f7);color:#fff;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:800;flex-shrink:0">${(p.name||'?').charAt(0).toUpperCase()}</div>`;
+  return `
+  <div class="d11-single-row ${picked?'picked':''}">
+    <div style="width:18px;text-align:center;font-size:10.5px;font-weight:700;color:var(--dim);flex-shrink:0">${rank}</div>
+    <div style="position:relative;flex-shrink:0">
+      ${avatar}
+      <span class="d11-role-chip d11-role-${p.role}" style="position:absolute;bottom:-4px;left:50%;transform:translateX(-50%);font-size:7.5px;padding:1px 5px">${p.role}</span>
+    </div>
+    <div style="flex:1;min-width:0;padding-left:4px">
+      <div style="font-size:12.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80" title="Confirmed Playing XI">✅</span>' : ''}${isBackup ? ' <span style="color:#60a5fa" title="Backup player">🔁</span>' : ''}</div>
+      <div style="font-size:10px;color:var(--dim);margin-top:2px">${teamName||''} • ${selTotal > 0 ? `${selPct}% Sel.` : '— Sel.'}</div>
+    </div>
+    <div style="text-align:right;flex-shrink:0;padding:0 6px">
+      <div style="font-size:12.5px;font-weight:800;color:var(--orange)">${d11PlayerCredit(p)}</div>
+      <div style="font-size:9px;color:var(--dim)">Cr</div>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex-shrink:0">
+      <button class="d11-dual-toggle ${picked?'active':''}" onclick="d11TogglePick('${p.id}')">${picked?'✕':'+'}</button>
+      ${!picked ? `<button class="d11-dual-toggle d11-dual-backup-toggle ${isBackup?'active':''}" style="background:${isBackup?'#2563eb':'transparent'};border-color:#60a5fa;color:${isBackup?'#fff':'#60a5fa'};font-size:8px;width:auto;padding:2px 5px" title="Mark as backup" onclick="d11ToggleBackup('${p.id}')">${isBackup?'✕ B':'+ B'}</button>` : ''}
+    </div>
+  </div>`;
+}
+
 function d11DualPlayerCard(p, rank, selCounts, selTotal) {
   const picked = d11TeamDraft.picks.includes(p.id);
   const isBackup = (d11TeamDraft.backups||[]).includes(p.id);
@@ -20595,7 +20637,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.20.0";
+const APP_VERSION = "3.20.3";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
