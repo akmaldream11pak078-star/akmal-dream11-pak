@@ -1362,15 +1362,33 @@ async function _loadAllDeletedD11MatchesFromFirestore() {
 const _liveCollections = {}; // collectionName -> unsub function
 const _liveCollectionSpecs = {}; // collectionName -> {targetSetter, cacheKey, opts} for reattaching
 let _visibilityGuardInstalled = false;
-const D11_IDLE_DETACH_MS = 15 * 60 * 1000; // 15 minutes of no touch/click/scroll
+// Raised from 15 to 30 min — fewer detach/reattach cycles per session means
+// fewer full-collection re-reads (each reattach re-reads every doc in the
+// collection as a fresh onSnapshot, which is the expensive part).
+const D11_IDLE_DETACH_MS = 30 * 60 * 1000; // 30 minutes of no touch/click/scroll
 let _idleDetachTimer = null;
+// Reattaching costs one read per existing doc in EVERY watched collection
+// (matches, dream11 matches, H2H, custom contests, ...) since onSnapshot's
+// first callback delivers the whole collection again. Because
+// _resetIdleDetachTimer fires on every single tap/scroll/keydown, a user
+// who taps once right after going idle (or several times in quick
+// succession while intermittently idle) could trigger that "full re-read"
+// repeatedly in a short window — this is what was actually driving reads
+// into the tens of thousands with only ~60 users. A cooldown makes sure
+// reattachment only actually happens at most once per COOLDOWN_MS, no
+// matter how many qualifying taps arrive.
+const _REATTACH_COOLDOWN_MS = 5 * 60 * 1000; // at most one reattach per 5 min
+let _lastReattachAt = 0;
 function _detachAllLiveCollections() {
   Object.keys(_liveCollections).forEach(name => {
     try { _liveCollections[name](); } catch(e){}
     delete _liveCollections[name];
   });
 }
-function _reattachAllLiveCollections() {
+function _reattachAllLiveCollectionsThrottled() {
+  const now = Date.now();
+  if (now - _lastReattachAt < _REATTACH_COOLDOWN_MS) return; // too soon — skip this reattach, cached/local data stays in use until the cooldown clears
+  _lastReattachAt = now;
   Object.keys(_liveCollectionSpecs).forEach(name => {
     const spec = _liveCollectionSpecs[name];
     _liveLoadCollection(name, null, spec.targetSetter, spec.cacheKey, spec.opts);
@@ -1378,9 +1396,9 @@ function _reattachAllLiveCollections() {
 }
 function _resetIdleDetachTimer() {
   if (_idleDetachTimer) clearTimeout(_idleDetachTimer);
-  // If listeners were detached by inactivity and the user just interacted, bring them back.
+  // If listeners were detached by inactivity and the user just interacted, bring them back — but throttled (see above).
   if (Object.keys(_liveCollections).length === 0 && Object.keys(_liveCollectionSpecs).length > 0 && !document.hidden) {
-    _reattachAllLiveCollections();
+    _reattachAllLiveCollectionsThrottled();
   }
   _idleDetachTimer = setTimeout(() => {
     if (!document.hidden) _detachAllLiveCollections(); // hidden case already handled by visibilitychange
@@ -1393,13 +1411,25 @@ function _installVisibilityGuard() {
     if (document.hidden) {
       _detachAllLiveCollections();
     } else {
-      _reattachAllLiveCollections();
+      _reattachAllLiveCollectionsThrottled();
       _resetIdleDetachTimer();
     }
   });
-  // Any real user interaction resets the idle clock and reattaches if needed.
+  // Any real user interaction resets the idle clock and reattaches if needed
+  // (throttled — see _reattachAllLiveCollectionsThrottled). Also throttle
+  // how often this handler itself does any work, since click/touchstart/
+  // scroll/keydown can fire dozens of times per second during normal use
+  // (e.g. momentum scrolling) — no need to run the idle-timer reset logic
+  // on every single one of those.
+  let _lastInteractionHandledAt = 0;
+  const _onInteraction = () => {
+    const now = Date.now();
+    if (now - _lastInteractionHandledAt < 2000) return; // at most once per 2s
+    _lastInteractionHandledAt = now;
+    _resetIdleDetachTimer();
+  };
   ['click', 'touchstart', 'scroll', 'keydown'].forEach(evt => {
-    document.addEventListener(evt, _resetIdleDetachTimer, { passive: true });
+    document.addEventListener(evt, _onInteraction, { passive: true });
   });
   _resetIdleDetachTimer();
 }
@@ -20746,7 +20776,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.21.0";
+const APP_VERSION = "3.22.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
