@@ -992,6 +992,7 @@ let d11ActiveMatchId = null; // which match admin is editing player pool / scori
 let d11AdminSection = 'matches'; // 'matches' | 'teams' — sub-tab inside Dream11 admin inline section
 let d11AdminShowCompleted = false; // toggle completed matches in admin Dream11 panel
 let d11AdminParticipantsMatchId = null; // which match participants panel is open
+let _adminD11ListCustomContestsRefreshed = false; // guards against overlapping refreshes while renderAdminD11MatchesList re-renders
 let d11AdminParticipantsTab = 'mega'; // tab inside participants panel
 let d11Draft = null; // draft player being added by admin {name, role, side}
 let d11AdminCreatePending = false; // admin clicked "Create New Match" from Dream11 tab
@@ -11783,7 +11784,18 @@ async function joinD11CustomContestByCode(rawCode, teamId) {
   const code = (rawCode||'').trim().toUpperCase();
   if (!code) return showNotif('Please enter a contest code', 'error');
 
-  const cc = Object.values(d11CustomContests).find(c => c.code === code);
+  let cc = Object.values(d11CustomContests).find(c => c.code === code);
+  if (!cc) {
+    // Custom contests are created by regular users and need to be joinable
+    // by other users right away — unlike slow-changing collections
+    // (matches, teams) this one can't wait for the hourly background poll.
+    // A cache-first load only reflects what existed the last time THIS
+    // device fetched it, so a contest someone else just created minutes
+    // ago genuinely won't be in the local cache yet. Force one fresh read
+    // before concluding the code is invalid.
+    await _manualRefreshCollection('pp_dream11_custom_contests');
+    cc = Object.values(d11CustomContests).find(c => c.code === code);
+  }
   if (!cc) return showNotif('No contest found with this code', 'error');
   if (cc.status !== 'open') return showNotif('This contest has already ended', 'error');
 
@@ -16073,6 +16085,13 @@ function openAdminD11Participants(matchId, tab) {
   d11AdminParticipantsTab = tab || 'mega';
   render();
   setTimeout(() => { const el = document.getElementById('d11-admin-part-panel'); if(el) el.scrollIntoView({behavior:'smooth',block:'start'}); }, 120);
+  // Custom Contests are user-created and need to be visible to admin right
+  // away (not just after the hourly poll) — same reasoning as the
+  // join-by-code fix. Cheap to force here since it only runs when admin
+  // actually opens this panel, not on every render.
+  if (typeof _manualRefreshCollection === 'function') {
+    _manualRefreshCollection('pp_dream11_custom_contests').then(() => render()).catch(()=>{});
+  }
 }
 
 function renderAdminD11ParticipantsPanel(matchId) {
@@ -16265,6 +16284,15 @@ function _d11AdminMatchCard(m) {
 // ── Active matches only (upcoming/live/open) — completed/scored
 //    matches are moved out to their own dedicated admin section ──
 function renderAdminD11MatchesList() {
+  // Same reasoning as openAdminD11Participants — Custom Contests are
+  // user-created and need to be visible to admin immediately, not just
+  // after the hourly poll. This only fires once per render of this list
+  // (not on a timer), so it's cheap and only costs a read when the admin
+  // is actually looking at this screen.
+  if (typeof _manualRefreshCollection === 'function' && !_adminD11ListCustomContestsRefreshed) {
+    _adminD11ListCustomContestsRefreshed = true;
+    _manualRefreshCollection('pp_dream11_custom_contests').then(() => { _adminD11ListCustomContestsRefreshed = false; render(); }).catch(() => { _adminD11ListCustomContestsRefreshed = false; });
+  }
   const eligible = Object.values(matches).filter(m => m.sport === 'cricket' || dream11Matches[m.id]);
   // Previously Cricbuzz auto-imported matches (m.cricketDataMatchId set) were
   // excluded here, so any match created via Cricbuzz import never showed up
@@ -20929,7 +20957,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.26.0";
+const APP_VERSION = "3.26.1";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
