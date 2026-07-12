@@ -1208,13 +1208,24 @@ async function _saveUserToFirestore(email, userData) {
   await setDoc(doc(window._fbDb, 'pp_users', safeKey), userData)
     .catch(e => console.error('Firestore user save error:', e));
 }
-async function _loadAllUsersFromFirestore() {
+async function _loadAllUsersFromFirestore(force) {
   if (!window._fbDb || !window._fbFns) return false;
+  // Cache-first: if ANY cached roster exists, no matter how old, use it and
+  // skip this read entirely — same reasoning as _liveLoadCollection above.
+  // `force=true` (used by the manual "🔄 Refresh" header button and
+  // d11ManualRefresh-style flows) bypasses this and always re-reads.
+  if (!force) {
+    try {
+      const raw = localStorage.getItem('pp_users_cache');
+      if (raw) { Object.assign(users, JSON.parse(raw)); return true; }
+    } catch(e){}
+  }
   const { collection, getDocs } = window._fbFns;
   try {
     const snap = await getDocs(collection(window._fbDb, 'pp_users'));
     snap.forEach(d => { users[d.id.replace(/_/g,'.')] = d.data(); });
     try { localStorage.setItem('pp_users_cache', JSON.stringify(users)); } catch(e){}
+    _markFetched('pp_users');
     return true;
   } catch(e){ return false; }
 }
@@ -1237,29 +1248,36 @@ async function _loadOneUserFromFirestore(email) {
   } catch(e){ return null; }
 }
 
-// ── Live listener for the admin "Users" tab ──
+// ── Live-ish sync for the admin "Users" tab ──
 // _loadAllUsersFromFirestore() above is a one-time snapshot, used all over
 // login/referral flows. That's fine for those, but it meant the admin Users
 // tab could show a stale user list — e.g. a user who joins a contest right
 // after the admin panel loads wouldn't appear until a manual reload re-ran
-// the one-time fetch. This listener keeps `users` (and the visible Users
-// tab) live-synced while the admin has that tab open, and detaches when
-// they leave it so we're not holding an open listener for no reason.
-let _usersLiveUnsub = null;
+// the one-time fetch. This polls `users` (and refreshes the visible Users
+// tab) while the admin has that tab open, and stops when they leave it —
+// polling instead of onSnapshot for the same reason as _liveLoadCollection
+// above: an onSnapshot here re-reads all ~60 user docs on every single
+// balance/profile change anywhere in the app, for every admin with the tab
+// open. Polling caps that to a fixed rate regardless of how often users'
+// data changes elsewhere.
+let _usersLiveInterval = null;
 function _startAdminUsersLiveSync() {
-  if (_usersLiveUnsub) return; // already listening
-  if (!window._fbDb || !window._fbFns || !window._fbFns.onSnapshot) return;
-  const { collection, onSnapshot } = window._fbFns;
-  try {
-    _usersLiveUnsub = onSnapshot(collection(window._fbDb, 'pp_users'), snap => {
+  if (_usersLiveInterval) return; // already polling
+  if (!window._fbDb || !window._fbFns) return;
+  const { collection, getDocs } = window._fbFns;
+  const fetchOnce = async () => {
+    try {
+      const snap = await getDocs(collection(window._fbDb, 'pp_users'));
       snap.forEach(d => { users[d.id.replace(/_/g,'.')] = d.data(); });
       try { localStorage.setItem('pp_users_cache', JSON.stringify(users)); } catch(e){}
       if (adminTab === 'users') render();
-    }, err => console.error('Users live-sync error:', err));
-  } catch(e){ console.error('Failed to start users live-sync:', e); }
+    } catch(e){ console.error('Users poll-sync error:', e); }
+  };
+  fetchOnce(); // immediate first load
+  _usersLiveInterval = setInterval(fetchOnce, D11_POLL_INTERVAL_MS);
 }
 function _stopAdminUsersLiveSync() {
-  if (_usersLiveUnsub) { try { _usersLiveUnsub(); } catch(e){} _usersLiveUnsub = null; }
+  if (_usersLiveInterval) { clearInterval(_usersLiveInterval); _usersLiveInterval = null; }
 }
 // ── One-time migration: backfill 8-digit idNumber for users created before
 // the ID system existed. Only the admin has full pp_users read access, so
@@ -1335,38 +1353,82 @@ async function _loadAllDeletedD11MatchesFromFirestore() {
     return true;
   } catch(e){ return false; }
 }
-// ── Generic live-listener loader ──────────────────────────────────────
-// Replaces repeated getDocs() polling (which re-downloads a whole
-// collection every call — expensive at scale, e.g. 7 collections polled
-// every few minutes across hundreds of open tabs can blow the Firestore
-// free-tier daily read quota) with a single onSnapshot listener per
-// collection. Firestore then only sends changed docs after the first
-// load, and every caller of the same _loadAllXFromFirestore() function
-// keeps working unchanged — they just get a resolved promise once the
-// first snapshot arrives, and the target object stays live-synced after.
+// ── Fetch-throttle guard ──────────────────────────────────────────────
+// Fix this solves: even with polling instead of onSnapshot, every fresh
+// page load / app reopen still did a full getDocs() for all core
+// collections (the Promise.all block in initApp). A user who closes and
+// reopens the app a few times through the day re-pays that full cost
+// every time — and at 60 users, that alone can exceed the daily quota
+// even with zero contest activity (measured: ~360 reads/login × 60 users
+// × 3 opens/day ≈ 65K, already over the 50K budget on its own).
 //
-// Idle-tab guard: a listener left open in a backgrounded/minimized tab
-// still costs reads on every remote change even though nobody's looking
-// at it. At hundreds of users, tabs left open overnight are a silent
-// quota drain. So each collection's listener is detached when the tab
-// goes hidden and automatically re-attached (with a fresh snapshot) when
-// the tab becomes visible again — same data on screen, but zero cost
-// while nobody's actually looking.
+// Since the underlying data (scoring, matches, teams) changes rarely in
+// practice — admin updates live scoring only 1-2 times across an entire
+// match, not continuously — there's little real freshness lost by
+// reusing a recent fetch. 15 minutes covers the common "closed the app,
+// reopened it a few minutes later" pattern for free (0 reads), while
+// still re-fetching real data at least every 15 min during longer
+// sessions via the poll loop below. A manual "🔄 Refresh" tap always
+// bypasses this and forces a real fetch immediately, since that's an
+// explicit signal the person wants the latest data right now.
+const D11_FETCH_THROTTLE_MS = 60 * 60 * 1000; // reuse cache if fetched within the last 1 hour
+function _lastFetchTs(collectionName) {
+  try { return parseInt(localStorage.getItem('pp_fetch_ts_' + collectionName) || '0', 10); } catch(e){ return 0; }
+}
+function _markFetched(collectionName) {
+  try { localStorage.setItem('pp_fetch_ts_' + collectionName, String(Date.now())); } catch(e){}
+}
+function _tryLoadFromCache(cacheKey, targetSetter) {
+  try {
+    const raw = localStorage.getItem(cacheKey);
+    if (!raw) return false;
+    targetSetter(JSON.parse(raw));
+    return true;
+  } catch(e){ return false; }
+}
+// ── Generic bounded-polling loader ──────────────────────────────────────
+// IMPORTANT HISTORY: this used to be a single onSnapshot() listener per
+// collection. That felt "free" but is NOT bounded — Firestore re-sends the
+// ENTIRE collection to every connected listener on ANY write to ANY
+// document in it. So cost = (docs in collection) × (connected users) ×
+// (writes per day), which multiplies out of control fast: with e.g. 50
+// team docs, 10 concurrent users, and scoring updated 40 times during a
+// live match, that's 50×10×40 = 20,000 reads from ONE collection alone.
+// This is exactly what blew the free-tier 50K/day quota with only 60
+// total users and ~10 concurrent (confirmed via Firebase console: 198K
+// reads / 578 writes / 61 snapshot listeners peak on a single day).
 //
-// This also covers the case where the tab stays VISIBLE but the person
-// has simply stopped touching the phone (screen on, app open, nobody
-// there) — e.g. left open overnight on a desk. visibilitychange alone
-// wouldn't catch that since the tab never goes "hidden". A 15-minute
-// no-interaction timer detaches listeners the same way; any tap/scroll
-// reattaches them immediately.
-const _liveCollections = {}; // collectionName -> unsub function
+// Fix: poll on a fixed timer instead of reacting to every write. Cost is
+// now flat and predictable — (docs in collection) × (poll count) — and
+// completely independent of how many other users are online or how often
+// someone else writes. Same call signature as before, so every existing
+// _loadAllXFromFirestore() caller and all Object.values(...) usage across
+// the app keeps working unchanged.
+//
+// Idle-tab guard (unchanged behavior, still applies): polling is paused
+// when the tab is hidden, and after D11_IDLE_DETACH_MS of no touch/click/
+// scroll even while visible (e.g. left open overnight on a desk). Any
+// interaction resumes it immediately with a fresh fetch.
+const _liveCollections = {}; // collectionName -> interval id (kept name for minimal diff elsewhere)
 const _liveCollectionSpecs = {}; // collectionName -> {targetSetter, cacheKey, opts} for reattaching
 let _visibilityGuardInstalled = false;
 const D11_IDLE_DETACH_MS = 15 * 60 * 1000; // 15 minutes of no touch/click/scroll
+// Poll interval — how often each collection re-fetches while a tab is
+// active. Admin live-scoring updates are rare in practice (confirmed:
+// only 1-2 times across an entire match, not continuously), so polling
+// doesn't need to be frequent to stay reasonably fresh — a getDocs() call
+// costs the same whether the underlying data changed or not, so polling
+// faster than the data actually changes just burns quota for no benefit.
+// 20 minutes keeps background sync alive while cutting polling's daily
+// read cost by roughly 60% vs the previous 8-minute interval. Anyone who
+// wants the very latest number immediately (e.g. right after the admin
+// finishes scoring) can tap the manual 🔄 Refresh button instead of
+// waiting for the next tick.
+const D11_POLL_INTERVAL_MS = 60 * 60 * 1000;
 let _idleDetachTimer = null;
 function _detachAllLiveCollections() {
   Object.keys(_liveCollections).forEach(name => {
-    try { _liveCollections[name](); } catch(e){}
+    try { clearInterval(_liveCollections[name]); } catch(e){}
     delete _liveCollections[name];
   });
 }
@@ -1378,7 +1440,7 @@ function _reattachAllLiveCollections() {
 }
 function _resetIdleDetachTimer() {
   if (_idleDetachTimer) clearTimeout(_idleDetachTimer);
-  // If listeners were detached by inactivity and the user just interacted, bring them back.
+  // If polling was paused by inactivity and the user just interacted, resume it.
   if (Object.keys(_liveCollections).length === 0 && Object.keys(_liveCollectionSpecs).length > 0 && !document.hidden) {
     _reattachAllLiveCollections();
   }
@@ -1397,44 +1459,85 @@ function _installVisibilityGuard() {
       _resetIdleDetachTimer();
     }
   });
-  // Any real user interaction resets the idle clock and reattaches if needed.
+  // Any real user interaction resets the idle clock and resumes polling if needed.
   ['click', 'touchstart', 'scroll', 'keydown'].forEach(evt => {
     document.addEventListener(evt, _resetIdleDetachTimer, { passive: true });
   });
   _resetIdleDetachTimer();
+}
+// One fetch of a collection — shared by the first load and every poll tick.
+async function _pollFetchOnce(collectionName, targetSetter, cacheKey, opts) {
+  if (!window._fbDb || !window._fbFns) return false;
+  const { collection, getDocs } = window._fbFns;
+  try {
+    const snap = await getDocs(collection(window._fbDb, collectionName));
+    const obj = {};
+    snap.forEach(d => { obj[d.id] = d.data(); });
+    targetSetter(obj);
+    try { localStorage.setItem(cacheKey, JSON.stringify(obj)); } catch(e){}
+    _markFetched(collectionName);
+    if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
+    return true;
+  } catch(e) {
+    console.error(collectionName + ' poll fetch error:', e);
+    return false;
+  }
 }
 function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKey, opts) {
   opts = opts || {};
   _installVisibilityGuard();
   _liveCollectionSpecs[collectionName] = { targetSetter, cacheKey, opts };
   return new Promise((resolve) => {
-    if (!window._fbDb || !window._fbFns || !window._fbFns.onSnapshot) { resolve(false); return; }
+    if (!window._fbDb || !window._fbFns) { resolve(false); return; }
     if (_liveCollections[collectionName]) {
-      // Listener already running — resolve immediately with current data.
+      // Already polling — resolve immediately with current data.
       resolve(true);
       return;
     }
-    const { collection, onSnapshot } = window._fbFns;
-    let firstSnapshot = true;
-    try {
-      const unsub = onSnapshot(collection(window._fbDb, collectionName), snap => {
-        const obj = {};
-        snap.forEach(d => { obj[d.id] = d.data(); });
-        targetSetter(obj);
-        try { localStorage.setItem(cacheKey, JSON.stringify(obj)); } catch(e){}
-        if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
-        if (firstSnapshot) { firstSnapshot = false; resolve(true); }
-        else if (opts.rerenderOnUpdate) { try { render(); } catch(e){} }
-      }, err => {
-        console.error(collectionName + ' live-sync error:', err);
-        if (firstSnapshot) { firstSnapshot = false; resolve(false); }
-      });
-      _liveCollections[collectionName] = unsub;
-    } catch(e) {
-      console.error('Failed to start live-sync for ' + collectionName, e);
-      resolve(false);
+    // Cache-first guard: if ANY cached copy of this collection exists —
+    // no matter how old — use it immediately and skip the initial fetch
+    // entirely. Freshness from here on comes only from the recurring poll
+    // below (already hourly, D11_POLL_INTERVAL_MS) or the user's manual
+    // "🔄 Refresh" tap. Previously this only skipped the initial fetch when
+    // the cache was under an hour old, so reopening the app after it sat
+    // closed for a few hours still forced an immediate full-collection read
+    // on every single open — across many users that repeated "cold open"
+    // cost was a big chunk of the daily Firestore read quota for data that,
+    // in practice, is usually still perfectly fine to show stale-then-poll.
+    if (_tryLoadFromCache(cacheKey, targetSetter)) {
+      resolve(true);
+      if (!_liveCollections[collectionName]) {
+        _liveCollections[collectionName] = setInterval(async () => {
+          const changed = await _pollFetchOnce(collectionName, targetSetter, cacheKey, opts);
+          if (changed && opts.rerenderOnUpdate) { try { render(); } catch(e){} }
+        }, D11_POLL_INTERVAL_MS);
+      }
+      return;
     }
+    // First fetch resolves the promise (same timing contract as before).
+    _pollFetchOnce(collectionName, targetSetter, cacheKey, opts).then(ok => {
+      resolve(ok);
+      // Start the recurring poll only after the first fetch settles.
+      if (!_liveCollections[collectionName]) {
+        _liveCollections[collectionName] = setInterval(async () => {
+          const changed = await _pollFetchOnce(collectionName, targetSetter, cacheKey, opts);
+          if (changed && opts.rerenderOnUpdate) { try { render(); } catch(e){} }
+        }, D11_POLL_INTERVAL_MS);
+      }
+    });
   });
+}
+// Force an immediate refresh of one collection outside the normal poll
+// tick — used by manual "🔄 Refresh" buttons so users aren't stuck
+// waiting up to D11_POLL_INTERVAL_MS to see something they know just
+
+// changed (e.g. right after submitting their own team).
+async function _manualRefreshCollection(collectionName) {
+  const spec = _liveCollectionSpecs[collectionName];
+  if (!spec) return false;
+  const changed = await _pollFetchOnce(collectionName, spec.targetSetter, spec.cacheKey, spec.opts);
+  if (changed && spec.opts.rerenderOnUpdate) { try { render(); } catch(e){} }
+  return changed;
 }
 
 async function _loadAllMatchesFromFirestore() {
@@ -1481,12 +1584,22 @@ async function _saveTeamSquadToFirestore(teamKey, data) {
 }
 async function _loadAllTeamSquadsFromFirestore() {
   if (!window._fbDb || !window._fbFns) return false;
+  // Same throttle as the other core loaders — reuse the cache if fetched
+  // recently instead of re-reading the whole collection on every app open.
+  const sinceLastFetch = Date.now() - _lastFetchTs('pp_team_squads');
+  if (sinceLastFetch < D11_FETCH_THROTTLE_MS) {
+    try {
+      const raw = localStorage.getItem('pp_team_squads_cache');
+      if (raw) { teamSquads = JSON.parse(raw); return true; }
+    } catch(e){}
+  }
   const { collection, getDocs } = window._fbFns;
   try {
     const snap = await getDocs(collection(window._fbDb, 'pp_team_squads'));
     teamSquads = {};
     snap.forEach(d => { teamSquads[d.id] = d.data(); });
     try { localStorage.setItem('pp_team_squads_cache', JSON.stringify(teamSquads)); } catch(e){}
+    _markFetched('pp_team_squads');
     return true;
   } catch(e){ return false; }
 }
@@ -1500,6 +1613,30 @@ async function _saveDream11TeamToFirestore(teamId, data) {
   } catch(e) {
     console.error('Dream11 team save error:', e.code || e.message, e);
     throw e;
+  }
+}
+// Force an immediate refresh of the collections a Dream11 match screen
+// cares about, on demand — so users don't have to wait up to
+// D11_POLL_INTERVAL_MS after their own action (submitting a team, joining
+// a contest) to see it reflected. Cheap: just a few one-time getDocs()
+// calls, not a new recurring listener.
+async function d11ManualRefresh(evt) {
+  const btn = (evt || window.event)?.currentTarget;
+  if (btn) { btn.disabled = true; btn.textContent = '🔄 Refreshing…'; }
+  try {
+    await Promise.all([
+      _manualRefreshCollection('pp_dream11_matches'),
+      _manualRefreshCollection('pp_dream11_teams'),
+      _manualRefreshCollection('pp_dream11_h2h'),
+      _manualRefreshCollection('pp_dream11_custom_contests'),
+    ]);
+    showNotif('✅ Refreshed');
+    render();
+  } catch(e) {
+    console.error(e);
+    showNotif('Refresh failed — try again', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🔄 Refresh'; }
   }
 }
 async function _loadAllDream11TeamsFromFirestore() {
@@ -1531,12 +1668,20 @@ async function _saveD11TournamentToFirestore(tId, data) {
 }
 async function _loadAllD11TournamentsFromFirestore() {
   if (!window._fbDb || !window._fbFns) return false;
+  const sinceLastFetch = Date.now() - _lastFetchTs('pp_dream11_tournaments');
+  if (sinceLastFetch < D11_FETCH_THROTTLE_MS) {
+    try {
+      const raw = localStorage.getItem('pp_dream11_tournaments_cache');
+      if (raw) { d11Tournaments = JSON.parse(raw); return true; }
+    } catch(e){}
+  }
   const { collection, getDocs } = window._fbFns;
   try {
     const snap = await getDocs(collection(window._fbDb, 'pp_dream11_tournaments'));
     d11Tournaments = {};
     snap.forEach(d => { d11Tournaments[d.id] = d.data(); });
     try { localStorage.setItem('pp_dream11_tournaments_cache', JSON.stringify(d11Tournaments)); } catch(e){}
+    _markFetched('pp_dream11_tournaments');
     return true;
   } catch(e){ return false; }
 }
@@ -1554,6 +1699,13 @@ async function _deleteUtTournamentFromFirestore(tId) {
 }
 async function _loadAllUtTournamentsFromFirestore() {
   if (!window._fbDb || !window._fbFns) return false;
+  const sinceLastFetch = Date.now() - _lastFetchTs('pp_ut_tournaments');
+  if (sinceLastFetch < D11_FETCH_THROTTLE_MS) {
+    try {
+      const raw = localStorage.getItem('pp_ut_tournaments_cache');
+      if (raw) { utTournaments = JSON.parse(raw); return true; }
+    } catch(e){}
+  }
   const { collection, getDocs } = window._fbFns;
   try {
     const snap = await getDocs(collection(window._fbDb, 'pp_ut_tournaments'));
@@ -1572,6 +1724,7 @@ async function _loadAllUtTournamentsFromFirestore() {
       utTournaments[d.id] = tData;
     });
     try { localStorage.setItem('pp_ut_tournaments_cache', JSON.stringify(utTournaments)); } catch(e){}
+    _markFetched('pp_ut_tournaments');
     return true;
   } catch(e){ return false; }
 }
@@ -1583,12 +1736,20 @@ async function _saveUtTeamToFirestore(teamId, data) {
 }
 async function _loadAllUtTeamsFromFirestore() {
   if (!window._fbDb || !window._fbFns) return false;
+  const sinceLastFetch = Date.now() - _lastFetchTs('pp_ut_teams');
+  if (sinceLastFetch < D11_FETCH_THROTTLE_MS) {
+    try {
+      const raw = localStorage.getItem('pp_ut_teams_cache');
+      if (raw) { utTeams = JSON.parse(raw); return true; }
+    } catch(e){}
+  }
   const { collection, getDocs } = window._fbFns;
   try {
     const snap = await getDocs(collection(window._fbDb, 'pp_ut_teams'));
     utTeams = {};
     snap.forEach(d => { utTeams[d.id] = d.data(); });
     try { localStorage.setItem('pp_ut_teams_cache', JSON.stringify(utTeams)); } catch(e){}
+    _markFetched('pp_ut_teams');
     return true;
   } catch(e){ return false; }
 }
@@ -1844,7 +2005,7 @@ async function handleRefreshApp() {
   }
   try {
     await Promise.all([
-      typeof _loadAllUsersFromFirestore === 'function' ? _loadAllUsersFromFirestore() : Promise.resolve(),
+      typeof _loadAllUsersFromFirestore === 'function' ? _loadAllUsersFromFirestore(true) : Promise.resolve(),
       typeof _loadAllMatchesFromFirestore === 'function' ? _loadAllMatchesFromFirestore() : Promise.resolve(),
       typeof _loadAllDream11MatchesFromFirestore === 'function' ? _loadAllDream11MatchesFromFirestore() : Promise.resolve(),
       typeof _loadAllDream11TeamsFromFirestore === 'function' ? _loadAllDream11TeamsFromFirestore() : Promise.resolve(),
@@ -12707,7 +12868,10 @@ function renderD11JoinContest() {
 
   return `
   <div style="padding-bottom:70px">
-  <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="goDream11Hub()">← Back to Dream11</button>
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:14px">
+    <button class="btn-secondary" style="font-size:12px;padding:8px 14px;margin-bottom:0" onclick="goDream11Hub()">← Back to Dream11</button>
+    <button class="btn-secondary" style="font-size:12px;padding:8px 14px;margin-bottom:0" onclick="d11ManualRefresh(event)">🔄 Refresh</button>
+  </div>
 
   <!-- Dark match-info header bar -->
   <div class="card mb0" style="background:linear-gradient(135deg,#161b2e,#1e2542);border-color:rgba(255,255,255,0.08);padding:16px 14px;border-radius:14px 14px 0 0">
@@ -20563,8 +20727,30 @@ async function initApp() {
     return; // App already rendered from cache above — user can still use it
   }
 
-  // Step 3: Sync from Firestore silently
-  // Only load if user is authenticated — rules require request.auth != null
+  // Step 3: Sync from Firestore — but NOT unconditionally on every app
+  // open/close/reopen. Closing and reopening the app should cost ~0 reads
+  // when the cache is still fresh; the cache from Step 1 (loadLocalCache)
+  // is already on screen. Every loader below already has its own
+  // throttle built in (see D11_FETCH_THROTTLE_MS / _lastFetchTs) — if a
+  // collection was genuinely fetched within the last hour, calling its
+  // loader again reuses the cached copy for free instead of hitting
+  // Firestore. We still always CALL the loaders (rather than skipping the
+  // whole block) so each collection's poll loop gets registered — that's
+  // what keeps the app syncing in the background if the session stays
+  // open a while, and what makes the manual "🔄 Refresh" button work.
+  //
+  // IMPORTANT — what this sync is actually for: it's NOT how the user's
+  // own actions get saved. Submitting a team, joining a contest, deposit/
+  // withdraw etc. each write straight to Firestore the moment they happen
+  // (see d11SubmitTeam, _atomicJoinPaidContest, submitDeposit, etc.) —
+  // completely independent of this block, and never delayed or skipped.
+  // This sync is ONLY for seeing OTHER people's changes (someone else's
+  // team on the leaderboard, admin's scoring update, a new match posted).
+  // That's exactly why it's safe to throttle heavily: the user's own data
+  // is always current in Firestore the instant they act, and everyone
+  // else's changes just take up to an hour (or one manual 🔄 Refresh tap)
+  // to show up — not lost, not delayed forever, just not fetched on a
+  // strict "every app open" schedule anymore.
   const authOk = !!(window._fbAuthCurrentUser && window._fbAuthCurrentUser());
   if (!authOk) {
     console.warn('[initApp] No Firebase Auth session — skipping Firestore sync to avoid PERMISSION_DENIED');
@@ -20628,15 +20814,12 @@ if ('serviceWorker' in navigator) {
 }
 
 (function startBackgroundRefresh(){
-  // NOTE: this used to poll 7 full collections via getDocs() every 3 min,
-  // per open tab. With hundreds of users that alone can exceed the
-  // Firestore free-tier daily read quota (50K reads/day). Those 7
-  // collections (_loadAllMatchesFromFirestore etc.) are now backed by
-  // onSnapshot live listeners (see _liveLoadCollection near line ~1286),
-  // so they already stay in sync in real time without polling — this
-  // loop just needs to periodically re-run the two lightweight
-  // "auto-check" tasks that aren't tied to a collection listener, and
-  // do a light re-render/currentUser refresh as a safety net.
+  // NOTE: the 7 core collections (_loadAllMatchesFromFirestore etc.) are
+  // now kept in sync by their own bounded poll loop — see
+  // _liveLoadCollection / D11_POLL_INTERVAL_MS near line ~1340. This
+  // separate 20-min loop just needs to periodically re-run the two
+  // lightweight "auto-check" tasks that aren't tied to a collection poll,
+  // and do a light re-render/currentUser refresh as a safety net.
   setInterval(function(){
     if(!currentUser||!window._fbAuthCurrentUser||!window._fbAuthCurrentUser())return;
     if(document.hidden)return;
@@ -20746,7 +20929,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.21.0";
+const APP_VERSION = "3.26.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
