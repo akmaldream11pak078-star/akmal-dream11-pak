@@ -1282,7 +1282,7 @@ async function _saveMatchToFirestore(matchId, matchData) {
   if (!window._fbDb || !window._fbFns) return;
   const { doc, setDoc } = window._fbFns;
   // Fire and forget - don't block UI
-  setDoc(doc(window._fbDb, 'pp_matches', matchId), matchData)
+  setDoc(doc(window._fbDb, 'pp_matches', matchId), _stampUpdatedAt(matchData))
     .catch(e => console.error('Firestore match save error:', e));
 }
 async function _deleteMatchFromFirestore(matchId) {
@@ -1472,22 +1472,57 @@ function _loadFromCacheOnly(collectionName, targetSetter, cacheKey) {
   return false;
 }
 
+// ── Incremental refresh support ─────────────────────────────────────────
+// Stamps every saved document with updatedAt: Date.now() so a later
+// refresh can ask Firestore "only give me docs changed after time X"
+// instead of re-reading the whole collection. Called from every
+// _save*ToFirestore() function right before writing.
+function _stampUpdatedAt(data) {
+  return { ...data, updatedAt: Date.now() };
+}
+// Tracks, per collection, the timestamp of the most recent document this
+// device has actually seen (the highest updatedAt across all docs it has
+// — NOT "when did I last check", but "what's the newest data I have").
+// A manual refresh queries for anything newer than this value; if nothing
+// comes back, nothing changed since last time and the read cost is
+// minimal (an empty result set, not the whole collection).
+function _getLastSyncedDataTs(collectionName) {
+  try { return parseInt(localStorage.getItem('pp_lastsynced_' + collectionName) || '0', 10) || 0; } catch(e) { return 0; }
+}
+function _setLastSyncedDataTs(collectionName, ts) {
+  try { localStorage.setItem('pp_lastsynced_' + collectionName, String(ts)); } catch(e) {}
+}
+// Recompute the "newest updatedAt seen" from a full object of documents —
+// used right after any fetch (full or incremental) to keep the watermark
+// accurate for next time.
+function _updateSyncWatermark(collectionName, obj) {
+  let maxTs = _getLastSyncedDataTs(collectionName);
+  Object.values(obj).forEach(doc => {
+    if (doc && typeof doc.updatedAt === 'number' && doc.updatedAt > maxTs) maxTs = doc.updatedAt;
+  });
+  _setLastSyncedDataTs(collectionName, maxTs);
+}
+
 function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKey, opts, bypassThrottle) {
   opts = opts || {};
   _installVisibilityGuard();
   _liveCollectionSpecs[collectionName] = { targetSetter, cacheKey, opts };
   return new Promise((resolve) => {
     if (!window._fbDb || !window._fbFns || !window._fbFns.onSnapshot) { resolve(false); return; }
-    if (_liveCollections[collectionName]) {
-      // Listener already running — resolve immediately with current data.
-      resolve(true);
-      return;
-    }
     const isAdminUser = typeof isAdmin === 'function' && isAdmin();
 
+    // IMPORTANT: this check must come BEFORE the "listener already running"
+    // early-return below. A listener registered once at login stays
+    // "running" for the rest of the session — if the early-return fired
+    // first, every subsequent manual 🔄 Refresh tap would just resolve
+    // instantly with whatever the listener already had cached, and never
+    // actually force a fresh read. That's exactly why Refresh silently did
+    // nothing: forceRefresh=true was being passed in correctly, but this
+    // function never got far enough to use it.
     if (bypassThrottle && !isAdminUser) {
       // Manual 🔄 tap: only apply its own cooldown (spam-tap protection),
-      // never the "cache forever" rule above.
+      // never the "cache forever" rule below. Force a brand new snapshot
+      // read regardless of whether a listener is already attached.
       const lastManual = _getLastManualRefreshAt(collectionName);
       const elapsed = Date.now() - lastManual;
       if (lastManual && elapsed < _MANUAL_REFRESH_COOLDOWN_MS) {
@@ -1499,6 +1534,58 @@ function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKe
         return;
       }
       _setLastManualRefreshAt(collectionName, Date.now());
+      // Tear down any existing listener for this collection so the fetch
+      // below always attaches a fresh onSnapshot and actually resolves
+      // with newly-read data instead of being skipped as "already running".
+      if (_liveCollections[collectionName]) {
+        try { _liveCollections[collectionName](); } catch(e){}
+        delete _liveCollections[collectionName];
+      }
+      // ── Incremental refresh ──
+      // Instead of always re-reading the whole collection, ask Firestore
+      // for only the docs whose updatedAt is newer than the newest one
+      // this device has already seen (_getLastSyncedDataTs). Three cases:
+      //   1. Nothing changed → query returns empty → minimal read cost,
+      //      cached data is confirmed already up to date.
+      //   2. A few docs changed → only those come back → merged into the
+      //      existing cache in place, rest of the collection untouched.
+      //   3. No watermark yet (first time this runs on this device, or
+      //      older docs predate the updatedAt field) → falls through to
+      //      the normal full fetch below, which also backfills the
+      //      watermark for next time.
+      const watermark = _getLastSyncedDataTs(collectionName);
+      if (watermark > 0 && window._fbFns.query && window._fbFns.where && window._fbFns.getDocs) {
+        (async () => {
+          try {
+            const { collection, query, where, getDocs } = window._fbFns;
+            const incQuery = query(collection(window._fbDb, collectionName), where('updatedAt', '>', watermark));
+            const snap = await getDocs(incQuery);
+            let existing = {};
+            try { existing = JSON.parse(localStorage.getItem(cacheKey) || '{}'); } catch(e){}
+            let changedCount = 0;
+            snap.forEach(d => { existing[d.id] = d.data(); changedCount++; });
+            targetSetter(existing);
+            try { localStorage.setItem(cacheKey, JSON.stringify(existing)); } catch(e){}
+            _updateSyncWatermark(collectionName, existing);
+            if (opts.onUpdate) { try { opts.onUpdate(existing); } catch(e){} }
+            console.log(`[incremental] ${collectionName}: ${changedCount} doc(s) changed since last refresh`);
+            resolve(true);
+          } catch(e) {
+            console.error('Incremental refresh failed for ' + collectionName + ', falling back to full fetch:', e);
+            _fullFetchForManualRefresh();
+          }
+        })();
+        return;
+      }
+      // No watermark yet — do the one full fetch, which also establishes
+      // the watermark so future taps can go incremental.
+      _fullFetchForManualRefresh();
+      return;
+    } else if (_liveCollections[collectionName]) {
+      // Not a forced refresh, and a listener is already running for this
+      // collection — resolve immediately with current data, no extra read.
+      resolve(true);
+      return;
     } else if (!bypassThrottle && !isAdminUser) {
       // Automatic load (app open/refresh/re-login) — cache-only, forever,
       // until the cache itself is empty. Never auto-hits Firestore.
@@ -1507,6 +1594,7 @@ function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKe
       // No cache at all (first-ever load on this device) — fall through
       // and do the one real Firestore read needed to populate it.
     }
+    function _fullFetchForManualRefresh() {
     const { collection, onSnapshot } = window._fbFns;
     let firstSnapshot = true;
     // Completed/finalized docs never change again, so refreshing them on
@@ -1519,7 +1607,18 @@ function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKe
     // 'completed' for contest docs) and merge in the already-cached
     // finished ones untouched, instead of re-reading everything.
     const skipDoneValue = opts.skipDoneValue !== undefined ? opts.skipDoneValue : true;
-    const useDoneFilter = !isAdminUser && opts.skipDoneField && window._fbFns.query && window._fbFns.where;
+    // Manual 🔄 Refresh always wants the COMPLETE collection, not just the
+    // "in progress" slice — its whole point is "get me everything, right
+    // now", including completed/scored matches that may have never made it
+    // into the cache (new device, cleared cache, or a match that finished
+    // before this device ever loaded it — none of those get backfilled by
+    // the filtered query below, since it explicitly excludes "done" docs
+    // and the cache-merge step has nothing to merge from). The done-field
+    // filter is only worth applying for automatic/background loads, where
+    // avoiding the extra reads matters more than having 100% of history
+    // immediately — and those already fall back to fetching everything
+    // the first time a device has no cache at all anyway.
+    const useDoneFilter = !isAdminUser && !bypassThrottle && opts.skipDoneField && window._fbFns.query && window._fbFns.where;
     let queryTarget = collection(window._fbDb, collectionName);
     if (useDoneFilter) {
       const { query, where } = window._fbFns;
@@ -1542,6 +1641,7 @@ function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKe
         snap.forEach(d => { obj[d.id] = d.data(); });
         targetSetter(obj);
         try { localStorage.setItem(cacheKey, JSON.stringify(obj)); } catch(e){}
+        _updateSyncWatermark(collectionName, obj);
         if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
         if (firstSnapshot) { firstSnapshot = false; resolve(true); }
         else if (opts.rerenderOnUpdate) { try { render(); } catch(e){} }
@@ -1554,6 +1654,8 @@ function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKe
       console.error('Failed to start live-sync for ' + collectionName, e);
       resolve(false);
     }
+    }
+    _fullFetchForManualRefresh();
   });
 }
 
@@ -1563,7 +1665,7 @@ async function _loadAllMatchesFromFirestore(forceRefresh) {
 async function _saveH2HToFirestore(h2hId, data) {
   if (!window._fbDb || !window._fbFns) return;
   const { doc, setDoc } = window._fbFns;
-  setDoc(doc(window._fbDb, 'pp_h2h', h2hId), data)
+  setDoc(doc(window._fbDb, 'pp_h2h', h2hId), _stampUpdatedAt(data))
     .catch(e => console.error('H2H save error:', e));
 }
 async function _loadAllH2HFromFirestore(forceRefresh) {
@@ -1572,7 +1674,7 @@ async function _loadAllH2HFromFirestore(forceRefresh) {
 async function _saveCustomContestToFirestore(ccId, data) {
   if (!window._fbDb || !window._fbFns) return;
   const { doc, setDoc } = window._fbFns;
-  setDoc(doc(window._fbDb, 'pp_custom_contests', ccId), data)
+  setDoc(doc(window._fbDb, 'pp_custom_contests', ccId), _stampUpdatedAt(data))
     .catch(e => console.error('Custom contest save error:', e));
 }
 async function _loadAllCustomContestsFromFirestore(forceRefresh) {
@@ -1581,7 +1683,7 @@ async function _loadAllCustomContestsFromFirestore(forceRefresh) {
 async function _saveDream11MatchToFirestore(matchId, data) {
   if (!window._fbDb || !window._fbFns) return;
   const { doc, setDoc } = window._fbFns;
-  setDoc(doc(window._fbDb, 'pp_dream11_matches', matchId), data)
+  setDoc(doc(window._fbDb, 'pp_dream11_matches', matchId), _stampUpdatedAt(data))
     .catch(e => console.error('Dream11 match save error:', e));
 }
 async function _loadAllDream11MatchesFromFirestore(forceRefresh) {
@@ -1616,7 +1718,7 @@ async function _saveDream11TeamToFirestore(teamId, data) {
   }
   const { doc, setDoc } = window._fbFns;
   try {
-    await setDoc(doc(window._fbDb, 'pp_dream11_teams', teamId), data);
+    await setDoc(doc(window._fbDb, 'pp_dream11_teams', teamId), _stampUpdatedAt(data));
   } catch(e) {
     console.error('Dream11 team save error:', e.code || e.message, e);
     throw e;
@@ -1628,7 +1730,7 @@ async function _loadAllDream11TeamsFromFirestore(forceRefresh) {
 async function _saveD11H2HToFirestore(h2hId, data) {
   if (!window._fbDb || !window._fbFns) return;
   const { doc, setDoc } = window._fbFns;
-  setDoc(doc(window._fbDb, 'pp_dream11_h2h', h2hId), data)
+  setDoc(doc(window._fbDb, 'pp_dream11_h2h', h2hId), _stampUpdatedAt(data))
     .catch(e => console.error('Dream11 H2H save error:', e));
 }
 async function _loadAllD11H2HFromFirestore(forceRefresh) {
@@ -1637,12 +1739,39 @@ async function _loadAllD11H2HFromFirestore(forceRefresh) {
 async function _saveD11CustomContestToFirestore(ccId, data) {
   if (!window._fbDb || !window._fbFns) return;
   const { doc, setDoc } = window._fbFns;
-  setDoc(doc(window._fbDb, 'pp_dream11_custom_contests', ccId), data)
+  setDoc(doc(window._fbDb, 'pp_dream11_custom_contests', ccId), _stampUpdatedAt(data))
     .catch(e => console.error('Dream11 custom contest save error:', e));
 }
 async function _loadAllD11CustomContestsFromFirestore(forceRefresh) {
   return _liveLoadCollection('pp_dream11_custom_contests', () => d11CustomContests, (v) => { d11CustomContests = v; }, 'pp_dream11_custom_contests_cache', { rerenderOnUpdate: true, skipDoneField: 'status', skipDoneValue: 'completed' }, forceRefresh);
 }
+
+// ── Manual "🔄 Refresh" button on the Dream11 match screen ──
+// Forces a real Firestore read of the collections that screen cares about
+// (match scoring, teams/leaderboard, H2H, custom contests) — bypassing the
+// normal "cache forever until poll/login" rule via forceRefresh=true. Has
+// its own 10-min per-collection cooldown (_MANUAL_REFRESH_COOLDOWN_MS) so
+// rapid repeated taps can't be used to spam Firestore reads.
+async function d11ManualRefresh(evt) {
+  const btn = (evt || window.event)?.currentTarget;
+  if (btn) { btn.disabled = true; btn.textContent = '🔄 Refreshing…'; }
+  try {
+    await Promise.all([
+      _loadAllDream11MatchesFromFirestore(true),
+      _loadAllDream11TeamsFromFirestore(true),
+      _loadAllD11H2HFromFirestore(true),
+      _loadAllD11CustomContestsFromFirestore(true),
+    ]);
+    showNotif('✅ Refreshed');
+    render();
+  } catch(e) {
+    console.error(e);
+    showNotif('Refresh failed — try again', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🔄 Refresh'; }
+  }
+}
+
 async function _saveD11TournamentToFirestore(tId, data) {
   if (!window._fbDb || !window._fbFns) return;
   const { doc, setDoc } = window._fbFns;
@@ -13010,7 +13139,10 @@ function renderD11JoinContest() {
 
   return `
   <div style="padding-bottom:70px">
-  <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="goDream11Hub()">← Back to Dream11</button>
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:14px">
+    <button class="btn-secondary" style="font-size:12px;padding:8px 14px;margin-bottom:0" onclick="goDream11Hub()">← Back to Dream11</button>
+    <button class="btn-secondary" style="font-size:12px;padding:8px 14px;margin-bottom:0" onclick="d11ManualRefresh(event)">🔄 Refresh</button>
+  </div>
 
   <!-- Dark match-info header bar -->
   <div class="card mb0" style="background:linear-gradient(135deg,#161b2e,#1e2542);border-color:rgba(255,255,255,0.08);padding:16px 14px;border-radius:14px 14px 0 0">
@@ -21049,7 +21181,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.37.0";
+const APP_VERSION = "3.40.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
