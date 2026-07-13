@@ -545,6 +545,69 @@
 @keyframes spRingPulse{0%{transform:scale(0.6);opacity:1;}100%{transform:scale(1.3);opacity:0;}}
 .sp-welcome-text{position:relative;z-index:2;font-family:Rajdhani,sans-serif;font-size:22px;font-weight:800;color:#fff;text-align:center;letter-spacing:1px;text-shadow:0 0 20px rgba(251,191,36,0.9),0 0 40px rgba(34,197,94,0.6);animation:spWelcomeIn 0.8s cubic-bezier(0.34,1.56,0.64,1) 0.5s both;}
 @keyframes spWelcomeIn{from{transform:scale(0.5);opacity:0;}to{transform:scale(1);opacity:1;}}
+
+/* ══════════════════════════════════════════════════════════════
+   INSTANT11-STYLE THEME — scoped ONLY to the Home screen and the
+   Dream11 match-contest (join contest) screen, per request. Rest of
+   the app keeps its existing navy/blue theme untouched. Functionality
+   underneath is 100% unchanged — these are purely visual/layout classes
+   used by renderHome() and renderD11JoinContest().
+   ══════════════════════════════════════════════════════════════ */
+.i11-section{margin-bottom:18px;}
+.i11-section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
+.i11-section-title{font-size:15px;font-weight:800;color:var(--text);}
+.i11-section-link{font-size:12px;font-weight:700;color:#dc2626;}
+.i11-match-banner{border-radius:14px;overflow:hidden;background:#fff;border:1px solid rgba(15,23,42,0.08);box-shadow:0 2px 10px rgba(0,0,0,0.06);margin-bottom:14px;}
+html[data-theme="dark"] .i11-match-banner{background:#161b2e;border-color:rgba(255,255,255,0.08);}
+.i11-match-banner-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:linear-gradient(115deg,#dc2626 46%,#111827 46%);}
+.i11-match-banner-title{display:flex;align-items:center;gap:8px;color:#fff;font-weight:800;font-size:14px;}
+.i11-match-banner-body{padding:12px 14px;}
+.i11-team-row{display:flex;align-items:center;gap:12px;background:rgba(220,38,38,0.06);border-radius:10px;padding:10px 12px;margin-bottom:8px;}
+html[data-theme="dark"] .i11-team-row{background:rgba(220,38,38,0.12);}
+.i11-team-row:last-child{margin-bottom:0;}
+.i11-team-flag{font-size:24px;line-height:1;width:30px;text-align:center;}
+.i11-team-name{font-weight:800;font-size:14.5px;color:var(--text);flex:1;}
+.i11-team-code{font-weight:800;font-size:13px;color:var(--text);width:34px;}
+.i11-countdown-badge{font-size:11px;font-weight:700;color:#dc2626;}
+.i11-status-pill{font-size:10.5px;font-weight:800;padding:4px 10px;border-radius:8px;background:#dc2626;color:#fff;}
+.i11-status-pill.live{background:#16a34a;}
+.i11-status-pill.finished{background:#64748b;}
+.i11-fair-play{display:flex;align-items:center;gap:6px;font-size:11px;color:#16a34a;font-weight:700;padding:10px 14px;border-top:1px solid rgba(15,23,42,0.06);}
+html[data-theme="dark"] .i11-fair-play{border-top-color:rgba(255,255,255,0.06);}
+.i11-jersey-icon{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;background:rgba(220,38,38,0.1);flex-shrink:0;}
+
+/* Contest-join screen: orange gradient header, Instant11-style */
+.i11-contest-hero{background:linear-gradient(135deg,#f97316,#dc2626);border-radius:0 0 18px 18px;padding:14px 14px 18px;margin:-18px -16px 16px;}
+.i11-contest-hero-top{display:flex;align-items:center;justify-content:space-between;}
+.i11-contest-hero-back{width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,0.18);display:flex;align-items:center;justify-content:center;color:#fff;font-size:16px;border:none;cursor:pointer;flex-shrink:0;}
+.i11-contest-hero-title{text-align:center;color:#fff;font-weight:800;font-size:15px;flex:1;}
+.i11-contest-hero-sub{text-align:center;color:rgba(255,255,255,0.85);font-size:11.5px;margin-top:2px;}
+.i11-contest-hero-teams{display:flex;align-items:center;justify-content:space-between;background:rgba(0,0,0,0.15);border-radius:12px;padding:14px 16px;margin-top:14px;}
+.i11-contest-hero-team{color:#fff;font-weight:800;font-size:13.5px;}
+.i11-contest-hero-vs{width:30px;height:30px;border-radius:50%;background:rgba(0,0,0,0.25);color:#fff;font-weight:800;font-size:11px;display:flex;align-items:center;justify-content:center;}
+.i11-contest-hero-timer{display:flex;justify-content:center;margin-top:12px;}
+.i11-contest-hero-timer span{background:rgba(0,0,0,0.2);color:#fde68a;font-weight:700;font-size:12px;padding:6px 14px;border-radius:20px;}
+.i11-contest-tabs{display:flex;background:rgba(15,23,42,0.04);border-radius:12px;padding:4px;margin-bottom:14px;}
+html[data-theme="dark"] .i11-contest-tabs{background:rgba(255,255,255,0.06);}
+.i11-contest-tab{flex:1;text-align:center;padding:10px 6px;font-size:12.5px;font-weight:700;border:none;background:transparent;border-radius:9px;cursor:pointer;color:var(--dim);}
+.i11-contest-tab.active{background:#dc2626;color:#fff;}
+.i11-prize-card{border-radius:14px;background:#fff;border:1px solid rgba(15,23,42,0.08);box-shadow:0 2px 10px rgba(0,0,0,0.05);padding:14px;margin-bottom:14px;}
+html[data-theme="dark"] .i11-prize-card{background:#161b2e;border-color:rgba(255,255,255,0.08);}
+.i11-prize-card-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;}
+.i11-prize-label{font-size:11px;color:var(--dim);font-weight:600;}
+.i11-prize-value{font-size:22px;font-weight:900;color:var(--text);margin-top:2px;}
+.i11-prize-joinbtn{background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;font-weight:800;font-size:13px;padding:10px 20px;border-radius:10px;border:none;cursor:pointer;white-space:nowrap;}
+.i11-prize-joinbtn:disabled{opacity:0.6;cursor:default;}
+.i11-prize-joinbtn.joined{background:linear-gradient(135deg,#94a3b8,#64748b);}
+.i11-prize-bar-track{height:6px;border-radius:4px;background:rgba(15,23,42,0.08);overflow:hidden;margin-bottom:6px;}
+html[data-theme="dark"] .i11-prize-bar-track{background:rgba(255,255,255,0.08);}
+.i11-prize-bar-fill{height:100%;background:linear-gradient(90deg,#f87171,#dc2626);border-radius:4px;}
+.i11-prize-spots-row{display:flex;justify-content:space-between;font-size:11px;color:#dc2626;font-weight:700;margin-bottom:10px;}
+.i11-prize-spots-row span:last-child{color:var(--dim);font-weight:600;}
+.i11-prize-meta-row{display:flex;align-items:center;gap:14px;padding-top:10px;border-top:1px solid rgba(15,23,42,0.06);font-size:11px;color:var(--dim);flex-wrap:wrap;}
+html[data-theme="dark"] .i11-prize-meta-row{border-top-color:rgba(255,255,255,0.08);}
+.i11-prize-meta-row .i11-flex{display:flex;align-items:center;gap:4px;}
+.i11-prize-meta-flexible{margin-left:auto;color:#16a34a;font-weight:800;display:flex;align-items:center;gap:4px;}
 </style>
 </head>
 <body>
@@ -1209,8 +1272,21 @@ async function _saveUserToFirestore(email, userData) {
   await setDoc(doc(window._fbDb, 'pp_users', safeKey), userData)
     .catch(e => console.error('Firestore user save error:', e));
 }
-async function _loadAllUsersFromFirestore() {
+async function _loadAllUsersFromFirestore(forceRefresh) {
   if (!window._fbDb || !window._fbFns) return false;
+  const isAdminUser = typeof isAdmin === 'function' && isAdmin();
+  // Same cache-first rule as _liveLoadCollection: a regular app open/login
+  // should NOT re-read the whole (continuously growing, as new users sign
+  // up) pp_users collection every single time. Use the cache if we have
+  // one, unless this is a forced manual refresh or the cache is empty.
+  if (!forceRefresh && !isAdminUser) {
+    try {
+      const cached = localStorage.getItem('pp_users_cache');
+      if (cached) { Object.assign(users, JSON.parse(cached)); return true; }
+    } catch(e){}
+    // No cache at all — fall through to the one real fetch needed to
+    // populate it for next time.
+  }
   const { collection, getDocs } = window._fbFns;
   try {
     const snap = await getDocs(collection(window._fbDb, 'pp_users'));
@@ -1541,6 +1617,26 @@ function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKe
         try { _liveCollections[collectionName](); } catch(e){}
         delete _liveCollections[collectionName];
       }
+      // ── One-time full backfill (per device, per collection) ──
+      // The background live-listener deliberately excludes "done" docs
+      // (opts.skipDoneField, e.g. scored=true matches) to save reads — see
+      // useDoneFilter below. That means a device that's never done a full
+      // fetch has NO completed/scored docs in its cache at all, and the
+      // incremental watermark-query further down only asks for docs
+      // changed since last sync — it can never backfill something that was
+      // never there to begin with (a finished match's updatedAt predates
+      // any watermark this device could have). So: the very first manual
+      // refresh on a device does one full, unfiltered fetch (this also
+      // establishes the watermark). Every refresh after that goes back to
+      // the lightweight incremental path — full-collection reads only ever
+      // happen once per device per collection, not on every tap.
+      const backfillFlagKey = '_fullBackfillDone_' + collectionName;
+      const alreadyBackfilled = localStorage.getItem(backfillFlagKey) === '1';
+      if (!alreadyBackfilled) {
+        try { localStorage.setItem(backfillFlagKey, '1'); } catch(e){}
+        _fullFetchForManualRefresh();
+        return;
+      }
       // ── Incremental refresh ──
       // Instead of always re-reading the whole collection, ask Firestore
       // for only the docs whose updatedAt is newer than the newest one
@@ -1701,8 +1797,15 @@ async function _saveTeamSquadToFirestore(teamKey, data) {
     showNotif('Save error: ' + (e.message || 'Failed to save to Firestore'), 'error');
   }
 }
-async function _loadAllTeamSquadsFromFirestore() {
+async function _loadAllTeamSquadsFromFirestore(forceRefresh) {
   if (!window._fbDb || !window._fbFns) return false;
+  const isAdminUser = typeof isAdmin === 'function' && isAdmin();
+  if (!forceRefresh && !isAdminUser) {
+    try {
+      const cached = localStorage.getItem('pp_team_squads_cache');
+      if (cached) { teamSquads = JSON.parse(cached); return true; }
+    } catch(e){}
+  }
   const { collection, getDocs } = window._fbFns;
   try {
     const snap = await getDocs(collection(window._fbDb, 'pp_team_squads'));
@@ -1778,8 +1881,15 @@ async function _saveD11TournamentToFirestore(tId, data) {
   setDoc(doc(window._fbDb, 'pp_dream11_tournaments', tId), data)
     .catch(e => console.error('Dream11 tournament save error:', e));
 }
-async function _loadAllD11TournamentsFromFirestore() {
+async function _loadAllD11TournamentsFromFirestore(forceRefresh) {
   if (!window._fbDb || !window._fbFns) return false;
+  const isAdminUser = typeof isAdmin === 'function' && isAdmin();
+  if (!forceRefresh && !isAdminUser) {
+    try {
+      const cached = localStorage.getItem('pp_dream11_tournaments_cache');
+      if (cached) { d11Tournaments = JSON.parse(cached); return true; }
+    } catch(e){}
+  }
   const { collection, getDocs } = window._fbFns;
   try {
     const snap = await getDocs(collection(window._fbDb, 'pp_dream11_tournaments'));
@@ -1801,8 +1911,15 @@ async function _deleteUtTournamentFromFirestore(tId) {
   const { doc, deleteDoc } = window._fbFns;
   try { await deleteDoc(doc(window._fbDb, 'pp_ut_tournaments', tId)); } catch(e){}
 }
-async function _loadAllUtTournamentsFromFirestore() {
+async function _loadAllUtTournamentsFromFirestore(forceRefresh) {
   if (!window._fbDb || !window._fbFns) return false;
+  const isAdminUser = typeof isAdmin === 'function' && isAdmin();
+  if (!forceRefresh && !isAdminUser) {
+    try {
+      const cached = localStorage.getItem('pp_ut_tournaments_cache');
+      if (cached) { utTournaments = JSON.parse(cached); return true; }
+    } catch(e){}
+  }
   const { collection, getDocs } = window._fbFns;
   try {
     const snap = await getDocs(collection(window._fbDb, 'pp_ut_tournaments'));
@@ -1830,8 +1947,15 @@ async function _saveUtTeamToFirestore(teamId, data) {
   setDoc(doc(window._fbDb, 'pp_ut_teams', teamId), data)
     .catch(e => console.error('UT team save error:', e));
 }
-async function _loadAllUtTeamsFromFirestore() {
+async function _loadAllUtTeamsFromFirestore(forceRefresh) {
   if (!window._fbDb || !window._fbFns) return false;
+  const isAdminUser = typeof isAdmin === 'function' && isAdmin();
+  if (!forceRefresh && !isAdminUser) {
+    try {
+      const cached = localStorage.getItem('pp_ut_teams_cache');
+      if (cached) { utTeams = JSON.parse(cached); return true; }
+    } catch(e){}
+  }
   const { collection, getDocs } = window._fbFns;
   try {
     const snap = await getDocs(collection(window._fbDb, 'pp_ut_teams'));
@@ -2093,18 +2217,18 @@ async function handleRefreshApp() {
   }
   try {
     await Promise.all([
-      typeof _loadAllUsersFromFirestore === 'function' ? _loadAllUsersFromFirestore() : Promise.resolve(),
+      typeof _loadAllUsersFromFirestore === 'function' ? _loadAllUsersFromFirestore(true) : Promise.resolve(),
       typeof _loadAllMatchesFromFirestore === 'function' ? _loadAllMatchesFromFirestore(true) : Promise.resolve(),
       typeof _loadAllDream11MatchesFromFirestore === 'function' ? _loadAllDream11MatchesFromFirestore(true) : Promise.resolve(),
       typeof _loadAllDream11TeamsFromFirestore === 'function' ? _loadAllDream11TeamsFromFirestore(true) : Promise.resolve(),
-      typeof _loadAllTeamSquadsFromFirestore === 'function' ? _loadAllTeamSquadsFromFirestore() : Promise.resolve(),
+      typeof _loadAllTeamSquadsFromFirestore === 'function' ? _loadAllTeamSquadsFromFirestore(true) : Promise.resolve(),
       typeof _loadAllH2HFromFirestore === 'function' ? _loadAllH2HFromFirestore(true) : Promise.resolve(),
       typeof _loadAllD11H2HFromFirestore === 'function' ? _loadAllD11H2HFromFirestore(true) : Promise.resolve(),
       typeof _loadAllCustomContestsFromFirestore === 'function' ? _loadAllCustomContestsFromFirestore(true) : Promise.resolve(),
       typeof _loadAllD11CustomContestsFromFirestore === 'function' ? _loadAllD11CustomContestsFromFirestore(true) : Promise.resolve(),
-      typeof _loadAllD11TournamentsFromFirestore === 'function' ? _loadAllD11TournamentsFromFirestore() : Promise.resolve(),
-      typeof _loadAllUtTournamentsFromFirestore === 'function' ? _loadAllUtTournamentsFromFirestore() : Promise.resolve(),
-      typeof _loadAllUtTeamsFromFirestore === 'function' ? _loadAllUtTeamsFromFirestore() : Promise.resolve(),
+      typeof _loadAllD11TournamentsFromFirestore === 'function' ? _loadAllD11TournamentsFromFirestore(true) : Promise.resolve(),
+      typeof _loadAllUtTournamentsFromFirestore === 'function' ? _loadAllUtTournamentsFromFirestore(true) : Promise.resolve(),
+      typeof _loadAllUtTeamsFromFirestore === 'function' ? _loadAllUtTeamsFromFirestore(true) : Promise.resolve(),
     ]);
     if (isAdmin()) _ensureAdminDataLoaded();
     if (currentUser && currentUser.email && typeof users !== 'undefined' && users[currentUser.email]) {
@@ -4457,79 +4581,102 @@ function renderHome() {
     const homeCompleted = publishedD11.filter(m => dream11Matches[m.id].scored && d11UserHasJoinedAnyContest(m.id, currentUser.email))
       .sort((a,b) => new Date(b.deadline||0) - new Date(a.deadline||0)); // most recently played first
 
+    // ── Instant11-style match banner: red/black header, flag+name team
+    // rows, live countdown, fair-play footer. Same underlying data/actions
+    // as before — d11ContestCard just renders it with the new look. ──
     function d11ContestCard(m) {
       const d11m = dream11Matches[m.id];
       const myTeam = Object.values(dream11Teams).find(t => t.matchId === m.id && t.userEmail === currentUser.email);
       const dLocked = isD11Locked(m.id);
       const deadlineStr = m.deadline ? pkDateTime(m.deadline) : '';
-      const fmtBadge = m.format ? `<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:8px;background:rgba(251,191,36,0.12);border:1px solid rgba(251,191,36,0.3);color:#fbbf24;margin-right:6px">🏏 ${m.format}</span>` : '';
       const megaJoinedCount = (d11m.megaParticipants||[]).length;
       const freeJoinedCount = (d11m.freeParticipants||[]).length;
       const isCompletedCard = !!d11m.scored;
-      const statusTag = isCompletedCard
-        ? `<span class="match-status status-completed">FINISHED</span>`
+      const squadA = typeof d11GetTeamSquad === 'function' ? d11GetTeamSquad(m.teamA) : null;
+      const squadB = typeof d11GetTeamSquad === 'function' ? d11GetTeamSquad(m.teamB) : null;
+      const flagA = squadA?.flag || '🏏';
+      const flagB = squadB?.flag || '🏏';
+      const codeA = (m.teamA||'TBD').slice(0,2).toUpperCase();
+      const codeB = (m.teamB||'TBD').slice(0,2).toUpperCase();
+
+      const statusPill = isCompletedCard
+        ? `<span class="i11-status-pill finished">FINISHED</span>`
         : m.status === 'live'
-          ? `<span class="match-status status-live">● LIVE</span>`
-          : dLocked ? `<span class="match-status status-live">LOCKED</span>` : `<span class="match-status status-upcoming">OPEN</span>`;
-      return `<div class="card mb14" style="border-color:rgba(192,132,252,0.4);background:linear-gradient(135deg,rgba(192,132,252,0.08),rgba(37,99,235,0.05))">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-          <div class="match-teams" style="gap:8px">
-            <span class="team-name" style="font-size:14px">${m.teamA||'TBD'}</span>
-            <span class="vs-badge" style="font-size:10px;padding:2px 8px">VS</span>
-            <span class="team-name" style="font-size:14px">${m.teamB||'TBD'}</span>
-          </div>
+          ? `<span class="i11-status-pill live">● LIVE</span>`
+          : dLocked ? `<span class="i11-status-pill">LOCKED</span>` : `<span class="i11-status-pill">OPEN</span>`;
+
+      const countdownHtml = isCompletedCard
+        ? `<div class="i11-countdown-badge" style="color:var(--dim)">🏁 Completed</div>`
+        : dLocked
+          ? `<div class="i11-countdown-badge">🔒 Locked</div>`
+          : m.deadline ? `<div class="i11-countdown-badge d11-countdown" data-deadline="${m.deadline}">⏱ ${d11FormatCountdown(m.deadline - Date.now())}</div>` : '';
+
+      return `<div class="i11-match-banner">
+        <div class="i11-match-banner-head">
+          <div class="i11-match-banner-title">🎟️ ${m.tournament || 'Dream11 Match'}</div>
           <div style="display:flex;align-items:center;gap:6px">
-            ${statusTag}
-            <button onclick="shareD11MatchWhatsApp('${m.id}')" title="WhatsApp share" style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#25D366,#1ea952);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;box-shadow:0 2px 8px rgba(37,211,102,0.4)">📲</button>
+            ${statusPill}
+            <button onclick="shareD11MatchWhatsApp('${m.id}')" title="WhatsApp share" style="width:28px;height:28px;border-radius:50%;background:rgba(255,255,255,0.18);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0">📲</button>
           </div>
         </div>
-        ${m.tournament ? `<div style="font-size:12px;font-weight:700;color:#c084fc;margin-bottom:6px">🏆 ${m.tournament}</div>` : ''}
-        ${fmtBadge ? `<div style="margin-bottom:6px">${fmtBadge}</div>` : ''}
-        <div style="font-size:11.5px;color:var(--dim);margin-bottom:2px">👥 ${d11m.players.length} players pool ready</div>
-        <div style="font-size:11.5px;color:#4ade80;margin-bottom:2px">🎯 ${megaJoinedCount} ${megaJoinedCount === 1 ? 'user' : 'users'} joined Mega Contest</div>
-        <div style="font-size:11.5px;color:#4ade80;margin-bottom:2px">🔸 ${(d11m.miniMegaParticipants||[]).length} ${(d11m.miniMegaParticipants||[]).length === 1 ? 'user' : 'users'} joined Mini Mega Contest</div>
-        <div style="font-size:11.5px;color:#4ade80;margin-bottom:6px">🎁 ${freeJoinedCount} ${freeJoinedCount === 1 ? 'user' : 'users'} joined Free Contest</div>
-        ${isCompletedCard
-          ? `<div style="font-size:11px;color:var(--dim);margin-bottom:10px">🏁 Match completed</div>`
-          : dLocked
-            ? `<div style="font-size:11px;color:var(--orange);margin-bottom:10px">🔒 Deadline passed</div>`
-            : deadlineStr ? `<div style="font-size:11px;color:var(--orange);margin-bottom:2px">⏰ Deadline: ${deadlineStr}</div>${m.deadline ? `<div class="d11-countdown" data-deadline="${m.deadline}" style="font-size:11px;font-weight:700;color:var(--orange);margin-bottom:10px">${d11FormatCountdown(m.deadline - Date.now())}</div>` : ''}` : ''}
-        ${isCompletedCard
-          ? `<button class="btn-secondary btn-block mb10" style="font-size:12px;padding:9px" onclick="openCompletedMatchDetail('${m.id}','home')">🏅 View Live Leaderboard</button>
-             <button class="btn-block" style="font-size:12px;padding:9px;border:none;border-radius:10px;background:linear-gradient(135deg,#25D366,#1ea952);color:#fff;font-weight:700;cursor:pointer" onclick="d11ShareResultPdfWhatsApp('${m.id}', event)">📲 Share Result Image on WhatsApp</button>`
-          : myTeam
-            ? `<div style="display:flex;gap:8px">
-                 <button class="btn-secondary" style="flex:1;font-size:12px;padding:9px" onclick="openDream11ViewTeam('${myTeam.id}')">👁 My Team ${myTeam.totalPoints?'· '+myTeam.totalPoints+' pts':''}</button>
-                 <button class="btn-secondary" style="flex:1;font-size:12px;padding:9px" onclick="openDream11Leaderboard('${m.id}')">🏅 Leaderboard</button>
-               </div>`
-            : !dLocked
+        <div class="i11-match-banner-body">
+          <div class="i11-team-row">
+            <span class="i11-team-flag">${flagA}</span>
+            <span class="i11-team-name">${m.teamA||'TBD'}</span>
+            <span class="i11-team-code">${codeA}</span>
+          </div>
+          <div class="i11-team-row">
+            <span class="i11-team-flag">${flagB}</span>
+            <span class="i11-team-name">${m.teamB||'TBD'}</span>
+            <span class="i11-team-code">${codeB}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+            ${deadlineStr && !isCompletedCard ? `<span style="font-size:11px;color:var(--dim)">${deadlineStr}</span>` : `<span></span>`}
+            ${countdownHtml}
+          </div>
+          <div style="font-size:11.5px;color:var(--dim);margin-top:10px">👥 ${d11m.players.length} players pool ready</div>
+          <div style="font-size:11.5px;color:#16a34a;margin-top:4px">🎯 ${megaJoinedCount} ${megaJoinedCount === 1 ? 'user' : 'users'} joined Mega Contest</div>
+          <div style="font-size:11.5px;color:#16a34a;margin-top:2px">🔸 ${(d11m.miniMegaParticipants||[]).length} ${(d11m.miniMegaParticipants||[]).length === 1 ? 'user' : 'users'} joined Mini Mega Contest</div>
+          <div style="font-size:11.5px;color:#16a34a;margin-top:2px;margin-bottom:10px">🎁 ${freeJoinedCount} ${freeJoinedCount === 1 ? 'user' : 'users'} joined Free Contest</div>
+
+          ${isCompletedCard
+            ? `<button class="btn-secondary btn-block mb10" style="font-size:12px;padding:9px" onclick="openCompletedMatchDetail('${m.id}','home')">🏅 View Live Leaderboard</button>
+               <button class="btn-block" style="font-size:12px;padding:9px;border:none;border-radius:10px;background:linear-gradient(135deg,#25D366,#1ea952);color:#fff;font-weight:700;cursor:pointer" onclick="d11ShareResultPdfWhatsApp('${m.id}', event)">📲 Share Result Image on WhatsApp</button>`
+            : myTeam
               ? `<div style="display:flex;gap:8px">
-                   <button class="btn-primary" style="flex:1;font-size:12px;padding:9px;background:linear-gradient(135deg,#a855f7,#7c3aed)" onclick="openDream11Match('${m.id}')">🎮 Build My Team</button>
+                   <button class="btn-secondary" style="flex:1;font-size:12px;padding:9px" onclick="openDream11ViewTeam('${myTeam.id}')">👁 My Team ${myTeam.totalPoints?'· '+myTeam.totalPoints+' pts':''}</button>
                    <button class="btn-secondary" style="flex:1;font-size:12px;padding:9px" onclick="openDream11Leaderboard('${m.id}')">🏅 Leaderboard</button>
                  </div>`
-              : `<div style="text-align:center;font-size:12px;color:var(--dim);padding:8px">🔒 Contest locked — joining closed</div>`
-        }
-        <button class="btn-orange btn-block" style="font-size:12px;padding:9px;margin-top:8px" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">${!isCompletedCard && !dLocked ? '🎪 Join Mega / H2H / Custom Contest' : '🎪 View Contests'}</button>
-        ${(() => {
-          const badges = [];
-          if ((d11m.freeParticipants||[]).includes(currentUser.email)) {
-            badges.push(`<button style="flex:1;background:rgba(34,197,94,0.14);color:#4ade80;border:1px solid rgba(34,197,94,0.3);padding:7px 8px;border-radius:9px;font-size:11px;font-weight:700;cursor:pointer" onclick="openD11ContestParticipants('${m.id}','free')">🎁 Free Contest</button>`);
+              : !dLocked
+                ? `<div style="display:flex;gap:8px">
+                     <button class="btn-primary" style="flex:1;font-size:12px;padding:9px;background:linear-gradient(135deg,#dc2626,#991b1b)" onclick="openDream11Match('${m.id}')">🎮 Build My Team</button>
+                     <button class="btn-secondary" style="flex:1;font-size:12px;padding:9px" onclick="openDream11Leaderboard('${m.id}')">🏅 Leaderboard</button>
+                   </div>`
+                : `<div style="text-align:center;font-size:12px;color:var(--dim);padding:8px">🔒 Contest locked — joining closed</div>`
           }
-          if ((d11m.megaParticipants||[]).includes(currentUser.email)) {
-            badges.push(`<button style="flex:1;background:rgba(251,191,36,0.14);color:#fbbf24;border:1px solid rgba(251,191,36,0.3);padding:7px 8px;border-radius:9px;font-size:11px;font-weight:700;cursor:pointer" onclick="openD11ContestParticipants('${m.id}','mega')">🎯 Mega Contest</button>`);
-          }
-          if ((d11m.miniMegaParticipants||[]).includes(currentUser.email)) {
-            badges.push(`<button style="flex:1;background:rgba(96,165,250,0.14);color:#60a5fa;border:1px solid rgba(96,165,250,0.3);padding:7px 8px;border-radius:9px;font-size:11px;font-weight:700;cursor:pointer" onclick="openD11ContestParticipants('${m.id}','minimega')">🔸 Mini Mega</button>`);
-          }
-          Object.values(d11CustomContests)
-            .filter(cc => cc.matchId === m.id && (cc.participants||[]).includes(currentUser.email))
-            .forEach(cc => badges.push(`<button style="flex:1;background:rgba(168,85,247,0.14);color:#c084fc;border:1px solid rgba(168,85,247,0.3);padding:7px 8px;border-radius:9px;font-size:11px;font-weight:700;cursor:pointer" onclick="openD11ContestParticipants('${m.id}','custom','${cc.id}')">🛠️ ${cc.code}</button>`));
-          if (badges.length === 0) return '';
-          return `<div style="margin-top:8px">
-            <div style="font-size:10.5px;color:var(--dim);font-weight:700;margin-bottom:6px">🎟️ MY CONTESTS JOINED</div>
-            <div style="display:flex;flex-wrap:wrap;gap:6px">${badges.join('')}</div>
-          </div>`;
-        })()}
+          <button class="btn-block" style="font-size:12px;padding:9px;margin-top:8px;border:none;border-radius:10px;background:linear-gradient(135deg,#f97316,#dc2626);color:#fff;font-weight:700;cursor:pointer" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">${!isCompletedCard && !dLocked ? '🎪 Join Mega / H2H / Custom Contest' : '🎪 View Contests'}</button>
+          ${(() => {
+            const badges = [];
+            if ((d11m.freeParticipants||[]).includes(currentUser.email)) {
+              badges.push(`<button style="flex:1;background:rgba(34,197,94,0.14);color:#16a34a;border:1px solid rgba(34,197,94,0.3);padding:7px 8px;border-radius:9px;font-size:11px;font-weight:700;cursor:pointer" onclick="openD11ContestParticipants('${m.id}','free')">🎁 Free Contest</button>`);
+            }
+            if ((d11m.megaParticipants||[]).includes(currentUser.email)) {
+              badges.push(`<button style="flex:1;background:rgba(251,191,36,0.14);color:#b45309;border:1px solid rgba(251,191,36,0.3);padding:7px 8px;border-radius:9px;font-size:11px;font-weight:700;cursor:pointer" onclick="openD11ContestParticipants('${m.id}','mega')">🎯 Mega Contest</button>`);
+            }
+            if ((d11m.miniMegaParticipants||[]).includes(currentUser.email)) {
+              badges.push(`<button style="flex:1;background:rgba(96,165,250,0.14);color:#2563eb;border:1px solid rgba(96,165,250,0.3);padding:7px 8px;border-radius:9px;font-size:11px;font-weight:700;cursor:pointer" onclick="openD11ContestParticipants('${m.id}','minimega')">🔸 Mini Mega</button>`);
+            }
+            Object.values(d11CustomContests)
+              .filter(cc => cc.matchId === m.id && (cc.participants||[]).includes(currentUser.email))
+              .forEach(cc => badges.push(`<button style="flex:1;background:rgba(168,85,247,0.14);color:#7e22ce;border:1px solid rgba(168,85,247,0.3);padding:7px 8px;border-radius:9px;font-size:11px;font-weight:700;cursor:pointer" onclick="openD11ContestParticipants('${m.id}','custom','${cc.id}')">🛠️ ${cc.code}</button>`));
+            if (badges.length === 0) return '';
+            return `<div style="margin-top:8px">
+              <div style="font-size:10.5px;color:var(--dim);font-weight:700;margin-bottom:6px">🎟️ MY CONTESTS JOINED</div>
+              <div style="display:flex;flex-wrap:wrap;gap:6px">${badges.join('')}</div>
+            </div>`;
+          })()}
+        </div>
+        <div class="i11-fair-play">✔ 100% fair play &nbsp;|&nbsp; No bots &nbsp;|&nbsp; No hidden fees</div>
       </div>`;
     }
 
@@ -4541,15 +4688,19 @@ function renderHome() {
       completed: 'No completed matches yet.'
     };
 
-    return `<div class="section-title" style="margin-bottom:10px">🎮 Dream11 Contests</div>
-    <div class="admin-tab-row" style="margin-bottom:14px">
-      <button class="admin-tab ${activeHomeTab==='upcoming'?'active':''}" onclick="window._homeD11Tab='upcoming';render()">🕒 Upcoming (${homeUpcoming.length})</button>
-      <button class="admin-tab ${activeHomeTab==='live'?'active':''}" onclick="window._homeD11Tab='live';render()">🔴 Live (${homeLive.length})</button>
-      <button class="admin-tab ${activeHomeTab==='completed'?'active':''}" onclick="window._homeD11Tab='completed';render()">🏁 Completed (${homeCompleted.length})</button>
-    </div>
-    ${listForTab.length === 0
-      ? `<div class="empty-state"><div class="empty-icon">🎮</div>${emptyMsgs[activeHomeTab]}</div>`
-      : listForTab.map(d11ContestCard).join('')}`;
+    return `<div class="i11-section">
+      <div class="i11-section-head">
+        <div class="i11-section-title">🎮 My Matches</div>
+      </div>
+      <div class="i11-contest-tabs">
+        <button class="i11-contest-tab ${activeHomeTab==='upcoming'?'active':''}" onclick="window._homeD11Tab='upcoming';render()">🕒 Upcoming (${homeUpcoming.length})</button>
+        <button class="i11-contest-tab ${activeHomeTab==='live'?'active':''}" onclick="window._homeD11Tab='live';render()">🔴 Live (${homeLive.length})</button>
+        <button class="i11-contest-tab ${activeHomeTab==='completed'?'active':''}" onclick="window._homeD11Tab='completed';render()">🏁 Completed (${homeCompleted.length})</button>
+      </div>
+      ${listForTab.length === 0
+        ? `<div class="empty-state"><div class="empty-icon">🎮</div>${emptyMsgs[activeHomeTab]}</div>`
+        : listForTab.map(d11ContestCard).join('')}
+    </div>`;
   })()}
 
   <button class="btn-secondary btn-block mb14" onclick="goTab('dream11')">🎮 Go to Dream11 Hub →</button>
@@ -13139,35 +13290,39 @@ function renderD11JoinContest() {
 
   return `
   <div style="padding-bottom:70px">
-  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:14px">
-    <button class="btn-secondary" style="font-size:12px;padding:8px 14px;margin-bottom:0" onclick="goDream11Hub()">← Back to Dream11</button>
-    <button class="btn-secondary" style="font-size:12px;padding:8px 14px;margin-bottom:0" onclick="d11ManualRefresh(event)">🔄 Refresh</button>
-  </div>
 
-  <!-- Dark match-info header bar -->
-  <div class="card mb0" style="background:linear-gradient(135deg,#161b2e,#1e2542);border-color:rgba(255,255,255,0.08);padding:16px 14px;border-radius:14px 14px 0 0">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-      <div style="flex:1;text-align:center">
-        <div style="font-size:26px;line-height:1">${flagA}</div>
-        <div style="font-size:12.5px;font-weight:800;color:#fff;margin-top:4px">${m.teamA||'TBD'}</div>
+  <!-- Instant11-style orange gradient hero header -->
+  <div class="i11-contest-hero">
+    <div class="i11-contest-hero-top">
+      <button class="i11-contest-hero-back" onclick="goDream11Hub()">←</button>
+      <div class="i11-contest-hero-title">${m.teamA||'TBD'} vs ${m.teamB||'TBD'}</div>
+      <button class="i11-contest-hero-back" onclick="d11ManualRefresh(event)" title="Refresh">🔄</button>
+    </div>
+    <div class="i11-contest-hero-sub">${m.tournament || 'Dream11 Contest'}</div>
+    <div class="i11-contest-hero-teams">
+      <div style="text-align:center;flex:1">
+        <div style="font-size:22px;line-height:1">${flagA}</div>
+        <div class="i11-contest-hero-team" style="margin-top:4px">${m.teamA||'TBD'}</div>
       </div>
-      <div style="text-align:center;flex-shrink:0;padding:0 6px">
-        ${deadlineClockStr ? `<div style="font-size:10.5px;color:rgba(255,255,255,0.55)">${deadlineClockStr}</div>` : ''}
-        ${!locked && countdownStr ? `<div class="d11-countdown" data-deadline="${m.deadline}" style="font-size:11.5px;font-weight:700;color:#fb923c;margin-top:2px">⏱ ${countdownStr}</div>` : locked ? `<div style="font-size:11.5px;font-weight:700;color:#f87171;margin-top:2px">🔒 Locked</div>` : ''}
-      </div>
-      <div style="flex:1;text-align:center">
-        <div style="font-size:26px;line-height:1">${flagB}</div>
-        <div style="font-size:12.5px;font-weight:800;color:#fff;margin-top:4px">${m.teamB||'TBD'}</div>
+      <div class="i11-contest-hero-vs">VS</div>
+      <div style="text-align:center;flex:1">
+        <div style="font-size:22px;line-height:1">${flagB}</div>
+        <div class="i11-contest-hero-team" style="margin-top:4px">${m.teamB||'TBD'}</div>
       </div>
     </div>
+    <div class="i11-contest-hero-timer">
+      ${locked
+        ? `<span>🔒 Locked</span>`
+        : countdownStr ? `<span class="d11-countdown" data-deadline="${m.deadline}">⏱ ${countdownStr} left</span>` : ''}
+    </div>
+    ${deadlineClockStr ? `<div style="text-align:center;color:rgba(255,255,255,0.75);font-size:10.5px;margin-top:6px">${deadlineClockStr}</div>` : ''}
   </div>
 
-  <!-- Sub-tabs row -->
-  <div class="card mb14" style="padding:0;border-radius:0 0 14px 14px;border-top:none">
-    <div style="display:flex;overflow-x:auto;scrollbar-width:none">
-      <button onclick="window._d11ContestSubTab='all';render()" style="flex-shrink:0;padding:11px 16px;font-size:12px;font-weight:700;border:none;background:transparent;cursor:pointer;color:${activeContestTab==='all'?'var(--orange)':'var(--dim)'};border-bottom:2px solid ${activeContestTab==='all'?'var(--orange)':'transparent'}">All Contests</button>
-      <button onclick="window._d11ContestSubTab='mine';render()" style="flex-shrink:0;padding:11px 16px;font-size:12px;font-weight:700;border:none;background:transparent;cursor:pointer;color:${activeContestTab==='mine'?'var(--orange)':'var(--dim)'};border-bottom:2px solid ${activeContestTab==='mine'?'var(--orange)':'transparent'}">My Contests</button>
-    </div>
+  <!-- Sub-tabs row: All Contests / My Contests / My Team -->
+  <div class="i11-contest-tabs">
+    <button class="i11-contest-tab ${activeContestTab==='all'?'active':''}" onclick="window._d11ContestSubTab='all';render()">Contests</button>
+    <button class="i11-contest-tab ${activeContestTab==='mine'?'active':''}" onclick="window._d11ContestSubTab='mine';render()">My Contests</button>
+    <button class="i11-contest-tab" onclick="tab='dream11TeamPicker';d11ActiveMatchId='${matchId}';render();window.scrollTo(0,0)">My Team${myTeams.length?` (${myTeams.length})`:''}</button>
   </div>
 
   <div class="card mb14">
@@ -13291,33 +13446,27 @@ function renderD11JoinContest() {
     function bigContestCard({ tag, tagColor, headlinePrize, subLabel, spotsLeft, spotsTotal, badges, gradient, borderColor, joined, statusExtra, joinBtn }) {
       const pct = spotsTotal > 0 ? Math.max(2, 100 - Math.round((spotsLeft/spotsTotal)*100)) : 2;
       return `
-      <div class="card mb14" style="background:${gradient};border-color:${borderColor};padding:0;overflow:hidden">
-        <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px 0">
-          <span style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:0.5px;color:${tagColor};background:rgba(255,255,255,0.08);padding:3px 9px;border-radius:6px">${tag}</span>
-          ${joined ? `<span style="font-size:11px;font-weight:700;color:#4ade80">✅ Joined</span>` : ''}
-        </div>
-        <div style="padding:10px 14px 0">
-          <div style="font-size:22px;font-weight:900;line-height:1.1">${headlinePrize}</div>
-          <div style="font-size:11px;color:var(--dim);margin-top:2px">${subLabel}</div>
+      <div class="i11-prize-card">
+        <div class="i11-prize-card-top">
+          <div>
+            <div class="i11-prize-label">${tag}${subLabel ? ' · ' + subLabel : ''}</div>
+            <div class="i11-prize-value">${headlinePrize}</div>
+          </div>
+          ${joinBtn}
         </div>
         ${spotsTotal > 0 ? `
-        <div style="padding:12px 14px 0">
-          <div style="height:5px;border-radius:3px;background:rgba(255,255,255,0.08);overflow:hidden">
-            <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,#f87171,#fb923c);border-radius:3px"></div>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:9.5px;color:var(--dim);margin-top:4px">
-            <span>${spotsLeft.toLocaleString()} spots left</span>
-            <span>${spotsTotal.toLocaleString()} spots</span>
-          </div>
+        <div class="i11-prize-bar-track"><div class="i11-prize-bar-fill" style="width:${pct}%"></div></div>
+        <div class="i11-prize-spots-row">
+          <span>${spotsLeft.toLocaleString()} Spots Left</span>
+          <span>${spotsTotal.toLocaleString()} Spots</span>
         </div>` : ''}
-        <div style="display:flex;gap:0;margin-top:12px;border-top:1px solid rgba(255,255,255,0.06)">
-          ${badges.map((b,i) => `<div style="flex:1;text-align:center;padding:8px 4px;font-size:9.5px;color:var(--dim);${i<badges.length-1?'border-right:1px solid rgba(255,255,255,0.06)':''}">${b}</div>`).join('')}
-        </div>
-        <div style="padding:12px 14px 14px">
-          ${joinBtn}
+        <div class="i11-prize-meta-row">
+          ${badges.map(b => `<span class="i11-flex">${b}</span>`).join('')}
+          ${joined ? `<span class="i11-prize-meta-flexible">✔ Joined</span>` : `<span class="i11-prize-meta-flexible">✔ Flexible</span>`}
         </div>
       </div>`;
     }
+
 
     let html = '';
 
@@ -13325,68 +13474,68 @@ function renderD11JoinContest() {
     html += bigContestCard({
       tag: 'Mega Contest', tagColor: '#fbbf24',
       headlinePrize: `Rs ${(d11m.megaPool||0).toLocaleString()}`,
-      subLabel: `Entry Rs ${D11_MEGA_ENTRY_FEE} • Prize pool`,
+      subLabel: `Entry Rs ${D11_MEGA_ENTRY_FEE}`,
       spotsLeft: 0, spotsTotal: 0,
       badges: [`👥 ${(d11m.megaParticipants||[]).length} joined`, `🏆 ${Math.round((1-D11_MEGA_COMPANY_SHARE)*100)}% to winners`, `✅ ${Math.round(D11_MEGA_COMPANY_SHARE*100)}% app fee`],
       gradient: 'linear-gradient(135deg,rgba(251,191,36,0.14),rgba(249,115,22,0.06))',
       borderColor: 'rgba(251,191,36,0.3)',
       joined: inMega,
       joinBtn: inMega
-        ? `<button class="btn-secondary btn-block" disabled style="opacity:0.7">✅ Already Joined</button>`
+        ? `<button class="i11-prize-joinbtn joined" disabled>✅ Joined</button>`
         : locked
-          ? `<button class="btn-secondary btn-block" disabled>🔒 Closed</button>`
-          : `<button class="btn-primary btn-block" onclick="joinD11MegaContest('${matchId}')">Join Rs ${D11_MEGA_ENTRY_FEE}</button>`
+          ? `<button class="i11-prize-joinbtn joined" disabled>🔒 Closed</button>`
+          : `<button class="i11-prize-joinbtn" onclick="joinD11MegaContest('${matchId}')">Rs ${D11_MEGA_ENTRY_FEE}</button>`
     });
 
     // Mini Mega Contest — big card
     html += bigContestCard({
       tag: 'Mini Mega Contest', tagColor: '#60a5fa',
       headlinePrize: `Rs ${(d11m.miniMegaPool||0).toLocaleString()}`,
-      subLabel: `Entry Rs ${D11_MINI_MEGA_ENTRY_FEE} • Mega jese hi rules, sasta entry`,
+      subLabel: `Entry Rs ${D11_MINI_MEGA_ENTRY_FEE}`,
       spotsLeft: 0, spotsTotal: 0,
       badges: [`👥 ${(d11m.miniMegaParticipants||[]).length} joined`, `🏆 ${Math.round((1-D11_MINI_MEGA_COMPANY_SHARE)*100)}% to winners`, `✅ ${Math.round(D11_MINI_MEGA_COMPANY_SHARE*100)}% app fee`],
       gradient: 'linear-gradient(135deg,rgba(96,165,250,0.14),rgba(37,99,235,0.06))',
       borderColor: 'rgba(96,165,250,0.3)',
       joined: inMiniMega,
       joinBtn: inMiniMega
-        ? `<button class="btn-secondary btn-block" disabled style="opacity:0.7">✅ Already Joined</button>`
+        ? `<button class="i11-prize-joinbtn joined" disabled>✅ Joined</button>`
         : locked
-          ? `<button class="btn-secondary btn-block" disabled>🔒 Closed</button>`
-          : `<button class="btn-primary btn-block" style="background:linear-gradient(135deg,#60a5fa,#2563eb)" onclick="joinD11MiniMegaContest('${matchId}')">Join Rs ${D11_MINI_MEGA_ENTRY_FEE}</button>`
+          ? `<button class="i11-prize-joinbtn joined" disabled>🔒 Closed</button>`
+          : `<button class="i11-prize-joinbtn" style="background:linear-gradient(135deg,#60a5fa,#2563eb)" onclick="joinD11MiniMegaContest('${matchId}')">Rs ${D11_MINI_MEGA_ENTRY_FEE}</button>`
     });
 
     // H2H Contest — big card
     html += bigContestCard({
       tag: 'H2H Contest', tagColor: '#fb923c',
       headlinePrize: `Rs ${Math.round(D11_H2H_ENTRY_FEE*2*(1-D11_H2H_COMPANY_SHARE))}`,
-      subLabel: `Entry Rs ${D11_H2H_ENTRY_FEE} • Winner takes it all`,
+      subLabel: `Entry Rs ${D11_H2H_ENTRY_FEE}`,
       spotsLeft: 0, spotsTotal: 0,
       badges: [`⚔️ 1 vs 1`, `🏆 ${Math.round((1-D11_H2H_COMPANY_SHARE)*100)}% to winner`, `✅ ${Math.round(D11_H2H_COMPANY_SHARE*100)}% app fee`],
       gradient: 'linear-gradient(135deg,rgba(249,115,22,0.14),rgba(37,99,235,0.05))',
       borderColor: 'rgba(249,115,22,0.35)',
       joined: inH2H,
       joinBtn: inH2H
-        ? `<button class="btn-secondary btn-block" disabled style="opacity:0.7">✅ Already Joined</button>`
+        ? `<button class="i11-prize-joinbtn joined" disabled>✅ Joined</button>`
         : locked
-          ? `<button class="btn-secondary btn-block" disabled>🔒 Closed</button>`
-          : `<button class="btn-primary btn-orange btn-block" onclick="joinD11H2HContest('${matchId}')">Join Rs ${D11_H2H_ENTRY_FEE}</button>`
+          ? `<button class="i11-prize-joinbtn joined" disabled>🔒 Closed</button>`
+          : `<button class="i11-prize-joinbtn" style="background:linear-gradient(135deg,#f97316,#dc2626)" onclick="joinD11H2HContest('${matchId}')">Rs ${D11_H2H_ENTRY_FEE}</button>`
     });
 
     // Free Contest — big card, no entry fee
     html += bigContestCard({
       tag: 'Free Contest', tagColor: '#4ade80',
       headlinePrize: `Free Entry`,
-      subLabel: `Admin gives rewards to top performers`,
+      subLabel: `Admin rewards`,
       spotsLeft: 0, spotsTotal: 0,
       badges: [`👥 ${(d11m.freeParticipants||[]).length} joined`, `🎁 Admin rewards`],
       gradient: 'linear-gradient(135deg,rgba(34,197,94,0.14),rgba(16,185,129,0.05))',
       borderColor: 'rgba(34,197,94,0.3)',
       joined: inFree,
       joinBtn: inFree
-        ? `<button class="btn-secondary btn-block" disabled style="opacity:0.7">✅ Already Joined</button>`
+        ? `<button class="i11-prize-joinbtn joined" disabled>✅ Joined</button>`
         : locked
-          ? `<button class="btn-secondary btn-block" disabled>🔒 Closed</button>`
-          : `<button class="btn-secondary btn-block" style="color:#4ade80;border-color:rgba(34,197,94,0.4)" onclick="joinD11FreeContest('${matchId}')">Join Free</button>`
+          ? `<button class="i11-prize-joinbtn joined" disabled>🔒 Closed</button>`
+          : `<button class="i11-prize-joinbtn" style="background:linear-gradient(135deg,#22c55e,#16a34a)" onclick="joinD11FreeContest('${matchId}')">Join Free</button>`
     });
 
     return html;
@@ -21181,7 +21330,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.40.0";
+const APP_VERSION = "3.43.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
