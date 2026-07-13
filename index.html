@@ -931,6 +931,7 @@ let d11ImportError = null;
 // it on-screen (see renderD11SquadDebugModal). Remove once squad-shape
 // issue is confirmed/fixed.
 let _d11SquadDebugData = null;
+let _d11ScheduleDebugData = null; // raw /schedule/v1/international response — shape confirmed (matchScheduleMap[].scheduleAdWrapper.matchScheduleList[].matchInfo[]), kept for future debugging if Cricbuzz changes it again
 let _d11SyncDebugData = null; // { matchId, fetchedAt, raw } — last raw hscard response from d11SyncLiveMatch, for the "View Raw Sync Data" debug panel
 let _d11LiveSyncLastSyncedAt = {}; // { [matchId]: timestamp } — for the "Last synced" label in admin UI
 
@@ -4196,6 +4197,7 @@ function render() {
     ${d11ImportPanelOpen ? renderD11ImportPanelModal() : ''}
     ${_d11SquadDebugData ? renderD11SquadDebugModal() : ''}
     ${_d11SyncDebugData ? renderD11SyncDebugModal() : ''}
+    ${_d11ScheduleDebugData ? renderD11ScheduleDebugModal() : ''}
     ${_receiptModalImage ? renderReceiptImageModal() : ''}
     ${d11CleanupPoolMatchId ? renderD11CleanupPoolModal() : ''}
     ${d11JoinTeamPicker ? renderD11JoinTeamPickerModal() : ''}
@@ -8793,8 +8795,33 @@ async function _cricbuzzFetch(path, params, _isRetry, callCtx) {
     return _cricbuzzFetch(path, params, true, callCtx);
   }
   if (!res.ok) throw new Error('HTTP ' + res.status);
+  // Read as text first, not res.json() directly — on flaky mobile
+  // connections RapidAPI's gateway occasionally returns a 200 with an
+  // EMPTY body (connection cut short, proxy hiccup, etc). res.json() on
+  // an empty body throws the unhelpful "Unexpected end of JSON input",
+  // which used to surface straight to the admin with no retry. Now: if
+  // the body is empty or doesn't parse, retry once (same as the 429
+  // case) before giving up — this is transient almost every time.
+  const text = await res.text();
+  if (!text) {
+    if (!_isRetry) {
+      await _d11Sleep(1500);
+      return _cricbuzzFetch(path, params, true, callCtx);
+    }
+    throw new Error(`Cricbuzz returned an empty response (HTTP ${res.status}, content-length: ${res.headers.get('content-length') || 'none'}) — likely a temporary network hiccup, please try again`);
+  }
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch(e) {
+    if (!_isRetry) {
+      await _d11Sleep(1500);
+      return _cricbuzzFetch(path, params, true, callCtx);
+    }
+    throw new Error(`Cricbuzz returned an unreadable response (HTTP ${res.status}, ${text.length} chars received, starts with: "${text.slice(0,60)}") — likely a temporary network hiccup, please try again`);
+  }
   if (callCtx) _logCricbuzzApiCall(callCtx.feature, callCtx.matchId, path).catch(()=>{});
-  return await res.json();
+  return data;
 }
 
 // Cricbuzz's match-list endpoints nest matches inside
@@ -8815,6 +8842,38 @@ function _cricbuzzFlattenMatches(data) {
   return out;
 }
 
+// Fallback flattener for the schedule endpoint — a differently-shaped,
+// date-grouped response that Cricbuzz still serves reliably even when
+// matches/v1/upcoming is (observed to, intermittently) return nothing.
+// Used only as a last resort when upcoming+live+recent all come back
+// empty. Real shape confirmed via a live RapidAPI console capture:
+//   { matchScheduleMap: [
+//       { scheduleAdWrapper: { date, longDate, matchScheduleList: [
+//           { seriesName, seriesId, matchInfo: [ {matchId, seriesId,
+//             matchDesc, matchFormat, startDate, endDate, team1, team2,
+//             venueInfo}, ... ] }
+//         ] } },
+//       { adDetail: {...} },   // ad slot entries mixed into the array — skip these
+//       ...
+//   ] }
+// The extra scheduleAdWrapper layer (and interspersed ad entries with no
+// scheduleAdWrapper at all) is exactly what earlier broke this fallback —
+// entries without a scheduleAdWrapper are silently skipped below.
+function _cricbuzzFlattenSchedule(data) {
+  const out = [];
+  const list = Array.isArray(data?.matchScheduleMap) ? data.matchScheduleMap : (Array.isArray(data) ? data : []);
+  list.forEach(entry => {
+    const wrapper = entry?.scheduleAdWrapper;
+    if (!wrapper) return; // ad slot entry, e.g. { adDetail: {...} } — not a match date
+    (wrapper.matchScheduleList || []).forEach(seriesEntry => {
+      (seriesEntry?.matchInfo || []).forEach(info => {
+        if (info) out.push({ matchInfo: info, matchScore: null });
+      });
+    });
+  });
+  return out;
+}
+
 // Cricbuzz's matchFormat strings ("T20", "ODI", "TEST", "T10", "The Hundred"
 // etc.) → our internal format keys used by D11_SCORING ('T20'/'ODI'/'Test').
 // Anything unrecognized falls back to T20 (safest default — shortest/most
@@ -8826,13 +8885,13 @@ function _d11MapCricbuzzFormat(fmt) {
   return 'T20'; // covers T20, T20I, T10, The Hundred, etc.
 }
 
-// ── "📡 Import from Cricbuzz" — pulls RapidAPI's own upcoming-matches list
-// directly (no team-name search needed) so admin can browse real fixtures
-// and one-tap create + auto-link a Dream11 match. Uses only ONE API call
-// (a single /matches/v1/upcoming hit), so opening this panel is cheap on
-// the monthly quota — the search-based "🔗 Link Live Match" flow (which
-// costs 3 calls: upcoming+live+recent) is only needed afterward, once, to
-// finish linking a manually-created match.
+// ── "📡 Import from Cricbuzz" — pulls RapidAPI's own upcoming/live/recent
+// matches lists directly (no team-name search needed) so admin can browse
+// real fixtures and one-tap create + auto-link a Dream11 match. Checks
+// all three lists in parallel (same resilient approach as "🔗 Link Live
+// Match" below) since Cricbuzz's /matches/v1/upcoming endpoint has been
+// observed to intermittently return an empty 204 on its own — costs 3
+// API calls to load this list, same as the manual Link Live Match search.
 async function d11OpenImportPanel() {
   d11ImportPanelOpen = true;
   d11ImportResults = [];
@@ -8851,25 +8910,46 @@ async function d11FetchImportList() {
   d11ImportError = null;
   render();
   try {
-    const data = await _cricbuzzFetch('/matches/v1/upcoming', null, false, { feature: 'Import List (Upcoming)', matchId: null });
-    const flat = _cricbuzzFlattenMatches(data);
+    // Single API call — /schedule/v1/international has proven far more
+    // reliable than /matches/v1/upcoming (which intermittently returns
+    // empty even when Cricbuzz's own site has fixtures listed), and covers
+    // the full international schedule anyway. Using just this one endpoint
+    // instead of the previous upcoming+live+recent(+fallback) chain cuts
+    // this list's cost from 3-4 API calls down to 1.
+    const schedData = await _cricbuzzFetch('/schedule/v1/international', null, false, { feature: 'Import List (Schedule)', matchId: null });
+    _d11ScheduleDebugData = { raw: schedData, fetchedAt: Date.now() };
+    const pools = _cricbuzzFlattenSchedule(schedData);
+    if (pools.length === 0) {
+      throw new Error('Cricbuzz has no scheduled matches listed right now — try again later.');
+    }
     const juniorWomenTags = ['women','u19','u-19','u16','u-16','under-19','under 19'];
     // De-dupe by matchId, drop junior/women fixtures (admin's platform is
     // for the main international/league game — keeps the list relevant),
-    // sort soonest-first.
+    // keep only fixtures that haven't started yet, sort soonest-first.
+    const nowMs = Date.now();
     const seen = new Set();
-    d11ImportResults = flat.filter(mt => {
+    d11ImportResults = pools.filter(mt => {
       const info = mt.matchInfo;
       const id = info?.matchId;
       if (!id || seen.has(id)) return false;
       seen.add(id);
+      const startMs = Number(info.startDate) || 0;
+      if (!startMs || startMs <= nowMs) return false; // already started or no valid start time
       const nameL = [info.team1?.teamName, info.team2?.teamName, info.seriesName, info.matchDesc].filter(Boolean).join(' ').toLowerCase();
       if (juniorWomenTags.some(t => nameL.includes(t))) return false;
       return true;
     }).sort((a,b) => (Number(a.matchInfo?.startDate)||0) - (Number(b.matchInfo?.startDate)||0));
   } catch (e) {
     console.error(e);
-    d11ImportError = 'Could not reach Cricbuzz API — ' + (e.message||'unknown error');
+    // "Failed to fetch" means the request never even reached Cricbuzz —
+    // almost always a real connectivity/CORS/DNS issue on this device,
+    // not something retrying inside _cricbuzzFetch could fix. Distinguish
+    // it from the "got a response but couldn't read it" case so the
+    // admin knows which one they're dealing with.
+    const isNetworkLevel = /failed to fetch|networkerror|load failed/i.test(e.message || '');
+    d11ImportError = isNetworkLevel
+      ? 'Could not reach Cricbuzz at all — check your internet connection (or try switching wifi/mobile data) and tap Refresh.'
+      : 'Could not reach Cricbuzz API — ' + (e.message||'unknown error');
   } finally {
     d11ImportLoading = false;
     render();
@@ -8905,8 +8985,16 @@ async function d11ImportMatch(mt) {
   dream11Matches[mid] = { players: [], scored: false, locked: false, published: false, megaPool: 0, freePool: 0 };
   await _saveDream11MatchToFirestore(mid, dream11Matches[mid]);
 
+  // The schedule endpoint's team1/team2 objects have been seen using
+  // different key names for the numeric team ID across Cricbuzz's API
+  // versions — try every variant seen in the wild before giving up. If none
+  // of these match, _d11ScheduleDebugData (see the "🐛 View Raw Schedule
+  // Data" button in the import panel) has the actual raw shape to check.
+  const team1Id = info.team1?.teamId || info.team1?.id || info.team1?.tid || info.team1Id || null;
+  const team2Id = info.team2?.teamId || info.team2?.id || info.team2?.tid || info.team2Id || null;
+
   // Auto-link to this exact Cricbuzz fixture — no separate search needed.
-  d11LinkLiveMatch(mid, info.matchId, info.team1?.teamId||info.team1?.id||null, info.team2?.teamId||info.team2?.id||null);
+  d11LinkLiveMatch(mid, info.matchId, team1Id, team2Id);
 
   d11ImportPanelOpen = false;
   d11ImportResults = [];
@@ -8935,6 +9023,7 @@ function renderD11ImportPanelModal() {
         <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseImportPanel()">✕</button>
       </div>
       <div style="font-size:11.5px;color:var(--dim);margin-bottom:14px">Upcoming fixtures from Cricbuzz — tap one to create + auto-link a Dream11 match in one step (uses 1 API call to load this list).</div>
+      ${_d11ScheduleDebugData ? `<button class="btn-secondary btn-block" style="font-size:11px;padding:7px;margin-bottom:10px;background:rgba(239,68,68,0.1);border-color:rgba(239,68,68,0.3);color:#fca5a5" onclick="d11OpenScheduleDebugModal()">🐛 View Raw Schedule Data</button>` : ''}
       ${d11ImportLoading ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">🔄 Loading upcoming matches…</div>` : ''}
       ${d11ImportError ? `<div style="background:rgba(220,38,38,0.1);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:10px;font-size:12px;color:#f87171;margin-bottom:10px">${d11ImportError}</div>` : ''}
       ${!d11ImportLoading ? d11ImportResults.map(mt => {
@@ -9066,7 +9155,28 @@ async function d11FetchSquadFromCricbuzz(matchId) {
     return showNotif('Link this match to Cricbuzz first (🔗 Link Live Match), then try again', 'error');
   }
   if (!m.cricbuzzTeam1Id || !m.cricbuzzTeam2Id) {
-    return showNotif('Team IDs missing — please unlink and re-link this match to pick up team IDs, then try again', 'error');
+    // Team IDs weren't captured when this match was linked/imported (seen
+    // with the schedule-based import — that endpoint's team objects don't
+    // always carry an ID field under the names we check). Rather than
+    // making the admin unlink/re-link, derive them here with one extra call
+    // to the base match-center endpoint, which always includes
+    // matchInfo.team1.id / team2.id.
+    showNotif('🔎 Team IDs missing — looking them up…');
+    try {
+      const baseInfo = await _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}`, null, false, { feature: 'Derive Team IDs', matchId });
+      const t1 = baseInfo?.matchInfo?.team1?.id || baseInfo?.team1?.id;
+      const t2 = baseInfo?.matchInfo?.team2?.id || baseInfo?.team2?.id;
+      if (t1 && t2) {
+        m.cricbuzzTeam1Id = t1;
+        m.cricbuzzTeam2Id = t2;
+        await _saveMatchToFirestore(matchId, m);
+      }
+    } catch (e) {
+      console.warn('Team ID lookup failed:', e.message);
+    }
+    if (!m.cricbuzzTeam1Id || !m.cricbuzzTeam2Id) {
+      return showNotif('Team IDs missing — please unlink and re-link this match to pick up team IDs, then try again', 'error');
+    }
   }
 
   showNotif('📥 Fetching squads from Cricbuzz…');
@@ -9197,6 +9307,23 @@ function renderD11SyncDebugModal() {
   </div>`;
 }
 
+function d11CloseScheduleDebugModal() { _d11ScheduleDebugData = null; render(); }
+function d11OpenScheduleDebugModal() { render(); }
+function renderD11ScheduleDebugModal() {
+  if (!_d11ScheduleDebugData) return '';
+  const pretty = (obj) => JSON.stringify(obj, null, 2).replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return `<div style="position:fixed;inset:0;z-index:2100;background:rgba(5,10,20,0.9);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseScheduleDebugModal()">
+    <div class="card" style="width:100%;max-width:700px;max-height:88vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:16px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-size:14px;font-weight:700">🐛 Raw Cricbuzz Schedule Response (debug)</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseScheduleDebugModal()">✕</button>
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-bottom:10px">Look for team1/team2's ID field here (teamId vs id vs something else) — this is why squad auto-fetch isn't finding a team ID after import. Fetched: ${new Date(_d11ScheduleDebugData.fetchedAt).toLocaleTimeString()}</div>
+      <textarea readonly style="width:100%;height:400px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px" onclick="this.select()">${pretty(_d11ScheduleDebugData.raw)}</textarea>
+    </div>
+  </div>`;
+}
+
 // ── In-app receipt image viewer ──────────────────────────────────────────
 // Replaces window.open(receiptImage, '_blank') — opening a new tab on
 // mobile is a clunky extra step (new tab, then back). This shows the image
@@ -9239,10 +9366,11 @@ function d11LinkLiveMatch(matchId, cricbuzzMatchId, team1Id, team2Id) {
   // manual "📥 Fetch Squad" tap for every match — linking and squad-pull are
   // now one step. Sync Now / Fetch Final Result remain manual/admin-triggered
   // (Fetch Final Result also has its own deadline-based auto-scheduler, see
-  // d11AutoFetchFinalResult).
-  if (team1Id && team2Id) {
-    d11FetchSquadFromCricbuzz(matchId).catch(e => console.warn('Auto squad fetch after link failed:', e.message));
-  }
+  // d11AutoFetchFinalResult). Always attempted now — even when team1Id/
+  // team2Id weren't passed in (e.g. schedule-based import didn't have
+  // them), d11FetchSquadFromCricbuzz has its own one-call fallback to
+  // derive them, so gating the call itself here would skip that recovery.
+  d11FetchSquadFromCricbuzz(matchId).catch(e => console.warn('Auto squad fetch after link failed:', e.message));
 }
 
 function d11UnlinkLiveMatch(matchId) {
@@ -20888,7 +21016,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.27.0";
+const APP_VERSION = "3.35.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
