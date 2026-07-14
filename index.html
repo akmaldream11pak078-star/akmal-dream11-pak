@@ -1650,6 +1650,7 @@ function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKe
       //      the normal full fetch below, which also backfills the
       //      watermark for next time.
       const watermark = _getLastSyncedDataTs(collectionName);
+      console.log(`[refresh-debug] ${collectionName}: watermark=${watermark} (${watermark ? new Date(watermark).toISOString() : 'none'}), backfilled=${alreadyBackfilled}`);
       if (watermark > 0 && window._fbFns.query && window._fbFns.where && window._fbFns.getDocs) {
         (async () => {
           try {
@@ -1659,7 +1660,7 @@ function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKe
             let existing = {};
             try { existing = JSON.parse(localStorage.getItem(cacheKey) || '{}'); } catch(e){}
             let changedCount = 0;
-            snap.forEach(d => { existing[d.id] = d.data(); changedCount++; });
+            snap.forEach(d => { existing[d.id] = d.data(); changedCount++; console.log(`[refresh-debug] ${collectionName}: doc ${d.id} updatedAt=${d.data().updatedAt}`); });
             targetSetter(existing);
             try { localStorage.setItem(cacheKey, JSON.stringify(existing)); } catch(e){}
             _updateSyncWatermark(collectionName, existing);
@@ -21506,7 +21507,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.53.0";
+const APP_VERSION = "3.53.1";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
