@@ -1057,6 +1057,7 @@ let d11AdminSection = 'matches'; // 'matches' | 'teams' — sub-tab inside Dream
 let d11AdminShowCompleted = false; // toggle completed matches in admin Dream11 panel
 let d11AdminParticipantsMatchId = null; // which match participants panel is open
 let d11AdminParticipantsTab = 'mega'; // tab inside participants panel
+let d11ExpandedPrizeBreakdown = null; // e.g. 'mega' | 'minimega' | null — which user-facing contest card's live prize breakdown is expanded
 let d11Draft = null; // draft player being added by admin {name, role, side}
 let d11AdminCreatePending = false; // admin clicked "Create New Match" from Dream11 tab
 let d11PasteText = null; // raw textarea content while admin is pasting squads (null = paste box closed)
@@ -1150,7 +1151,7 @@ const D11_ROLE_LIMITS = { WK:[1,4], BAT:[1,6], AR:[1,4], BOWL:[1,6] };
 const D11_ROLE_LABELS = { WK:'Wicket-Keeper', BAT:'Batsman', AR:'All-Rounder', BOWL:'Bowler' };
 const D11_TEAM_SIZE = 11;
 const D11_CREDIT_BUDGET = 100; // total credit budget users have to build their 11 — same as real Dream11
-const D11_MAX_BACKUPS = 3; // backup players — free (no credit cost), auto-replace a same-role main player who isn't in the confirmed Playing XI
+const D11_MAX_BACKUPS = 4; // backup players — free (no credit cost), auto-replace any non-XI main player regardless of role
 const D11_DEFAULT_CREDIT = 9.0; // used if a player somehow has no credit set, so budget math never breaks
 const D11_MAX_PER_SIDE = 7;
 
@@ -1594,6 +1595,43 @@ function _updateSyncWatermark(collectionName, obj) {
   _setLastSyncedDataTs(collectionName, maxTs);
 }
 
+// ── Automatic incremental refresh (runs quietly after every app open) ──
+// Cheap by design: only queries for docs changed after this device's
+// watermark, so a normal open where nothing changed costs one small
+// near-empty query, not a full collection read. Throttled per collection
+// so rapid repeat opens (e.g. someone bouncing in and out of the browser)
+// don't re-query Firestore more than once every couple of minutes.
+const AUTO_REFRESH_MIN_GAP_MS = 2 * 60 * 1000; // 2 minutes
+let _autoRefreshInFlight = {};
+async function _autoIncrementalRefresh(collectionName, targetSetter, cacheKey, opts) {
+  if (!window._fbDb || !window._fbFns || !window._fbFns.query || !window._fbFns.where || !window._fbFns.getDocs) return;
+  if (_autoRefreshInFlight[collectionName]) return; // already checking, don't stack duplicate queries
+  const lastAuto = _getLastManualRefreshAt('auto_' + collectionName);
+  if (lastAuto && (Date.now() - lastAuto) < AUTO_REFRESH_MIN_GAP_MS) return;
+  const watermark = _getLastSyncedDataTs(collectionName);
+  if (!watermark) return; // no watermark yet — the normal full-fetch path (first load on this device) handles this case instead
+  _autoRefreshInFlight[collectionName] = true;
+  _setLastManualRefreshAt('auto_' + collectionName, Date.now());
+  try {
+    const { collection, query, where, getDocs } = window._fbFns;
+    const incQuery = query(collection(window._fbDb, collectionName), where('updatedAt', '>', watermark));
+    const snap = await getDocs(incQuery);
+    if (snap.empty) return; // nothing changed since last time — cache already reflects reality, no re-render needed
+    let existing = {};
+    try { existing = JSON.parse(localStorage.getItem(cacheKey) || '{}'); } catch(e){}
+    snap.forEach(d => { existing[d.id] = d.data(); });
+    targetSetter(existing);
+    try { localStorage.setItem(cacheKey, JSON.stringify(existing)); } catch(e){}
+    _updateSyncWatermark(collectionName, existing);
+    if (opts.onUpdate) { try { opts.onUpdate(existing); } catch(e){} }
+    render();
+  } catch (e) {
+    console.warn('Auto incremental refresh failed for ' + collectionName + ' (will retry next open):', e.message);
+  } finally {
+    delete _autoRefreshInFlight[collectionName];
+  }
+}
+
 function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKey, opts, bypassThrottle) {
   opts = opts || {};
   cacheKey = _userScopedKey(cacheKey);
@@ -1700,10 +1738,21 @@ function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKe
       resolve(true);
       return;
     } else if (!bypassThrottle && !isAdminUser) {
-      // Automatic load (app open/refresh/re-login) — cache-only, forever,
-      // until the cache itself is empty. Never auto-hits Firestore.
+      // Automatic load (app open/refresh/re-login): paint instantly from
+      // cache first (feels instant, zero reads), then — unlike before —
+      // kick off a lightweight incremental check in the background so the
+      // person actually gets whatever changed since they were last here,
+      // instead of being stuck on stale data until they notice and tap
+      // Refresh. This only asks Firestore for docs newer than this
+      // device's watermark (same mechanism as manual refresh), so it's
+      // cheap: if nothing changed, it's one near-empty query, not a full
+      // collection re-read.
       const gotCache = _loadFromCacheOnly(collectionName, targetSetter, cacheKey);
-      if (gotCache) { resolve(true); return; }
+      if (gotCache) {
+        resolve(true);
+        _autoIncrementalRefresh(collectionName, targetSetter, cacheKey, opts);
+        return;
+      }
       // No cache at all (first-ever load on this device) — fall through
       // and do the one real Firestore read needed to populate it.
     }
@@ -6584,7 +6633,7 @@ function utApplyBackupReplacements(tournamentId, matchId, utM) {
           if (usedBackupIds.has(bId)) return false;
           if (team.picks.includes(bId)) return false;
           const bp = (utM.players||[]).find(x => x.id === bId);
-          return bp && bp.role === originalPlayer.role && bp.isPlayingXI;
+          return bp && bp.isPlayingXI;
         });
         if (backupId) {
           const slotIdx = team.picks.indexOf(originalId);
@@ -6657,12 +6706,13 @@ function d11ApplyBackupReplacements(matchId) {
       }
 
       if (!currentlyInXI && !alreadyReplaced) {
-        // Find first backup with the same role, confirmed in Playing XI, not already used
+        // Find first unused backup that's confirmed in Playing XI — role/
+        // category no longer matters, any backup can cover any main pick.
         const backupId = team.backups.find(bId => {
           if (usedBackupIds.has(bId)) return false;
           if (team.picks.includes(bId)) return false; // shouldn't happen, safety check
           const bp = (d11m.players||[]).find(x => x.id === bId);
-          return bp && bp.role === originalPlayer.role && bp.isPlayingXI;
+          return bp && bp.isPlayingXI;
         });
         if (backupId) {
           const slotIdx = team.picks.indexOf(originalId);
@@ -13585,8 +13635,10 @@ function renderD11JoinContest() {
   ${(() => {
     // ── Big Dream11-style contest card: large prize headline, spots
     // progress bar, badges row, then a full-width join/status button. ──
-    function bigContestCard({ tag, tagColor, headlinePrize, subLabel, spotsLeft, spotsTotal, badges, gradient, borderColor, joined, statusExtra, joinBtn }) {
+    function bigContestCard({ tag, tagColor, headlinePrize, subLabel, spotsLeft, spotsTotal, badges, gradient, borderColor, joined, statusExtra, joinBtn, prizeRows, breakdownKey }) {
       const pct = spotsTotal > 0 ? Math.max(2, 100 - Math.round((spotsLeft/spotsTotal)*100)) : 2;
+      const hasBreakdown = prizeRows && prizeRows.length > 0;
+      const isExpanded = d11ExpandedPrizeBreakdown === breakdownKey;
       return `
       <div class="i11-prize-card">
         <div class="i11-prize-card-top">
@@ -13606,6 +13658,20 @@ function renderD11JoinContest() {
           ${badges.map(b => `<span class="i11-flex">${b}</span>`).join('')}
           ${joined ? `<span class="i11-prize-meta-flexible">✔ Joined</span>` : `<span class="i11-prize-meta-flexible">✔ Flexible</span>`}
         </div>
+        ${hasBreakdown ? `
+        <button onclick="d11ExpandedPrizeBreakdown=d11ExpandedPrizeBreakdown==='${breakdownKey}'?null:'${breakdownKey}';render()" style="width:100%;text-align:left;background:none;border:none;border-top:1px solid rgba(255,255,255,0.08);margin-top:10px;padding-top:8px;color:${tagColor};font-size:11.5px;font-weight:700;cursor:pointer;display:flex;justify-content:space-between;align-items:center">
+          <span>🏆 Rank-wise Prize Breakdown</span><span>${isExpanded ? '▲' : '▼'}</span>
+        </button>
+        ${isExpanded ? `
+        <div style="margin-top:8px;font-size:10px;color:var(--dim);margin-bottom:6px">Estimate based on ${prizeRows.length===1?'current 1 joiner':'current joiners so far'} — updates live as more people join.</div>
+        <div style="display:flex;flex-direction:column;gap:5px;max-height:220px;overflow-y:auto">
+          ${prizeRows.map(p => `
+            <div style="display:flex;justify-content:space-between;align-items:center;background:rgba(255,255,255,0.04);border-radius:8px;padding:6px 10px">
+              <span style="font-size:11.5px;color:var(--dim)">${typeof p.prize === 'string' ? 'Rank ' + p.rank : 'Rank ' + p.rank + (p.rank===1?' 🥇':p.rank===2?' 🥈':p.rank===3?' 🥉':'')}</span>
+              <span style="font-size:12px;font-weight:700;color:${tagColor}">${typeof p.prize === 'string' ? p.prize : 'Rs ' + p.prize}</span>
+            </div>`).join('')}
+        </div>` : ''}
+        ` : ''}
       </div>`;
     }
 
@@ -13613,15 +13679,32 @@ function renderD11JoinContest() {
     let html = '';
 
     // Mega Contest — big card
+    const megaJoinCount = (d11m.megaParticipants||[]).length;
+    let megaPrizeRows = [];
+    if (megaJoinCount === 1) {
+      megaPrizeRows = [{rank:1, prize: D11_MEGA_ENTRY_FEE + ' (refund)'}];
+    } else if (megaJoinCount > 1) {
+      const bracket = getD11MegaBracket(megaJoinCount);
+      const fullW = bracket ? bracket.weights : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].weights;
+      const bMax = bracket ? bracket.max : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].max;
+      const wCount = Math.max(1, Math.min(megaJoinCount, Math.round(megaJoinCount * fullW.length / bMax)));
+      const wTable = wCount >= fullW.length ? fullW.slice() : Array.from({length:wCount},(_,k)=>fullW[Math.floor(k*(fullW.length/wCount))]);
+      const megaPool2 = d11m.megaPool || (megaJoinCount * D11_MEGA_ENTRY_FEE);
+      const megaDist2 = Math.round(megaPool2 * (1 - D11_MEGA_COMPANY_SHARE));
+      const wSum = wTable.reduce((a,b)=>a+b,0);
+      megaPrizeRows = wTable.map((w,i)=>({rank:i+1, prize: Math.round(megaDist2*(w/wSum))}));
+    }
     html += bigContestCard({
       tag: 'Mega Contest', tagColor: '#fbbf24',
       headlinePrize: `Rs ${(d11m.megaPool||0).toLocaleString()}`,
       subLabel: `Entry Rs ${D11_MEGA_ENTRY_FEE}`,
       spotsLeft: 0, spotsTotal: 0,
-      badges: [`👥 ${(d11m.megaParticipants||[]).length} joined`, `🏆 ${Math.round((1-D11_MEGA_COMPANY_SHARE)*100)}% to winners`, `✅ ${Math.round(D11_MEGA_COMPANY_SHARE*100)}% app fee`],
+      badges: [`👥 ${megaJoinCount} joined`, `🏆 ${Math.round((1-D11_MEGA_COMPANY_SHARE)*100)}% to winners`, `✅ ${Math.round(D11_MEGA_COMPANY_SHARE*100)}% app fee`],
       gradient: 'linear-gradient(135deg,rgba(251,191,36,0.14),rgba(249,115,22,0.06))',
       borderColor: 'rgba(251,191,36,0.3)',
       joined: inMega,
+      prizeRows: megaPrizeRows,
+      breakdownKey: 'mega',
       joinBtn: inMega
         ? `<button class="i11-prize-joinbtn joined" disabled>✅ Joined</button>`
         : locked
@@ -13630,15 +13713,32 @@ function renderD11JoinContest() {
     });
 
     // Mini Mega Contest — big card
+    const miniMegaJoinCount = (d11m.miniMegaParticipants||[]).length;
+    let miniMegaPrizeRows = [];
+    if (miniMegaJoinCount === 1) {
+      miniMegaPrizeRows = [{rank:1, prize: D11_MINI_MEGA_ENTRY_FEE + ' (refund)'}];
+    } else if (miniMegaJoinCount > 1) {
+      const bracket = getD11MegaBracket(miniMegaJoinCount);
+      const fullW = bracket ? bracket.weights : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].weights;
+      const bMax = bracket ? bracket.max : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].max;
+      const wCount = Math.max(1, Math.min(miniMegaJoinCount, Math.round(miniMegaJoinCount * fullW.length / bMax)));
+      const wTable = wCount >= fullW.length ? fullW.slice() : Array.from({length:wCount},(_,k)=>fullW[Math.floor(k*(fullW.length/wCount))]);
+      const mmPool2 = d11m.miniMegaPool || (miniMegaJoinCount * D11_MINI_MEGA_ENTRY_FEE);
+      const mmDist2 = Math.round(mmPool2 * (1 - D11_MINI_MEGA_COMPANY_SHARE));
+      const wSum = wTable.reduce((a,b)=>a+b,0);
+      miniMegaPrizeRows = wTable.map((w,i)=>({rank:i+1, prize: Math.round(mmDist2*(w/wSum))}));
+    }
     html += bigContestCard({
       tag: 'Mini Mega Contest', tagColor: '#60a5fa',
       headlinePrize: `Rs ${(d11m.miniMegaPool||0).toLocaleString()}`,
       subLabel: `Entry Rs ${D11_MINI_MEGA_ENTRY_FEE}`,
       spotsLeft: 0, spotsTotal: 0,
-      badges: [`👥 ${(d11m.miniMegaParticipants||[]).length} joined`, `🏆 ${Math.round((1-D11_MINI_MEGA_COMPANY_SHARE)*100)}% to winners`, `✅ ${Math.round(D11_MINI_MEGA_COMPANY_SHARE*100)}% app fee`],
+      badges: [`👥 ${miniMegaJoinCount} joined`, `🏆 ${Math.round((1-D11_MINI_MEGA_COMPANY_SHARE)*100)}% to winners`, `✅ ${Math.round(D11_MINI_MEGA_COMPANY_SHARE*100)}% app fee`],
       gradient: 'linear-gradient(135deg,rgba(96,165,250,0.14),rgba(37,99,235,0.06))',
       borderColor: 'rgba(96,165,250,0.3)',
       joined: inMiniMega,
+      prizeRows: miniMegaPrizeRows,
+      breakdownKey: 'minimega',
       joinBtn: inMiniMega
         ? `<button class="i11-prize-joinbtn joined" disabled>✅ Joined</button>`
         : locked
@@ -13856,10 +13956,40 @@ function renderD11ContestParticipants() {
   if (contestType === 'custom') {
     const cc = d11CustomContests[d11ParticipantsContestRef];
     if (!cc) return `${backBtn}<div class="empty-state">Contest not found.</div>`;
+
+    // Live prize-breakdown preview — same formula finalizeD11CustomContests
+    // uses for the real payout, so this always matches what actually gets
+    // paid once the match is scored.
+    const joinCount = (cc.participants||[]).length;
+    let ccPrizeRows = [];
+    if (joinCount === 1) {
+      ccPrizeRows = [{rank:1, prize: cc.entryFee + ' (refund)'}];
+    } else if (joinCount > 1) {
+      const distributable = Math.round(cc.pool * (1 - D11_CUSTOM_CONTEST_COMPANY_SHARE));
+      const winnerCount = Math.min(joinCount, getD11CustomContestWinnerCount(joinCount));
+      const weightTable = buildD11CustomContestWeights(winnerCount);
+      const weightSum = weightTable.reduce((a,b) => a+b, 0);
+      ccPrizeRows = weightTable.map((w,i) => ({ rank: i+1, prize: Math.round(distributable * (w/weightSum)) }));
+    }
+
     return `${backBtn}${matchHeader}
     <div class="card mb14" style="background:rgba(168,85,247,0.06);border-color:rgba(168,85,247,0.25)">
       <div style="font-weight:700;font-size:14px;color:#c084fc;margin-bottom:4px">🛠️ Custom Contest: ${cc.code}</div>
       <div style="font-size:11px;color:var(--dim);margin-bottom:8px">Entry Rs ${cc.entryFee} • Pool Rs ${cc.pool} • Created by ${users[cc.creatorEmail]?.name || cc.creatorEmail}</div>
+      ${ccPrizeRows.length > 0 ? `
+      <button onclick="d11ExpandedPrizeBreakdown=d11ExpandedPrizeBreakdown==='custom_${cc.id}'?null:'custom_${cc.id}';render()" style="width:100%;text-align:left;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.25);border-radius:10px;margin-bottom:10px;padding:8px 10px;color:#c084fc;font-size:11.5px;font-weight:700;cursor:pointer;display:flex;justify-content:space-between;align-items:center">
+        <span>🏆 Rank-wise Prize Breakdown</span><span>${d11ExpandedPrizeBreakdown==='custom_'+cc.id ? '▲' : '▼'}</span>
+      </button>
+      ${d11ExpandedPrizeBreakdown === 'custom_'+cc.id ? `
+      <div style="font-size:10px;color:var(--dim);margin-bottom:6px">Estimate based on ${joinCount===1?'current 1 joiner':'current joiners so far'} — updates live as more people join.</div>
+      <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:12px;max-height:220px;overflow-y:auto">
+        ${ccPrizeRows.map(p => `
+          <div style="display:flex;justify-content:space-between;align-items:center;background:rgba(255,255,255,0.04);border-radius:8px;padding:6px 10px">
+            <span style="font-size:11.5px;color:var(--dim)">Rank ${p.rank}${typeof p.prize !== 'string' && p.rank===1?' 🥇':typeof p.prize !== 'string' && p.rank===2?' 🥈':typeof p.prize !== 'string' && p.rank===3?' 🥉':''}</span>
+            <span style="font-size:12px;font-weight:700;color:#c084fc">${typeof p.prize === 'string' ? p.prize : 'Rs ' + p.prize}</span>
+          </div>`).join('')}
+      </div>` : ''}
+      ` : ''}
       ${renderUserList(cc.participants||[], `🛠️ Custom Contest Leaderboard`, '#c084fc', cc.participantTeams)}
     </div>`;
   }
@@ -16203,7 +16333,7 @@ function renderDream11BuildTeam() {
   }).join('')}
 
   <div class="section-title" style="margin-top:18px">🔁 Backup Players (${(d11TeamDraft.backups||[]).length}/${D11_MAX_BACKUPS})</div>
-  <div class="empty-state" style="padding:8px 4px;font-size:11px;text-align:left">Free picks — no credit cost. If a main player isn't in the confirmed Playing XI, a backup of the SAME role automatically takes their spot.</div>
+  <div class="empty-state" style="padding:8px 4px;font-size:11px;text-align:left">Free picks — no credit cost. If a main player isn't in the confirmed Playing XI, any one of your backups automatically takes their spot — no role/category restriction.</div>
   ${(d11TeamDraft.backups||[]).length === 0 ? `<div class="empty-state" style="padding:10px 4px;font-size:11px">No backups selected yet — tap "+ B" next to any player above to add one (up to ${D11_MAX_BACKUPS}).</div>` : (d11TeamDraft.backups||[]).map(bid => {
     const p = d11m.players.find(x => x.id === bid);
     if (!p) return '';
@@ -16510,7 +16640,7 @@ function renderDream11ViewTeam() {
 
   <div class="section-title">🔁 Backup Players ${(t.backups && t.backups.length) ? `(${t.backups.length}/${D11_MAX_BACKUPS})` : ''}</div>
   ${(t.backups && t.backups.length) ? `
-  <div class="empty-state" style="padding:8px 4px;font-size:11px;text-align:left;margin-bottom:8px">Free picks. If a main player above isn't in the confirmed Playing XI, a backup of the same role auto-swaps in — look for the 🔁 badge on the field.</div>
+  <div class="empty-state" style="padding:8px 4px;font-size:11px;text-align:left;margin-bottom:8px">Free picks. If a main player above isn't in the confirmed Playing XI, any one of your backups auto-swaps in — no role/category restriction. Look for the 🔁 badge on the field.</div>
   ${t.backups.map(bid => {
     const p = d11m?.players.find(x => x.id === bid);
     if (!p) return '';
@@ -21052,7 +21182,7 @@ function renderUtBuildTeam() {
   ` : ''}
 
   <div class="section-title" style="margin-top:18px">🔁 Backup Players (${(utTeamDraft.backups||[]).length}/${UT_MAX_BACKUPS})</div>
-  <div class="empty-state" style="padding:8px 4px;font-size:11px;text-align:left">Free picks — no credit cost. If a main player isn't in the confirmed Playing XI, a backup of the SAME role automatically takes their spot.</div>
+  <div class="empty-state" style="padding:8px 4px;font-size:11px;text-align:left">Free picks — no credit cost. If a main player isn't in the confirmed Playing XI, any one of your backups automatically takes their spot — no role/category restriction.</div>
   ${(utTeamDraft.backups||[]).length === 0 ? `<div class="empty-state" style="padding:10px 4px;font-size:11px">No backups selected yet — tap "+ B" next to any player above to add one (up to ${UT_MAX_BACKUPS}).</div>` : (utTeamDraft.backups||[]).map(bid => {
     const p = m.players.find(x => x.id === bid);
     if (!p) return '';
@@ -21523,7 +21653,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.54.0";
+const APP_VERSION = "3.57.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
