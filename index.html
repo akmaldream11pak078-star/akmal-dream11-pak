@@ -1534,11 +1534,26 @@ function _installVisibilityGuard() {
 // for the rest of the session same as before — this only governs the
 // "initial full read" moment, not ongoing sync.
 const _MANUAL_REFRESH_COOLDOWN_MS = 10 * 60 * 1000; // 🔄 button: at most one real Firestore hit per collection per 10 min
+// ── Per-user cache/watermark scoping ──────────────────────────────────────
+// All the caching keys below (localStorage cache, sync watermark, manual-
+// refresh cooldown, one-time backfill flag) were previously keyed only by
+// collection name — e.g. 'pp_lastsynced_pp_dream11_teams'. That's fine for
+// a single account, but on a shared/test device where multiple users log
+// in and out, User B would inherit User A's watermark and "already
+// backfilled" flag: the incremental query then only asks Firestore for
+// docs newer than a timestamp that has nothing to do with User B's actual
+// sync history, so User B's own teams/history can silently fail to load.
+// Every key is now namespaced by the current user's email so each account
+// gets its own independent cache/watermark/backfill state on the device.
+function _userScopedKey(key) {
+  const email = (typeof currentUser !== 'undefined' && currentUser && currentUser.email) ? currentUser.email : '_anon';
+  return key + '__u_' + email.replace(/[^a-z0-9]/gi, '_');
+}
 function _getLastManualRefreshAt(collectionName) {
-  try { return parseInt(localStorage.getItem('pp_lastmanual_' + collectionName) || '0', 10) || 0; } catch(e) { return 0; }
+  try { return parseInt(localStorage.getItem(_userScopedKey('pp_lastmanual_' + collectionName)) || '0', 10) || 0; } catch(e) { return 0; }
 }
 function _setLastManualRefreshAt(collectionName, ts) {
-  try { localStorage.setItem('pp_lastmanual_' + collectionName, String(ts)); } catch(e) {}
+  try { localStorage.setItem(_userScopedKey('pp_lastmanual_' + collectionName), String(ts)); } catch(e) {}
 }
 function _loadFromCacheOnly(collectionName, targetSetter, cacheKey) {
   try {
@@ -1563,10 +1578,10 @@ function _stampUpdatedAt(data) {
 // comes back, nothing changed since last time and the read cost is
 // minimal (an empty result set, not the whole collection).
 function _getLastSyncedDataTs(collectionName) {
-  try { return parseInt(localStorage.getItem('pp_lastsynced_' + collectionName) || '0', 10) || 0; } catch(e) { return 0; }
+  try { return parseInt(localStorage.getItem(_userScopedKey('pp_lastsynced_' + collectionName)) || '0', 10) || 0; } catch(e) { return 0; }
 }
 function _setLastSyncedDataTs(collectionName, ts) {
-  try { localStorage.setItem('pp_lastsynced_' + collectionName, String(ts)); } catch(e) {}
+  try { localStorage.setItem(_userScopedKey('pp_lastsynced_' + collectionName), String(ts)); } catch(e) {}
 }
 // Recompute the "newest updatedAt seen" from a full object of documents —
 // used right after any fetch (full or incremental) to keep the watermark
@@ -1581,6 +1596,7 @@ function _updateSyncWatermark(collectionName, obj) {
 
 function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKey, opts, bypassThrottle) {
   opts = opts || {};
+  cacheKey = _userScopedKey(cacheKey);
   _installVisibilityGuard();
   _liveCollectionSpecs[collectionName] = { targetSetter, cacheKey, opts };
   return new Promise((resolve) => {
@@ -1630,7 +1646,7 @@ function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKe
       // establishes the watermark). Every refresh after that goes back to
       // the lightweight incremental path — full-collection reads only ever
       // happen once per device per collection, not on every tap.
-      const backfillFlagKey = '_fullBackfillDone_' + collectionName;
+      const backfillFlagKey = _userScopedKey('_fullBackfillDone_' + collectionName);
       const alreadyBackfilled = localStorage.getItem(backfillFlagKey) === '1';
       if (!alreadyBackfilled) {
         try { localStorage.setItem(backfillFlagKey, '1'); } catch(e){}
@@ -21507,7 +21523,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.53.1";
+const APP_VERSION = "3.54.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
