@@ -9244,15 +9244,19 @@ async function d11FetchImportList() {
   d11ImportError = null;
   render();
   try {
-    // Single API call — /schedule/v1/international has proven far more
-    // reliable than /matches/v1/upcoming (which intermittently returns
-    // empty even when Cricbuzz's own site has fixtures listed), and covers
-    // the full international schedule anyway. Using just this one endpoint
-    // instead of the previous upcoming+live+recent(+fallback) chain cuts
-    // this list's cost from 3-4 API calls down to 1.
-    const schedData = await _cricbuzzFetch('/schedule/v1/international', null, false, { feature: 'Import List (Schedule)', matchId: null });
-    _d11ScheduleDebugData = { raw: schedData, fetchedAt: Date.now() };
-    const pools = _cricbuzzFlattenSchedule(schedData);
+    // Two calls — international schedule (bilateral series) and league
+    // schedule (BBL/IPL/PSL/etc. franchise tournaments) — merged into one
+    // list. /schedule/v1/international alone was missing domestic league
+    // fixtures entirely, which is what admin actually wants to import a lot
+    // of the time. Both endpoints follow the same
+    // matchScheduleMap[].scheduleAdWrapper.matchScheduleList[].matchInfo[]
+    // shape, so the same flattening function handles both.
+    const [schedData, leagueData] = await Promise.all([
+      _cricbuzzFetch('/schedule/v1/international', null, false, { feature: 'Import List (International)', matchId: null }),
+      _cricbuzzFetch('/schedule/v1/league', null, false, { feature: 'Import List (League)', matchId: null }).catch(e => { console.warn('League schedule fetch failed:', e.message); return null; })
+    ]);
+    _d11ScheduleDebugData = { raw: { international: schedData, league: leagueData }, fetchedAt: Date.now() };
+    const pools = [..._cricbuzzFlattenSchedule(schedData), ...(leagueData ? _cricbuzzFlattenSchedule(leagueData) : [])];
     if (pools.length === 0) {
       throw new Error('Cricbuzz has no scheduled matches listed right now — try again later.');
     }
@@ -21423,7 +21427,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.48.0";
+const APP_VERSION = "3.49.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
