@@ -2925,9 +2925,15 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
       tx.update(userRef, { balance: newBalance, transactions: newTransactions });
       const matchUpdate = {
         [participantsField]: updatedMatchData[participantsField],
-        [poolField]: updatedMatchData[poolField],
-        participants: updatedMatchData.participants
+        [poolField]: updatedMatchData[poolField]
       };
+      // Only include `participants` if it's actually an array — Dream11
+      // match docs often don't have this legacy field at all, and sending
+      // `undefined` to Firestore throws a client-side "invalid-argument"
+      // error that aborts the whole join before it even reaches the rules.
+      if (Array.isArray(updatedMatchData.participants)) {
+        matchUpdate.participants = updatedMatchData.participants;
+      }
       if (teamId) matchUpdate[teamsField] = updatedMatchData[teamsField];
       tx.update(matchRef, matchUpdate);
 
@@ -7039,8 +7045,19 @@ function d11OpenTeamSlot(matchId, slot) {
 }
 
 function openDream11Leaderboard(matchId) {
+  // NOTE: renamed in spirit but kept the same function name since it's
+  // called from 9 places across the app. Previously opened a single
+  // combined leaderboard showing every team submitted for the match,
+  // regardless of which contest(s) they'd joined — confusing once a
+  // match has multiple separate contests (Mega/Mini Mega/H2H/Free/
+  // Custom) each with their own prize pool and ranking. Now routes to
+  // "My Contests", where tapping a specific joined contest opens ITS
+  // leaderboard (see openD11ContestParticipants / renderD11ContestParticipants),
+  // which correctly scopes rankings to just that contest's participants.
   d11ActiveMatchId = matchId;
-  tab = 'dream11Leaderboard';
+  d11ContestMatchId = matchId;
+  window._d11ContestSubTab = 'mine';
+  tab = 'dream11JoinContest';
   render();
   window.scrollTo(0,0);
 }
@@ -9521,75 +9538,22 @@ async function d11FetchSquadFromCricbuzz(matchId) {
   showNotif('📥 Fetching squads from Cricbuzz…');
   let usedSeriesFallback = false;
   try {
-    // Fetched one at a time (not Promise.all) with a short gap between —
-    // firing both team calls in the same instant was tripping Cricbuzz's
-    // per-second burst rate limit (HTTP 429), even when the monthly quota
-    // still had plenty of room left.
-    let team1Data, team2Data;
-    try {
-      team1Data = await _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam1Id}`, null, false, { feature: 'Fetch Squad (Team 1)', matchId });
-      await _d11Sleep(1200);
-      team2Data = await _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam2Id}`, null, false, { feature: 'Fetch Squad (Team 2)', matchId });
-    } catch (matchSquadErr) {
-      // The match's own squad endpoint fails (often an empty 204/no-body
-      // response) whenever Cricbuzz hasn't announced THIS match's squad
-      // yet — which is common days ahead of a tour match even though the
-      // series' full touring squad was announced earlier. Fall back to the
-      // series-level squads endpoint, which has that data regardless of
-      // whether the individual match squad exists yet.
-      if (!m.cricbuzzSeriesId) throw matchSquadErr;
-      showNotif('⏳ Match squad not announced yet — trying the series squad instead…');
-      await _d11Sleep(800);
-      const seriesData = await _cricbuzzFetch(`/series/v1/${m.cricbuzzSeriesId}/squads`, null, false, { feature: 'Fetch Squad (Series fallback)', matchId });
-      usedSeriesFallback = true;
-      // Series squads endpoint groups squads under a `squads` array, each
-      // entry having a `squadId`/team name and its own nested player list —
-      // match them to team A/B by name since there's no teamId field here.
-      const squadGroups = seriesData?.squads || seriesData?.squadsList || [];
-      const findSquadFor = (teamName) => squadGroups.find(g => {
-        const n = (g.squadType || g.teamName || g.title || '').toLowerCase();
-        return teamName && n.includes(teamName.toLowerCase().split(' ')[0]);
-      });
-      const g1 = findSquadFor(m.teamA);
-      const g2 = findSquadFor(m.teamB);
-      team1Data = { player: [{ category: 'Squad', player: g1?.player || g1?.players || [] }] };
-      team2Data = { player: [{ category: 'Squad', player: g2?.player || g2?.players || [] }] };
-      _d11ScheduleDebugData = _d11ScheduleDebugData || null; // no-op, keeps existing debug data if any
-      _d11SquadDebugData = { seriesRaw: seriesData, team1: team1Data, team2: team2Data };
-    }
-    // on-screen, copyable panel (see renderD11SquadDebugModal) so the
-    // admin can screenshot/copy it without needing browser DevTools.
-    // Remove this once the squad-shape issue is confirmed/fixed.
-    _d11SquadDebugData = { team1: team1Data, team2: team2Data, team1Id: m.cricbuzzTeam1Id, team2Id: m.cricbuzzTeam2Id };
-
-    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
-    let addedCount = 0;
-
-    [{ data: team1Data, side: 'A' }, { data: team2Data, side: 'B' }].forEach(({ data, side }) => {
+    // Flattens one team's raw Cricbuzz response into a plain array of
+    // player objects, handling every shape we've observed:
+    //  · post-toss:  { players: { "playing XI": [...], bench: [...] } }
+    //  · pre-toss:   { player: [ { category: "Squad", player: [...] }, ... ] }
+    //  · alternates: { players: [...] } or { players: { anyKey: [...] } }
+    function flattenSquadPlayers(data) {
       const playingXI = data?.players?.['playing XI'] || [];
       const bench = data?.players?.bench || [];
       let combined = [...playingXI, ...bench];
-      // Pre-toss fallback — before the toss, Cricbuzz hasn't decided the
-      // final XI yet, so 'players'/'playing XI'/'bench' don't exist at all.
-      // Instead the real shape (confirmed via a live debug capture) is:
-      //   { "player": [ { "player": [ {...player...}, ... ], "category": "Squad" } ] }
-      // i.e. a top-level `player` (singular) array of category-groups,
-      // each with its own nested `player` array of actual player objects.
-      // Walk every group under `data.player` and flatten all their player
-      // arrays together. This also naturally handles series that split the
-      // squad into multiple categories (e.g. "Squad" + "Support Staff") —
-      // support-staff entries just won't have a recognizable player `role`,
-      // which is fine since we still capture the name.
       if (combined.length === 0 && Array.isArray(data?.player)) {
         data.player.forEach(group => {
           const categoryL = (group?.category || '').toLowerCase();
-          if (categoryL.includes('support') || categoryL.includes('staff') || categoryL.includes('coach')) return; // skip coaches/physios/etc — not actual players
+          if (categoryL.includes('support') || categoryL.includes('staff') || categoryL.includes('coach')) return;
           if (Array.isArray(group?.player)) combined.push(...group.player);
         });
       }
-      // Older/alternate shape fallback — some responses may nest everything
-      // a level deeper under `players` instead of `player`, or hand back a
-      // flat array directly. Covers those cases too, just in case.
       if (combined.length === 0) {
         const playersObj = data?.players;
         if (Array.isArray(playersObj)) {
@@ -9600,6 +9564,93 @@ async function d11FetchSquadFromCricbuzz(matchId) {
           });
         }
       }
+      return { combined, playingXI };
+    }
+
+    async function fetchSeriesSquadFallback() {
+      if (!m.cricbuzzSeriesId) {
+        // Older/manually-linked matches (from before this field was
+        // captured at link time) won't have this yet — derive it from the
+        // base match-info endpoint, which always includes matchInfo.seriesId,
+        // same endpoint used above to backfill missing team IDs.
+        try {
+          const baseInfo = await _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}`, null, false, { feature: 'Derive Series ID', matchId });
+          const sid = baseInfo?.matchInfo?.seriesId || baseInfo?.seriesId;
+          if (sid) {
+            m.cricbuzzSeriesId = sid;
+            await _saveMatchToFirestore(matchId, m);
+          }
+        } catch (e) {
+          console.warn('Series ID lookup failed:', e.message);
+        }
+      }
+      if (!m.cricbuzzSeriesId) return null;
+      showNotif('⏳ Match squad is empty on Cricbuzz — trying the series squad instead…');
+      await _d11Sleep(800);
+      const seriesData = await _cricbuzzFetch(`/series/v1/${m.cricbuzzSeriesId}/squads`, null, false, { feature: 'Fetch Squad (Series fallback)', matchId });
+      const squadGroups = seriesData?.squads || seriesData?.squadsList || [];
+      const findSquadFor = (teamName) => squadGroups.find(g => {
+        const n = (g.squadType || g.teamName || g.title || '').toLowerCase();
+        return teamName && n.includes(teamName.toLowerCase().split(' ')[0]);
+      });
+      const g1 = findSquadFor(m.teamA);
+      const g2 = findSquadFor(m.teamB);
+      _d11SquadDebugData = { seriesRaw: seriesData, team1: { player: [{ category: 'Squad', player: g1?.player || g1?.players || [] }] }, team2: { player: [{ category: 'Squad', player: g2?.player || g2?.players || [] }] }, team1Id: m.cricbuzzTeam1Id, team2Id: m.cricbuzzTeam2Id };
+      return {
+        team1: { player: [{ category: 'Squad', player: g1?.player || g1?.players || [] }] },
+        team2: { player: [{ category: 'Squad', player: g2?.player || g2?.players || [] }] }
+      };
+    }
+
+    // Fetched one at a time (not Promise.all) with a short gap between —
+    // firing both team calls in the same instant was tripping Cricbuzz's
+    // per-second burst rate limit (HTTP 429), even when the monthly quota
+    // still had plenty of room left.
+    let team1Data, team2Data;
+    try {
+      team1Data = await _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam1Id}`, null, false, { feature: 'Fetch Squad (Team 1)', matchId });
+      await _d11Sleep(1200);
+      team2Data = await _cricbuzzFetch(`/mcenter/v1/${m.cricketDataMatchId}/team/${m.cricbuzzTeam2Id}`, null, false, { feature: 'Fetch Squad (Team 2)', matchId });
+    } catch (matchSquadErr) {
+      // The match's own squad endpoint threw (often an empty 204/no-body
+      // response) whenever Cricbuzz hasn't announced THIS match's squad
+      // yet — which is common days ahead of a tour match even though the
+      // series' full touring squad was announced earlier.
+      const fallback = await fetchSeriesSquadFallback();
+      if (!fallback) throw matchSquadErr;
+      team1Data = fallback.team1;
+      team2Data = fallback.team2;
+      usedSeriesFallback = true;
+    }
+
+    // Even when the match-squad calls above succeed (HTTP 200, no
+    // exception), Cricbuzz can still hand back a technically-valid but
+    // EMPTY squad — e.g. { player: [{ category: "Squad", player: [] }] } —
+    // when the match squad hasn't actually been populated yet. That's not
+    // an error, so the try/catch above never sees it; check for it
+    // explicitly here and fall back to the series squad in that case too.
+    if (!usedSeriesFallback) {
+      const { combined: c1 } = flattenSquadPlayers(team1Data);
+      const { combined: c2 } = flattenSquadPlayers(team2Data);
+      if (c1.length === 0 && c2.length === 0) {
+        const fallback = await fetchSeriesSquadFallback();
+        if (fallback) {
+          team1Data = fallback.team1;
+          team2Data = fallback.team2;
+          usedSeriesFallback = true;
+        }
+      }
+    }
+    // on-screen, copyable panel (see renderD11SquadDebugModal) so the
+    // admin can screenshot/copy it without needing browser DevTools.
+    // Remove this once the squad-shape issue is confirmed/fixed.
+    _d11SquadDebugData = { team1: team1Data, team2: team2Data, team1Id: m.cricbuzzTeam1Id, team2Id: m.cricbuzzTeam2Id };
+
+    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    let addedCount = 0;
+
+    [{ data: team1Data, side: 'A' }, { data: team2Data, side: 'B' }].forEach(({ data, side }) => {
+      const { combined, playingXI } = flattenSquadPlayers(data);
       combined.forEach(p => {
         const name = (p.fullName || p.name || '').trim();
         if (!name || existingNamesLower.has(name.toLowerCase())) return;
@@ -9618,7 +9669,16 @@ async function d11FetchSquadFromCricbuzz(matchId) {
     });
 
     if (addedCount === 0) {
-      showNotif('No new players to add — squad already matches what Cricbuzz has. Tap "🐛 View Raw Data" below to see why.', 'error');
+      const totalFetched = (() => {
+        const { combined: c1 } = flattenSquadPlayers(team1Data);
+        const { combined: c2 } = flattenSquadPlayers(team2Data);
+        return c1.length + c2.length;
+      })();
+      if (totalFetched === 0) {
+        showNotif('📭 Cricbuzz hasn\'t published this squad yet (checked match + series data, both empty). Try again closer to match time, or add players manually for now.', 'error');
+      } else {
+        showNotif('No new players to add — squad already matches what\'s in your pool.');
+      }
       render();
       return;
     }
@@ -9723,12 +9783,13 @@ function renderReceiptImageModal() {
   </div>`;
 }
 
-function d11LinkLiveMatch(matchId, cricbuzzMatchId, team1Id, team2Id) {
+function d11LinkLiveMatch(matchId, cricbuzzMatchId, team1Id, team2Id, seriesId) {
   const m = matches[matchId];
   if (!m) return;
   m.cricketDataMatchId = cricbuzzMatchId; // field name kept for backward compatibility with earlier saved links
   if (team1Id) m.cricbuzzTeam1Id = team1Id;
   if (team2Id) m.cricbuzzTeam2Id = team2Id;
+  if (seriesId) m.cricbuzzSeriesId = seriesId; // used as a fallback for squads before the match's own squad is announced
   _saveMatchToFirestore(matchId, m);
   _d11LiveSyncSearchResults = [];
   showNotif('🔗 Linked to Cricbuzz! Fetching squad…');
@@ -13649,26 +13710,44 @@ function renderD11ContestParticipants() {
     </div>
   </div>`;
 
-  // Renders a simple ranked list of email + (points, if team submitted)
+  // Renders a ranked leaderboard for one specific contest's participants —
+  // big rank badge, avatar circle, name, ID/C/VC info, points on the right.
+  // Same visual style as the full-match leaderboard (renderDream11Leaderboard),
+  // just scoped to only this contest's joiners with the RIGHT team looked up
+  // per-contest (a user might have entered a different team into each contest).
   const renderUserList = (emails, title, color, teamsMap) => {
     if (emails.length === 0) {
-      return `<div class="card mb14"><div style="font-weight:700;font-size:14px;color:${color};margin-bottom:8px">${title}</div><div style="font-size:12px;color:var(--dim)">Koi bhi join nahi hua abhi.</div></div>`;
+      return `<div class="section-title" style="color:${color}">${title} (0)</div><div class="empty-state"><div class="empty-icon">🏅</div>Koi bhi join nahi hua abhi.</div>`;
     }
     const rows = emails.map(email => {
       const u = users[email];
       const team = d11GetTeamForContest(matchId, email, teamsMap);
-      const name = u?.name || email;
-      const isMe = email === currentUser.email;
-      return { name, email, isMe, points: team?.totalPoints, teamSlot: team?.teamSlot || 1 };
+      return { email, u, team, points: team?.totalPoints||0, teamSlot: team?.teamSlot||1 };
     }).sort((a,b) => (b.points||0) - (a.points||0));
-    return `<div class="card mb14">
-      <div style="font-weight:700;font-size:14px;color:${color};margin-bottom:8px">${title} (${emails.length} joined)</div>
-      ${rows.map((r,i) => `
-      <div style="padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.05);display:flex;justify-content:space-between;align-items:center;font-size:12.5px">
-        <span>${i+1}. ${r.name}${r.isMe?` <span style="color:#4ade80;font-weight:700">(Aap${r.teamSlot>1?' · Team '+r.teamSlot:''})</span>`:''}</span>
-        <span style="font-weight:700;color:${r.points!=null?'var(--gold)':'var(--dim)'}">${r.points!=null ? r.points+' pts' : '—'}</span>
-      </div>`).join('')}
-    </div>`;
+    return `
+    <div class="section-title" style="color:${color}">${title} (${emails.length})</div>
+    ${rows.map((r,i) => {
+      const rankColor = i===0?'#fbbf24':i===1?'#cbd5e1':i===2?'#fb923c':'rgba(255,255,255,0.08)';
+      const rankText = i===0?'#1a1300':i===1?'#0f172a':i===2?'#1a0f00':'var(--dim)';
+      const dp = r.u?.dpBase64;
+      const av = dp ? '<img src="'+dp+'" style="width:34px;height:34px;border-radius:50%;object-fit:cover;border:2px solid '+(i===0?'#fbbf24':'rgba(255,255,255,0.12)')+';flex-shrink:0" />' : '<div style="width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--orange));display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;flex-shrink:0;font-family:Rajdhani,sans-serif">'+(r.u?.name||'?').charAt(0).toUpperCase()+'</div>';
+      const isMe = r.email === currentUser.email;
+      const canSeeCvc = isMe || isAdmin() || isD11Locked(matchId);
+      return `
+      <div class="d11-team-card" style="display:flex;align-items:center;gap:10px;cursor:pointer" onclick="${r.team ? `openDream11ViewTeam('${r.team.id}')` : ''}">
+        <div class="d11-rank-badge" style="background:${rankColor};color:${rankText}">${i+1}</div>
+        ${av}
+        <div style="flex:1;min-width:0;margin-left:2px">
+          <div style="font-weight:700;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${r.u?.name||r.email}${isMe?' (You)':''}${r.teamSlot>1?` · Team ${r.teamSlot}`:''}</div>
+          <div style="font-size:10.5px;color:var(--dim)">${r.u?.idNumber?`ID: ${r.u.idNumber} · `:''}${canSeeCvc ? `C: ${d11m?.players.find(p=>p.id===r.team?.captain)?.name||'—'} · VC: ${d11m?.players.find(p=>p.id===r.team?.viceCaptain)?.name||'—'}` : `🔒 C/VC hidden until deadline`}</div>
+        </div>
+        <div style="text-align:right">
+          <div class="display" style="font-size:17px;color:var(--gold)">${r.points}</div>
+          <div style="font-size:9px;color:var(--dim)">pts</div>
+        </div>
+      </div>`;
+    }).join('')}
+    `;
   };
 
   if (contestType === 'mega') {
@@ -13700,7 +13779,7 @@ function renderD11ContestParticipants() {
           ${prizeRows.map((p,i)=>`<span style="font-size:11px;padding:4px 10px;border-radius:14px;background:rgba(251,191,36,0.12);color:#fbbf24">${i===0?'🥇':i===1?'🥈':i===2?'🥉':'🏅'} Rank ${p.rank}: Rs ${p.prize}</span>`).join('')}
         </div>
       </div>`;
-    return `${backBtn}${matchHeader}${prizeBox}${renderUserList(megaParts, '🎯 Mega Contest Participants', 'var(--gold)', d11m.megaParticipantsTeams)}`;
+    return `${backBtn}${matchHeader}${prizeBox}${renderUserList(megaParts, '🎯 Mega Contest Leaderboard', 'var(--gold)', d11m.megaParticipantsTeams)}`;
   }
 
   if (contestType === 'minimega') {
@@ -13731,11 +13810,11 @@ function renderD11ContestParticipants() {
           ${prizeRows.map((p,i)=>`<span style="font-size:11px;padding:4px 10px;border-radius:14px;background:rgba(96,165,250,0.12);color:#60a5fa">${i===0?'🥇':i===1?'🥈':i===2?'🥉':'🏅'} Rank ${p.rank}: Rs ${p.prize}</span>`).join('')}
         </div>
       </div>`;
-    return `${backBtn}${matchHeader}${prizeBox}${renderUserList(miniParts, '🔸 Mini Mega Contest Participants', '#60a5fa', d11m.miniMegaParticipantsTeams)}`;
+    return `${backBtn}${matchHeader}${prizeBox}${renderUserList(miniParts, '🔸 Mini Mega Contest Leaderboard', '#60a5fa', d11m.miniMegaParticipantsTeams)}`;
   }
 
   if (contestType === 'free') {
-    return `${backBtn}${matchHeader}${renderUserList(d11m.freeParticipants||[], '🎁 Free Contest Participants', '#4ade80', d11m.freeParticipantsTeams)}`;
+    return `${backBtn}${matchHeader}${renderUserList(d11m.freeParticipants||[], '🎁 Free Contest Leaderboard', '#4ade80', d11m.freeParticipantsTeams)}`;
   }
 
   if (contestType === 'h2h') {
@@ -13764,7 +13843,7 @@ function renderD11ContestParticipants() {
     <div class="card mb14" style="background:rgba(168,85,247,0.06);border-color:rgba(168,85,247,0.25)">
       <div style="font-weight:700;font-size:14px;color:#c084fc;margin-bottom:4px">🛠️ Custom Contest: ${cc.code}</div>
       <div style="font-size:11px;color:var(--dim);margin-bottom:8px">Entry Rs ${cc.entryFee} • Pool Rs ${cc.pool} • Created by ${users[cc.creatorEmail]?.name || cc.creatorEmail}</div>
-      ${renderUserList(cc.participants||[], `Participants`, '#c084fc', cc.participantTeams)}
+      ${renderUserList(cc.participants||[], `🛠️ Custom Contest Leaderboard`, '#c084fc', cc.participantTeams)}
     </div>`;
   }
 
@@ -14287,7 +14366,7 @@ function renderD11LiveSyncPickerModal() {
           <div style="font-size:12.5px;font-weight:600;line-height:1.4;margin-bottom:2px">${title}</div>
           <div style="font-size:10.5px;color:var(--dim);margin-bottom:2px">${sub}</div>
           ${status ? `<div style="font-size:10px;color:var(--dim2);margin-bottom:8px">${status}</div>` : `<div style="margin-bottom:8px"></div>`}
-          <button class="btn-secondary btn-block" style="font-size:11px;padding:8px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;border:none" onclick="d11LinkLiveMatch('${d11LiveSyncPickerMatchId}','${info.matchId}',${info.team1?.teamId||info.team1?.id||'null'},${info.team2?.teamId||info.team2?.id||'null'})">Link this match</button>
+          <button class="btn-secondary btn-block" style="font-size:11px;padding:8px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;border:none" onclick="d11LinkLiveMatch('${d11LiveSyncPickerMatchId}','${info.matchId}',${info.team1?.teamId||info.team1?.id||'null'},${info.team2?.teamId||info.team2?.id||'null'},${info.seriesId||'null'})">Link this match</button>
         </div>
       `;
       }).join('') : ''}
@@ -21427,7 +21506,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.49.0";
+const APP_VERSION = "3.53.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
