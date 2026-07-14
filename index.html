@@ -6141,6 +6141,13 @@ function renderD11StatsTab(matchId) {
       <div style="font-weight:800;font-size:19px;text-align:right;min-width:60px">${p.points||0}</div>
     </div>`;
   }).join('')}
+
+  <div class="section-title" style="margin-top:20px">📋 Full Scorecard</div>
+  ${(() => {
+    const m = matches[matchId];
+    if (m?.scorecardText) return d11RenderScorecardText(m.scorecardText);
+    return `<div class="card" style="text-align:center;padding:32px;color:var(--dim)"><div style="font-size:32px;margin-bottom:10px">📋</div><div>Scorecard abhi available nahi hai — admin ke "Sync Now" karne ke baad yahan dikhega.</div></div>`;
+  })()}
   `;
 }
 function m_teamNameForStats(matchId, side) {
@@ -21381,7 +21388,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.45.0";
+const APP_VERSION = "3.46.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
