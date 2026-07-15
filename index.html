@@ -2367,6 +2367,40 @@ function handleLogout() {
   render();
 }
 
+// ── "Clear Cache" (Profile screen) — wipes every pp_* localStorage key
+// (all the collection caches, last-synced/last-manual-refresh watermarks,
+// the session, everything this app has ever written to localStorage) and
+// signs the user out, then reloads the page. On next open, since the
+// cache is now empty, _liveLoadCollection's normal cache-first logic
+// naturally falls through to a full fresh read from Firestore for every
+// collection — a clean A-to-Z resync — while every subsequent
+// open/refresh after that goes back to the usual "only what changed"
+// incremental behavior. This is a genuine full reset, not a soft one:
+// don't call it from anywhere except an explicit user tap + confirmation.
+function handleClearCacheAndLogout() {
+  if (!confirm('Clear all cached data and log out?\n\nYou\'ll need to log in again, and the app will re-download fresh data from the server on next open.')) return;
+  try {
+    const keysToRemove = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      // pp_* covers every collection cache, sync watermark, and manual-
+      // refresh cooldown timestamp. _fullBackfillDone_* is a separate
+      // prefix (see _liveLoadCollection) that must also be cleared —
+      // otherwise the device would still think it already did its
+      // one-time full backfill and would go straight back to incremental
+      // (changed-docs-only) queries instead of genuinely re-reading
+      // everything fresh.
+      if (k && (k.startsWith('pp_') || k.startsWith('_fullBackfillDone_'))) keysToRemove.push(k);
+    }
+    keysToRemove.forEach(k => { try { localStorage.removeItem(k); } catch(e){} });
+  } catch(e) { console.error('Clear cache failed:', e); }
+  if (window._fbAuthSignOut) { try { window._fbAuthSignOut().catch(()=>{}); } catch(e){} }
+  // Full page reload (not just render()) so every in-memory JS variable —
+  // matches, dream11Matches, users, all of it — also resets to a truly
+  // blank slate, matching what the now-empty localStorage implies.
+  window.location.reload();
+}
+
 function switchAuthMode(mode) {
   authMode = mode;
   authError='';
@@ -5579,6 +5613,14 @@ function renderProfile() {
     ${u.tpin
       ? `<div style="display:flex;gap:6px"><button class="btn-secondary" style="width:auto;padding:8px 12px;font-size:11.5px" onclick="tpinOpenChange()">Change</button><button class="btn-secondary" style="width:auto;padding:8px 12px;font-size:11.5px;background:rgba(220,38,38,0.1);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="tpinRemove()">Remove</button></div>`
       : `<button class="btn-primary" style="width:auto;padding:9px 16px;font-size:12px" onclick="tpinOpenSetup()">Set PIN</button>`}
+  </div>
+
+  <div class="card mb14" style="display:flex;align-items:center;justify-content:space-between;background:rgba(220,38,38,0.06);border-color:rgba(220,38,38,0.2)">
+    <div>
+      <div style="font-size:13px;font-weight:700">🧹 Clear Cache</div>
+      <div style="font-size:11px;color:var(--dim);margin-top:2px">Wipes saved data on this device and logs you out — next login re-downloads everything fresh</div>
+    </div>
+    <button class="btn-secondary" style="width:auto;padding:9px 16px;font-size:12px;background:rgba(220,38,38,0.1);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="handleClearCacheAndLogout()">Clear</button>
   </div>
 
   <div class="card mb14" style="background:rgba(37,99,235,0.06);border-color:rgba(37,99,235,0.2)">
@@ -22052,7 +22094,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.64.0";
+const APP_VERSION = "3.65.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
