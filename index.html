@@ -21855,8 +21855,14 @@ async function initApp() {
   // We need this later to avoid nuking a not-yet-migrated user's data.
   const _legacySessionEmail = currentUser ? currentUser.email : null;
 
+  // Hoisted so Step 3 below can use the SAME confirmed auth result instead
+  // of re-querying auth.currentUser — see the NOTE at Step 3 for why that
+  // re-check was unreliable and was the actual cause of fresh app-opens
+  // sometimes silently skipping the Firestore data sync.
+  let authUser = null;
+
   if (firebaseOk && window._fbAuthReadyPromise) {
-    const authUser = await window._fbAuthReadyPromise;
+    authUser = await window._fbAuthReadyPromise;
     if (authUser && authUser.email) {
       // Real, valid Firebase Auth session exists — this is the source of truth
       const authEmail = authUser.email.toLowerCase();
@@ -21911,8 +21917,18 @@ async function initApp() {
   }
 
   // Step 3: Sync from Firestore silently
-  // Only load if user is authenticated — rules require request.auth != null
-  const authOk = !!(window._fbAuthCurrentUser && window._fbAuthCurrentUser());
+  // Only load if user is authenticated — rules require request.auth != null.
+  // NOTE: this previously re-checked window._fbAuthCurrentUser() (i.e.
+  // auth.currentUser) here as a fresh, independent check. That's a live
+  // read of Firebase SDK internal state, and in practice it could
+  // occasionally read as null even though Step 2 just above had already
+  // confirmed a valid session via onAuthStateChanged — a timing quirk
+  // that caused fresh app-opens (not logins) to sometimes silently skip
+  // the whole Firestore sync below, leaving only stale localStorage cache
+  // data on screen until the user manually hit 🔄 refresh. Using the
+  // already-confirmed `authUser` from Step 2 instead removes that race
+  // entirely — if Step 2 says we're logged in, Step 3 trusts it.
+  const authOk = !!(authUser && authUser.email);
   if (!authOk) {
     console.warn('[initApp] No Firebase Auth session — skipping Firestore sync to avoid PERMISSION_DENIED');
     render();
@@ -22101,7 +22117,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.66.0";
+const APP_VERSION = "3.67.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
