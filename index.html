@@ -6485,7 +6485,7 @@ function calcDream11PlayerPoints(stats, matchId) {
   const isOut = !!stats.isOut;
   const ballsFaced = Number(stats.ballsFaced)||0;
   const oversBowled = Number(stats.oversBowled)||0;
-  const isPlayingXI = stats.isPlayingXI !== false; // default true if not tracked
+  const isPlayingXI = stats.isPlayingXI === true; // only award the bonus when explicitly confirmed — a missing/undefined field must NOT default to "yes", or every player who gets a manually-entered/partial stats object (which doesn't always set this field) wrongly earns the flat Playing XI bonus even if they're on the bench
 
   // Playing XI bonus (My11Circle: +4 for making the Playing XI)
   if (isPlayingXI) pts += s.playingXIBonus || 0;
@@ -8710,13 +8710,18 @@ function d11SaveStatsForPlayer(playerId) {
     isOut: isOutEl ? isOutEl.checked : false,
     wickets: get('wickets'), maidens: get('maidens'),
     catches: get('catches'), stumpings: get('stumpings'), runOuts: get('runOuts'),
-    oversBowled: get('oversBowled'), runsGiven: get('runsGiven'), lbwBowled: get('lbwBowled')
+    oversBowled: get('oversBowled'), runsGiven: get('runsGiven'), lbwBowled: get('lbwBowled'),
+    isPlayingXI: !!p.isPlayingXI
   };
   p.points = calcDream11PlayerPoints(p.stats, d11ActiveMatchId);
   const s = p.stats;
   const hasActivity = Number(s.ballsFaced||0) > 0 || Number(s.oversBowled||0) > 0 || Number(s.catches||0) > 0 ||
     Number(s.stumpings||0) > 0 || Number(s.runOuts||0) > 0 || !!s.isOut;
-  if (hasActivity) p.isPlayingXI = true;
+  if (hasActivity && !p.isPlayingXI) {
+    p.isPlayingXI = true;
+    p.stats.isPlayingXI = true;
+    p.points = calcDream11PlayerPoints(p.stats, d11ActiveMatchId);
+  }
   _saveDream11MatchToFirestore(d11ActiveMatchId, d11m);
   d11ApplyBackupReplacements(d11ActiveMatchId);
   d11RefreshLiveTeamPoints(d11ActiveMatchId);
@@ -10662,7 +10667,8 @@ function _d11ApplyParsedRows(battingRows, bowlingRows, fieldingRows) {
       runs: s.runs||0, ballsFaced: s.ballsFaced||0, fours: s.fours||0, sixes: s.sixes||0,
       isOut: !!s.isOut, wickets: s.wickets||0, maidens: s.maidens||0,
       catches: s.catches||0, stumpings: s.stumpings||0, runOuts: s.runOuts||0,
-      oversBowled: s.oversBowled||0, runsGiven: s.runsGiven||0, lbwBowled: s.lbwBowled||0
+      oversBowled: s.oversBowled||0, runsGiven: s.runsGiven||0, lbwBowled: s.lbwBowled||0,
+      isPlayingXI: !!p.isPlayingXI
     };
     p.points = calcDream11PlayerPoints(p.stats, d11ActiveMatchId);
   });
@@ -11192,6 +11198,7 @@ function d11ConfirmPasteStats() {
     // an all-rounder can appear as two separate lines (one batting, one bowling)
     // in the pasted scorecard, and both contributions must be kept.
     const prev = p.stats || {};
+    p.isPlayingXI = true; // stats just came in from a real scorecard — this player clearly played
     p.stats = {
       runs: row.runs || prev.runs || 0,
       ballsFaced: row.ballsFaced || prev.ballsFaced || 0,
@@ -11202,7 +11209,8 @@ function d11ConfirmPasteStats() {
       maidens: row.maidens || prev.maidens || 0,
       catches: row.catches || prev.catches || 0,
       stumpings: row.stumpings || prev.stumpings || 0,
-      runOuts: row.runOuts || prev.runOuts || 0
+      runOuts: row.runOuts || prev.runOuts || 0,
+      isPlayingXI: true
     };
     p.points = calcDream11PlayerPoints(p.stats, d11ActiveMatchId);
     matched++;
@@ -18288,12 +18296,16 @@ function d11QuickSaveAllStats(matchId) {
   d11m.players.forEach(p => {
     const get = (f) => { const el = document.getElementById('qs-'+matchId+'-'+p.id+'-'+f); return el ? el.value : ''; };
     const isOutEl = document.getElementById('qs-'+matchId+'-'+p.id+'-isOut');
+    const hasActivity = Number(get('balls')||0) > 0 || Number(get('overs')||0) > 0 || Number(get('catches')||0) > 0 ||
+      Number(get('stumpings')||0) > 0 || Number(get('runOuts')||0) > 0 || (isOutEl && isOutEl.checked);
+    if (hasActivity) p.isPlayingXI = true;
     p.stats = {
       runs: get('runs'), ballsFaced: get('balls'), fours: get('fours'), sixes: get('sixes'),
       isOut: isOutEl ? isOutEl.checked : false,
       wickets: get('wickets'), oversBowled: get('overs'), runsGiven: get('runsGiven'),
       maidens: get('maidens'), catches: get('catches'), stumpings: get('stumpings'), runOuts: get('runOuts'),
-      lbwBowled: get('lbwb')
+      lbwBowled: get('lbwb'),
+      isPlayingXI: !!p.isPlayingXI
     };
     p.points = calcDream11PlayerPoints(p.stats, matchId);
     count++;
@@ -19768,7 +19780,7 @@ function calcUtPlayerPoints(stats, matchId) {
   const isOut = !!stats.isOut;
   const ballsFaced = Number(stats.ballsFaced)||0;
   const oversBowled = Number(stats.oversBowled)||0;
-  const isPlayingXI = stats.isPlayingXI !== false;
+  const isPlayingXI = stats.isPlayingXI === true; // only award the bonus when explicitly confirmed — see calcDream11PlayerPoints for full rationale
 
   if (isPlayingXI) pts += s.playingXIBonus || 0;
 
@@ -19850,10 +19862,12 @@ function utApplyPasteStats() {
     let p = m.players.find(x => x.name.toLowerCase() === lowName);
     if (!p) p = m.players.find(x => x.name.toLowerCase().includes(lowName) || lowName.includes(x.name.toLowerCase()));
     if (!p) { unmatched.push(row.name); return; }
+    p.isPlayingXI = true; // stats just came in from a real scorecard — this player clearly played
     p.stats = {
       runs: row.runs||0, ballsFaced: row.ballsFaced||0, fours: row.fours||0, sixes: row.sixes||0, isOut: !!row.isOut,
       wickets: row.wickets||0, maidens: row.maidens||0, oversBowled: row.oversBowled||0, runsGiven: row.runsGiven||0,
-      catches: row.catches||0, stumpings: row.stumpings||0, runOuts: row.runOuts||0
+      catches: row.catches||0, stumpings: row.stumpings||0, runOuts: row.runOuts||0,
+      isPlayingXI: true
     };
     p.points = calcUtPlayerPoints(p.stats, m.id);
     matched++;
@@ -20046,6 +20060,14 @@ function _utApplyParsedRows(battingRows, bowlingRows, fieldingRows) {
   });
   const matched = matchedPlayerIds.size;
 
+  // Any player whose stats just came in from the scan/paste clearly played the
+  // match — auto-confirm them as Playing XI so admin doesn't have to also tick
+  // them manually (mirrors the Dream11 admin flow).
+  matchedPlayerIds.forEach(pid => {
+    const p = m.players.find(x => x.id === pid);
+    if (p) p.isPlayingXI = true;
+  });
+
   m.players.forEach(p => {
     if (!p.stats) return;
     const s = p.stats;
@@ -20053,7 +20075,8 @@ function _utApplyParsedRows(battingRows, bowlingRows, fieldingRows) {
       runs: s.runs||0, ballsFaced: s.ballsFaced||0, fours: s.fours||0, sixes: s.sixes||0,
       isOut: !!s.isOut, wickets: s.wickets||0, maidens: s.maidens||0,
       catches: s.catches||0, stumpings: s.stumpings||0, runOuts: s.runOuts||0,
-      oversBowled: s.oversBowled||0, runsGiven: s.runsGiven||0, lbwBowled: s.lbwBowled||0
+      oversBowled: s.oversBowled||0, runsGiven: s.runsGiven||0, lbwBowled: s.lbwBowled||0,
+      isPlayingXI: !!p.isPlayingXI
     };
     p.points = calcUtPlayerPoints(p.stats, m.id);
   });
@@ -22029,7 +22052,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.63.0";
+const APP_VERSION = "3.64.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
