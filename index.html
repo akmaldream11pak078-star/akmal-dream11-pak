@@ -19342,6 +19342,87 @@ function userTotalContestWinnings(u) {
   return (u.transactions||[]).reduce((sum, tx) => CONTEST_PRIZE_TX_TYPES.has(tx.type) ? sum + (tx.amount||0) : sum, 0);
 }
 
+// ── Admin-only: full match-by-match, contest-by-contest breakdown for one
+// user — every Dream11 match they touched, every contest type within it
+// (Mega/Mini Mega/H2H/Free/Custom), what they paid to join (entry
+// fee/loss) and what they actually won (prize), so admin can see the
+// complete picture for that user in one place without hunting through
+// separate contest screens.
+function getUserAdminContestBreakdown(email) {
+  const teamMatchIds = Object.values(dream11Teams).filter(t => t.userEmail === email).map(t => t.matchId);
+  const matchIds = Array.from(new Set([
+    ...Object.keys(dream11Matches).filter(mId => {
+      const d11m = dream11Matches[mId];
+      return (d11m.freeParticipants||[]).includes(email) || (d11m.megaParticipants||[]).includes(email) || (d11m.miniMegaParticipants||[]).includes(email);
+    }),
+    ...teamMatchIds.filter(mId => !!dream11Matches[mId])
+  ]));
+
+  const out = matchIds.map(mId => {
+    const m = matches[mId];
+    const d11m = dream11Matches[mId];
+    if (!m || !d11m) return null;
+
+    const contests = [];
+
+    if ((d11m.megaParticipants||[]).includes(email)) {
+      contests.push({
+        label: 'Mega Contest', icon: '🎯',
+        entryFee: D11_MEGA_ENTRY_FEE,
+        prize: (d11m.megaPrizes||{})[email] || 0,
+        status: d11m.scored ? 'settled' : 'pending'
+      });
+    }
+    if ((d11m.miniMegaParticipants||[]).includes(email)) {
+      contests.push({
+        label: 'Mini Mega Contest', icon: '🔸',
+        entryFee: D11_MINI_MEGA_ENTRY_FEE,
+        prize: (d11m.miniMegaPrizes||{})[email] || 0,
+        status: d11m.scored ? 'settled' : 'pending'
+      });
+    }
+    if ((d11m.freeParticipants||[]).includes(email)) {
+      contests.push({
+        label: 'Free Contest', icon: '🎁',
+        entryFee: 0,
+        prize: (d11m.freeRewards||{})[email] || 0,
+        status: d11m.scored ? 'settled' : 'pending'
+      });
+    }
+    Object.values(d11h2hContests||{}).filter(c => c.matchId === mId && (c.player1?.email === email || c.player2?.email === email)).forEach(c => {
+      const won = c.status === 'completed' && c.winnerId === email;
+      const lost = c.status === 'completed' && c.winnerId && c.winnerId !== email;
+      const oppEmail = c.player1?.email === email ? c.player2?.email : c.player1?.email;
+      contests.push({
+        label: `H2H vs ${oppEmail ? (users[oppEmail]?.name || oppEmail) : 'Opponent'}`, icon: '🥊',
+        entryFee: D11_H2H_ENTRY_FEE,
+        prize: won ? (c.winnerPrize || 0) : 0,
+        status: c.status === 'completed' ? (won ? 'won' : lost ? 'lost' : 'draw') : (c.status || 'open')
+      });
+    });
+    Object.values(d11CustomContests||{}).filter(c => c.matchId === mId && (c.participants||[]).includes(email)).forEach(c => {
+      contests.push({
+        label: `Custom: ${c.code||c.id}`, icon: '🛠️',
+        entryFee: c.cancelled ? 0 : (c.entryFee || 0),
+        prize: (c.prizes||{})[email] || 0,
+        status: c.cancelled ? 'cancelled/refunded' : (d11m.scored ? 'settled' : 'pending')
+      });
+    });
+
+    const totalEntry = contests.reduce((s,c) => s + c.entryFee, 0);
+    const totalPrize = contests.reduce((s,c) => s + c.prize, 0);
+
+    return {
+      matchId: mId, teamA: m.teamA, teamB: m.teamB, format: m.format,
+      scored: !!d11m.scored, contests, totalEntry, totalPrize, net: totalPrize - totalEntry
+    };
+  }).filter(Boolean);
+
+  const grandTotalEntry = out.reduce((s,m) => s + m.totalEntry, 0);
+  const grandTotalPrize = out.reduce((s,m) => s + m.totalPrize, 0);
+  return { matches: out, grandTotalEntry, grandTotalPrize, grandNet: grandTotalPrize - grandTotalEntry };
+}
+
 let adminUserSearchText = '';
 let adminUserDetailEmail = null; // set to open the full-detail view for one user
 
@@ -19446,6 +19527,46 @@ function renderAdminUserDetail(email) {
       <div>Invited by: <b style="color:var(--text)">${u.referredBy ? (users[u.referredBy]?.name||u.referredBy) : 'None'}</b></div>
     </div>
   </div>
+
+  ${(() => {
+    const bd = getUserAdminContestBreakdown(email);
+    if (bd.matches.length === 0) return '';
+    const statusColor = (s) => s==='won'||s==='settled' ? '#4ade80' : s==='lost' ? '#f87171' : s==='cancelled/refunded' ? 'var(--dim)' : '#fbbf24';
+    return `
+    <div class="card mb14">
+      <div class="section-title" style="margin-bottom:6px">🏏 Match-by-Match Contest Breakdown</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-size:11px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--card-b)">
+        <div><span style="color:var(--dim)">Total Spent</span><br/><b style="color:#f87171;font-size:14px">Rs ${bd.grandTotalEntry.toFixed(2)}</b></div>
+        <div><span style="color:var(--dim)">Total Won</span><br/><b style="color:#4ade80;font-size:14px">Rs ${bd.grandTotalPrize.toFixed(2)}</b></div>
+        <div><span style="color:var(--dim)">Net</span><br/><b style="color:${bd.grandNet>=0?'#4ade80':'#f87171'};font-size:14px">${bd.grandNet>=0?'+':''}Rs ${bd.grandNet.toFixed(2)}</b></div>
+      </div>
+      ${bd.matches.map(mb => `
+      <div style="background:var(--input-bg);border-radius:10px;padding:10px 12px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <div style="font-weight:700;font-size:12.5px">${mb.teamA} vs ${mb.teamB}</div>
+          <span style="font-size:9.5px;font-weight:700;color:${mb.scored?'#4ade80':'#fbbf24'};background:${mb.scored?'rgba(34,197,94,0.12)':'rgba(251,191,36,0.12)'};padding:2px 7px;border-radius:5px">${mb.scored?'SCORED':'PENDING'}</span>
+        </div>
+        ${mb.contests.map(c => `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;font-size:11px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <span>${c.icon}</span>
+            <span>${c.label}</span>
+            <span style="color:${statusColor(c.status)};font-size:9.5px;font-weight:700;text-transform:uppercase">${c.status}</span>
+          </div>
+          <div style="display:flex;gap:10px">
+            ${c.entryFee>0 ? `<span style="color:#f87171">-Rs ${c.entryFee}</span>` : ''}
+            ${c.prize>0 ? `<span style="color:#4ade80;font-weight:700">+Rs ${c.prize}</span>` : ''}
+          </div>
+        </div>`).join('')}
+        <div style="display:flex;justify-content:space-between;margin-top:6px;padding-top:6px;border-top:1px solid var(--card-b);font-size:11px;font-weight:700">
+          <span style="color:var(--dim)">Match Net</span>
+          <span style="color:${mb.net>=0?'#4ade80':'#f87171'}">${mb.net>=0?'+':''}Rs ${mb.net.toFixed(2)}</span>
+        </div>
+      </div>
+      `).join('')}
+    </div>
+    `;
+  })()}
 
   <div class="card mb14">
     <div class="section-title" style="margin-bottom:10px">⚙️ Adjust Balance</div>
@@ -22795,7 +22916,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.79.0";
+const APP_VERSION = "3.80.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
