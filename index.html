@@ -18489,6 +18489,117 @@ function openAdminCleanup() {
   render();
 }
 
+// ── COMPLETE RESET — deletes ALL match/contest/team/tournament data across
+// every collection, keeping ONLY each user's confirmed deposit/withdraw
+// history (balance recalculated from that). This is the "start completely
+// fresh" button — repeatable any time the admin wants a clean slate, e.g.
+// after a testing phase, without touching who's registered or their money
+// history. Everything else (points, matchesJoined, predictions, referral
+// counts tied to contest activity) resets to zero/empty since it has no
+// meaning without the contests it came from.
+const COMPLETE_RESET_COLLECTIONS = [
+  'pp_matches', 'pp_dream11_matches', 'pp_dream11_teams',
+  'pp_h2h', 'pp_dream11_h2h', 'pp_h2h_locks',
+  'pp_custom_contests', 'pp_dream11_custom_contests',
+  'pp_dream11_tournaments', 'pp_ut_tournaments', 'pp_ut_teams',
+  'pp_team_squads', 'pp_deleted_matches', 'pp_deleted_dream11_matches',
+  'pp_player_history'
+];
+
+async function _wipeFirestoreCollection(collectionName) {
+  if (!window._fbDb || !window._fbFns) return 0;
+  const { collection, getDocs, doc, deleteDoc } = window._fbFns;
+  let deletedCount = 0;
+  try {
+    const snap = await getDocs(collection(window._fbDb, collectionName));
+    for (const d of snap.docs) {
+      try { await deleteDoc(doc(window._fbDb, collectionName, d.id)); deletedCount++; }
+      catch (e) { console.warn(`Failed to delete ${collectionName}/${d.id}:`, e.message); }
+    }
+  } catch (e) {
+    console.warn(`Failed to read ${collectionName} for wipe:`, e.message);
+  }
+  return deletedCount;
+}
+
+let _completeResetInProgress = false;
+let _completeResetProgress = '';
+async function runCompleteReset() {
+  if (_completeResetInProgress) return;
+  const step1 = confirm(
+    '⚠️ COMPLETE RESET ⚠️\n\nThis will PERMANENTLY DELETE every match, Dream11 contest, team, tournament, H2H, and custom contest for ALL users.\n\nOnly each user\'s confirmed deposit/withdraw history and resulting balance will be kept — everything else (points, joined contests, submitted teams) is wiped to zero.\n\nThis CANNOT be undone. Continue?'
+  );
+  if (!step1) return;
+  const step2 = prompt('Type RESET (in capitals) to confirm you understand this deletes ALL match/contest data for every user:');
+  if (step2 !== 'RESET') { showNotif('Reset cancelled — confirmation text did not match', 'error'); return; }
+
+  _completeResetInProgress = true;
+  _completeResetProgress = 'Starting…';
+  render();
+
+  try {
+    // 1. Wipe every match/contest/team/tournament collection.
+    let totalDeleted = 0;
+    for (const coll of COMPLETE_RESET_COLLECTIONS) {
+      _completeResetProgress = `Deleting ${coll}…`;
+      render();
+      totalDeleted += await _wipeFirestoreCollection(coll);
+    }
+
+    // 2. Rebuild every user: keep only confirmed deposit/withdraw
+    // transactions, recompute balance from them, zero out everything
+    // else that only had meaning in the context of contests now gone.
+    _completeResetProgress = 'Resetting user balances & history…';
+    render();
+    const { doc, updateDoc } = window._fbFns;
+    const emails = Object.keys(users);
+    for (const email of emails) {
+      const u = users[email];
+      if (!u) continue;
+      const keptTx = (u.transactions || []).filter(t =>
+        (t.type === 'deposit' || t.type === 'withdraw') && t.status === 'confirmed'
+      );
+      const totalDeposit = keptTx.filter(t => t.type === 'deposit').reduce((s, t) => s + (t.amount || 0), 0);
+      const totalWithdrawn = keptTx.filter(t => t.type === 'withdraw').reduce((s, t) => s + (t.amount || 0), 0);
+      const newBalance = totalDeposit - totalWithdrawn;
+
+      const updates = {
+        transactions: keptTx,
+        totalDeposit, totalWithdrawn, balance: newBalance,
+        points: 0, matchesJoined: [], predictions: {}
+      };
+      Object.assign(u, updates);
+      try {
+        const safeKey = email.replace(/\./g, '_');
+        await updateDoc(doc(window._fbDb, 'pp_users', safeKey), updates);
+      } catch (e) { console.warn('Failed to reset user', email, e.message); }
+    }
+
+    // 3. Clear every in-memory object so the UI reflects the wipe immediately.
+    matches = {}; dream11Matches = {}; dream11Teams = {};
+    h2hContests = {}; d11h2hContests = {}; customContests = {}; d11CustomContests = {};
+    d11Tournaments = {}; utTournaments = {}; utTeams = {}; teamSquads = {};
+    deletedMatches = {}; deletedDream11Matches = {};
+    ['pp_matches_cache','pp_dream11_matches_cache','pp_dream11_teams_cache',
+     'pp_h2h_cache','pp_dream11_h2h_cache','pp_custom_contests_cache','pp_dream11_custom_contests_cache',
+     'pp_dream11_tournaments_cache','pp_ut_tournaments_cache','pp_ut_teams_cache',
+     'pp_team_squads_cache','pp_deleted_matches_cache','pp_deleted_dream11_matches_cache'
+    ].forEach(k => { try { localStorage.removeItem(_userScopedKey(k)); } catch(e){} });
+    try { localStorage.setItem('pp_users_cache', JSON.stringify(users)); } catch(e){}
+
+    _completeResetInProgress = false;
+    _completeResetProgress = '';
+    showNotif(`✅ Complete reset done — ${totalDeleted} documents deleted, all balances recalculated from deposit/withdraw history.`);
+    render();
+  } catch (e) {
+    console.error('Complete reset failed:', e);
+    _completeResetInProgress = false;
+    _completeResetProgress = '';
+    showNotif('Reset failed partway through — check console, some data may be partially cleared. Safe to run again.', 'error');
+    render();
+  }
+}
+
 function renderAdminDuplicateCleanup() {
   const report = scanD11Duplicates();
   const totalIssues = report.mega.length + report.free.length + report.h2h.length + report.custom.length;
@@ -18497,6 +18608,14 @@ function renderAdminDuplicateCleanup() {
     + report.custom.reduce((s,r) => s + r.contests.slice(1).reduce((a,cc) => a + cc.pool, 0), 0);
 
   return `
+  <div class="card mb18" style="background:rgba(220,38,38,0.08);border-color:rgba(220,38,38,0.4)">
+    <div style="font-weight:700;font-size:15px;color:#f87171">🔥 Complete Reset (Danger Zone)</div>
+    <div style="font-size:11.5px;color:var(--dim);margin-top:4px">Permanently deletes every match, Dream11 contest, team, tournament, H2H, and custom contest — for ALL users. Only each user's confirmed deposit/withdraw history is kept, and their balance is recalculated from it (deposits − withdrawals). Everything else resets to zero. Repeatable any time.</div>
+    ${_completeResetInProgress
+      ? `<div style="margin-top:12px;font-size:13px;color:var(--gold);font-weight:700">⏳ ${_completeResetProgress || 'Working…'}</div>`
+      : `<button class="btn-primary btn-block" style="margin-top:12px;background:linear-gradient(135deg,#dc2626,#991b1b)" onclick="runCompleteReset()">🔥 Complete Reset — Delete Everything Except Balances</button>`}
+  </div>
+
   <div class="card mb18" style="background:rgba(168,85,247,0.08);border-color:rgba(168,85,247,0.3)">
     <div style="font-weight:700;font-size:15px;color:#c084fc">🧹 Duplicate Join Cleanup</div>
     <div style="font-size:11.5px;color:var(--dim);margin-top:4px">Legacy duplicate joins in Dream11 Mega / Free / H2H / Custom Contests, caused by old non-atomic code. Refunds the extra entry fees and removes the duplicate entries.</div>
@@ -23048,7 +23167,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.84.0";
+const APP_VERSION = "3.85.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
