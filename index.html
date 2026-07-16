@@ -1672,7 +1672,7 @@ async function _autoIncrementalRefresh(collectionName, targetSetter, cacheKey, o
   }
 }
 
-function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKey, opts, bypassThrottle) {
+function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKey, opts, bypassThrottle, isAppOpen) {
   opts = opts || {};
   cacheKey = _userScopedKey(cacheKey);
   _installVisibilityGuard();
@@ -1693,9 +1693,16 @@ function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKe
       // Manual 🔄 tap: only apply its own cooldown (spam-tap protection),
       // never the "cache forever" rule below. Force a brand new snapshot
       // read regardless of whether a listener is already attached.
+      //
+      // App-open (isAppOpen=true, passed by initApp on every open/reopen)
+      // deliberately SKIPS this cooldown — the whole point of forcing a
+      // refresh on every open is a hard guarantee that what's shown is
+      // never stale, and that guarantee cannot have a "well, unless you
+      // reopened within the last 10 minutes" exception. The cooldown still
+      // protects against a person mashing the manual 🔄 button repeatedly.
       const lastManual = _getLastManualRefreshAt(collectionName);
       const elapsed = Date.now() - lastManual;
-      if (lastManual && elapsed < _MANUAL_REFRESH_COOLDOWN_MS) {
+      if (!isAppOpen && lastManual && elapsed < _MANUAL_REFRESH_COOLDOWN_MS) {
         // Tapped again too soon — just keep showing whatever's already
         // loaded (cache or the live listener's last data); don't hit
         // Firestore again until the cooldown clears.
@@ -1890,8 +1897,8 @@ function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKe
   });
 }
 
-async function _loadAllMatchesFromFirestore(forceRefresh) {
-  return _liveLoadCollection('pp_matches', () => matches, (v) => { matches = v; }, 'pp_matches_cache', { rerenderOnUpdate: true }, forceRefresh);
+async function _loadAllMatchesFromFirestore(forceRefresh, isAppOpen) {
+  return _liveLoadCollection('pp_matches', () => matches, (v) => { matches = v; }, 'pp_matches_cache', { rerenderOnUpdate: true }, forceRefresh, isAppOpen);
 }
 async function _saveH2HToFirestore(h2hId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1899,8 +1906,8 @@ async function _saveH2HToFirestore(h2hId, data) {
   return setDoc(doc(window._fbDb, 'pp_h2h', h2hId), _stampUpdatedAt(data))
     .catch(e => { console.error('H2H save error:', e); throw e; });
 }
-async function _loadAllH2HFromFirestore(forceRefresh) {
-  return _liveLoadCollection('pp_h2h', () => h2hContests, (v) => { h2hContests = v; }, 'pp_h2h_cache', { rerenderOnUpdate: true }, forceRefresh);
+async function _loadAllH2HFromFirestore(forceRefresh, isAppOpen) {
+  return _liveLoadCollection('pp_h2h', () => h2hContests, (v) => { h2hContests = v; }, 'pp_h2h_cache', { rerenderOnUpdate: true }, forceRefresh, isAppOpen);
 }
 async function _saveCustomContestToFirestore(ccId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1908,8 +1915,8 @@ async function _saveCustomContestToFirestore(ccId, data) {
   return setDoc(doc(window._fbDb, 'pp_custom_contests', ccId), _stampUpdatedAt(data))
     .catch(e => { console.error('Custom contest save error:', e); throw e; });
 }
-async function _loadAllCustomContestsFromFirestore(forceRefresh) {
-  return _liveLoadCollection('pp_custom_contests', () => customContests, (v) => { customContests = v; }, 'pp_custom_contests_cache', { rerenderOnUpdate: true }, forceRefresh);
+async function _loadAllCustomContestsFromFirestore(forceRefresh, isAppOpen) {
+  return _liveLoadCollection('pp_custom_contests', () => customContests, (v) => { customContests = v; }, 'pp_custom_contests_cache', { rerenderOnUpdate: true }, forceRefresh, isAppOpen);
 }
 async function _saveDream11MatchToFirestore(matchId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1917,8 +1924,8 @@ async function _saveDream11MatchToFirestore(matchId, data) {
   return setDoc(doc(window._fbDb, 'pp_dream11_matches', matchId), _stampUpdatedAt(data))
     .catch(e => { console.error('Dream11 match save error:', e); throw e; });
 }
-async function _loadAllDream11MatchesFromFirestore(forceRefresh) {
-  return _liveLoadCollection('pp_dream11_matches', () => dream11Matches, (v) => { dream11Matches = v; console.log('[D11] Matches loaded:', Object.keys(v).length); }, 'pp_dream11_matches_cache', { rerenderOnUpdate: true, skipDoneField: 'scored' }, forceRefresh);
+async function _loadAllDream11MatchesFromFirestore(forceRefresh, isAppOpen) {
+  return _liveLoadCollection('pp_dream11_matches', () => dream11Matches, (v) => { dream11Matches = v; console.log('[D11] Matches loaded:', Object.keys(v).length); }, 'pp_dream11_matches_cache', { rerenderOnUpdate: true, skipDoneField: 'scored' }, forceRefresh, isAppOpen);
 }
 // One doc per player (keyed by the same lowercase-name key used in
 // playerMatchHistory), so updating one player's history after a match is
@@ -1930,8 +1937,8 @@ async function _savePlayerHistoryToFirestore(playerKey, data) {
   return setDoc(doc(window._fbDb, 'pp_player_history', playerKey), _stampUpdatedAt(data))
     .catch(e => { console.error('Player history save error:', e); throw e; });
 }
-async function _loadAllPlayerHistoryFromFirestore(forceRefresh) {
-  return _liveLoadCollection('pp_player_history', () => playerMatchHistory, (v) => { playerMatchHistory = v; }, 'pp_player_history_cache', {}, forceRefresh);
+async function _loadAllPlayerHistoryFromFirestore(forceRefresh, isAppOpen) {
+  return _liveLoadCollection('pp_player_history', () => playerMatchHistory, (v) => { playerMatchHistory = v; }, 'pp_player_history_cache', {}, forceRefresh, isAppOpen);
 }
 async function _saveTeamSquadToFirestore(teamKey, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1975,8 +1982,8 @@ async function _saveDream11TeamToFirestore(teamId, data) {
     throw e;
   }
 }
-async function _loadAllDream11TeamsFromFirestore(forceRefresh) {
-  return _liveLoadCollection('pp_dream11_teams', () => dream11Teams, (v) => { dream11Teams = v; console.log('[D11] Teams loaded:', Object.keys(v).length); }, 'pp_dream11_teams_cache', { rerenderOnUpdate: true, skipDoneField: 'matchScored' }, forceRefresh);
+async function _loadAllDream11TeamsFromFirestore(forceRefresh, isAppOpen) {
+  return _liveLoadCollection('pp_dream11_teams', () => dream11Teams, (v) => { dream11Teams = v; console.log('[D11] Teams loaded:', Object.keys(v).length); }, 'pp_dream11_teams_cache', { rerenderOnUpdate: true, skipDoneField: 'matchScored' }, forceRefresh, isAppOpen);
 }
 async function _saveD11H2HToFirestore(h2hId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1984,8 +1991,8 @@ async function _saveD11H2HToFirestore(h2hId, data) {
   return setDoc(doc(window._fbDb, 'pp_dream11_h2h', h2hId), _stampUpdatedAt(data))
     .catch(e => { console.error('Dream11 H2H save error:', e); throw e; });
 }
-async function _loadAllD11H2HFromFirestore(forceRefresh) {
-  return _liveLoadCollection('pp_dream11_h2h', () => d11h2hContests, (v) => { d11h2hContests = v; }, 'pp_dream11_h2h_cache', { rerenderOnUpdate: true, skipDoneField: 'status', skipDoneValue: 'completed' }, forceRefresh);
+async function _loadAllD11H2HFromFirestore(forceRefresh, isAppOpen) {
+  return _liveLoadCollection('pp_dream11_h2h', () => d11h2hContests, (v) => { d11h2hContests = v; }, 'pp_dream11_h2h_cache', { rerenderOnUpdate: true, skipDoneField: 'status', skipDoneValue: 'completed' }, forceRefresh, isAppOpen);
 }
 async function _saveD11CustomContestToFirestore(ccId, data) {
   if (!window._fbDb || !window._fbFns) return;
@@ -1993,8 +2000,8 @@ async function _saveD11CustomContestToFirestore(ccId, data) {
   return setDoc(doc(window._fbDb, 'pp_dream11_custom_contests', ccId), _stampUpdatedAt(data))
     .catch(e => { console.error('Dream11 custom contest save error:', e); throw e; });
 }
-async function _loadAllD11CustomContestsFromFirestore(forceRefresh) {
-  return _liveLoadCollection('pp_dream11_custom_contests', () => d11CustomContests, (v) => { d11CustomContests = v; }, 'pp_dream11_custom_contests_cache', { rerenderOnUpdate: true, skipDoneField: 'status', skipDoneValue: 'completed' }, forceRefresh);
+async function _loadAllD11CustomContestsFromFirestore(forceRefresh, isAppOpen) {
+  return _liveLoadCollection('pp_dream11_custom_contests', () => d11CustomContests, (v) => { d11CustomContests = v; }, 'pp_dream11_custom_contests_cache', { rerenderOnUpdate: true, skipDoneField: 'status', skipDoneValue: 'completed' }, forceRefresh, isAppOpen);
 }
 
 // ── Manual "🔄 Refresh" button on the Dream11 match screen ──
@@ -22602,28 +22609,33 @@ async function initApp() {
   // lazy-loaded, the first time the admin actually opens that screen (see
   // _ensureAdminDataLoaded), so a regular user's session never touches them.
   //
-  // NOTE: forceRefresh is intentionally NOT passed here (was `true` before).
-  // _liveLoadCollection's forceRefresh path shares its "one-time full
-  // backfill per device" flag with the manual 🔄 Refresh button. That
-  // meant: 1st-ever login on a device did a full A-to-Z fetch and set the
-  // backfill flag — but every later app reopen also called this with
-  // forceRefresh=true, saw the flag already set, and silently downgraded
-  // to incremental-only (only docs changed since last watermark). Users
-  // only saw full data again after logout+login, because handleLogin (a
-  // different code path) happens to hit a fresh empty-cache full-fetch
-  // instead. Removing forceRefresh here routes every reopen through the
-  // normal cache-first-then-background-incremental-refresh path — the
-  // same one used for tab-visibility changes — which is what should have
-  // been running here all along and stays correct on every open, not
-  // just the first.
+  // NOTE: forceRefresh=true is passed on every app open/reopen (not just
+  // the very first login). This used to NOT be the case — the previous
+  // version deliberately omitted it so a reopen would race ahead with
+  // cached data and refresh silently in the background. That created a
+  // real, confirmed bug: the background refresh runs detached (not
+  // awaited) from this Promise.all, so render() below would fire with
+  // whatever was already in the stale cache, and the actual fresh data
+  // would only paint a moment later via a second silent render() call —
+  // if that background call was ever slow, or lost a race, or the device
+  // had gone a long time between opens, the person could be looking at
+  // meaningfully stale numbers (their own points/contests count) with no
+  // visible sign anything was still loading. Passing forceRefresh=true
+  // here makes this whole Promise.all actually WAIT for a real Firestore
+  // read (backfilled once per device, incremental after that — see
+  // _liveLoadCollection) before render() ever runs, so what's on screen
+  // the moment the UI appears is always confirmed current. The trade-off
+  // is a short (roughly 1-3s) visible load on each open instead of an
+  // instant paint that might be wrong — an explicit, deliberate choice to
+  // guarantee correctness over perceived speed for a real-money app.
   await Promise.all([
-    _loadAllUsersFromFirestore(),_loadAllMatchesFromFirestore(),
-    _loadAllH2HFromFirestore(),_loadAllCustomContestsFromFirestore(),
-    _loadAllDream11MatchesFromFirestore(),_loadAllTeamSquadsFromFirestore(),
-    _loadAllDream11TeamsFromFirestore(),_loadAllD11H2HFromFirestore(),
-    _loadAllD11CustomContestsFromFirestore(),_loadAllD11TournamentsFromFirestore(),
+    _loadAllUsersFromFirestore(true),_loadAllMatchesFromFirestore(true, true),
+    _loadAllH2HFromFirestore(true, true),_loadAllCustomContestsFromFirestore(true, true),
+    _loadAllDream11MatchesFromFirestore(true, true),_loadAllTeamSquadsFromFirestore(),
+    _loadAllDream11TeamsFromFirestore(true, true),_loadAllD11H2HFromFirestore(true, true),
+    _loadAllD11CustomContestsFromFirestore(true, true),_loadAllD11TournamentsFromFirestore(),
     _loadAllUtTournamentsFromFirestore(),_loadAllUtTeamsFromFirestore(),
-    _loadAllPlayerHistoryFromFirestore(),
+    _loadAllPlayerHistoryFromFirestore(true, true),
   ]);
   if (isAdmin()) {
     // Admin needs everything, including admin-only screens' data, right away.
@@ -22783,7 +22795,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.78.0";
+const APP_VERSION = "3.79.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
