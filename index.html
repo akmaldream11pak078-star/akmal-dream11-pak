@@ -19427,11 +19427,25 @@ function renderAdminPending(pendingDep, pendingWd) {
 // up "Total Winning Amount from contests" for the admin user-detail view.
 const CONTEST_PRIZE_TX_TYPES = new Set([
   'mega_prize', 'custom_prize', 'h2h_prize',
-  'd11_mega_prize', 'd11_mini_mega_prize', 'd11_h2h_prize', 'd11_custom_prize',
+  'd11_mega_prize', 'd11_mini_mega_prize', 'd11_h2h_prize', 'd11_custom_prize', 'd11_free_reward',
   'd11_tournament_prize', 'ut_prize'
+]);
+// Mirrors CONTEST_PRIZE_TX_TYPES but for what the user PAID to join contests
+// — used together to get an accurate Total Spent/Won/Net summary straight
+// from the transaction ledger (the definitive record of real money moving),
+// rather than trying to reconstruct it from each contest type's own
+// participant/prize objects, some of which (tournament prizes especially)
+// don't keep a convenient per-user record to recompute from later.
+const CONTEST_ENTRY_TX_TYPES = new Set([
+  'mega_entry', 'h2h_entry', 'custom_entry', 'custom_create',
+  'd11_mega_entry', 'd11_mini_mega_entry', 'd11_h2h_entry', 'd11_custom_entry',
+  'ut_mega_entry', 'ut_h2h_entry', 'ut_custom_entry', 'ut_entry'
 ]);
 function userTotalContestWinnings(u) {
   return (u.transactions||[]).reduce((sum, tx) => CONTEST_PRIZE_TX_TYPES.has(tx.type) ? sum + (tx.amount||0) : sum, 0);
+}
+function userTotalContestSpent(u) {
+  return (u.transactions||[]).reduce((sum, tx) => CONTEST_ENTRY_TX_TYPES.has(tx.type) ? sum + (tx.amount||0) : sum, 0);
 }
 
 // ── Admin-only: full match-by-match, contest-by-contest breakdown for one
@@ -19488,11 +19502,23 @@ function getUserAdminContestBreakdown(email) {
       const won = c.status === 'completed' && c.winnerId === email;
       const lost = c.status === 'completed' && c.winnerId && c.winnerId !== email;
       const oppEmail = c.player1?.email === email ? c.player2?.email : c.player1?.email;
+      // H2H contest.status is a LIFECYCLE state ('open' = waiting for an
+      // opponent, 'full' = both players joined, match not yet finished),
+      // separate from the WIN/LOSS result which only exists once status
+      // is 'completed'. Showing the raw lifecycle string ('full') here
+      // was confusing — it looks like a result but isn't one. Map it to
+      // a clear in-progress label instead.
+      const displayStatus = c.status === 'completed' ? (won ? 'won' : lost ? 'lost' : 'draw')
+        : c.status === 'full' ? 'in progress'
+        : c.status === 'open' ? 'waiting'
+        : (c.status || 'open');
+      const isDraw = c.status === 'completed' && !c.winnerId;
+      const isRefunded = c.status === 'cancelled' || isDraw; // both cases auto-refund the entry fee — see the finalize/cleanup logic that sets these statuses
       contests.push({
         label: `H2H vs ${oppEmail ? (users[oppEmail]?.name || oppEmail) : 'Opponent'}`, icon: '🥊',
-        entryFee: D11_H2H_ENTRY_FEE,
+        entryFee: isRefunded ? 0 : D11_H2H_ENTRY_FEE,
         prize: won ? (c.winnerPrize || 0) : 0,
-        status: c.status === 'completed' ? (won ? 'won' : lost ? 'lost' : 'draw') : (c.status || 'open'),
+        status: displayStatus,
         contestType: 'h2h', contestRef: c.id
       });
     });
@@ -19515,8 +19541,16 @@ function getUserAdminContestBreakdown(email) {
     };
   }).filter(Boolean);
 
-  const grandTotalEntry = out.reduce((s,m) => s + m.totalEntry, 0);
-  const grandTotalPrize = out.reduce((s,m) => s + m.totalPrize, 0);
+  // Grand totals come from the transaction ledger, not summed from the
+  // per-match contest breakdown above — the ledger is the definitive
+  // record of real money moving and also captures prize types the
+  // breakdown loop above can't reconstruct per-match (tournament prizes
+  // especially, which don't keep a convenient per-user-per-match record).
+  // This guarantees the top summary always matches "Top Players — Most
+  // Won" on the Rank tab, which also reads from the ledger.
+  const u = users[email];
+  const grandTotalEntry = u ? userTotalContestSpent(u) : out.reduce((s,m) => s + m.totalEntry, 0);
+  const grandTotalPrize = u ? userTotalContestWinnings(u) : out.reduce((s,m) => s + m.totalPrize, 0);
   return { matches: out, grandTotalEntry, grandTotalPrize, grandNet: grandTotalPrize - grandTotalEntry };
 }
 
@@ -23014,7 +23048,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.82.0";
+const APP_VERSION = "3.84.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
