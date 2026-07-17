@@ -2940,11 +2940,32 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
 
     // Two separate plain writes (not a transaction) — same as the free
     // contest join. Update the user doc first (money movement), then the
-    // match doc; if the second write somehow failed the user would keep
-    // their held balance without a recorded entry, which is safer than
-    // the reverse (recording entry without deducting).
+    // match doc. If the second write fails, roll back the first
+    // immediately (refund balance + remove the just-added transaction)
+    // instead of leaving the user charged with no recorded contest entry
+    // — that partial-failure state is exactly what silently happened
+    // before this rollback existed: transaction shows CONFIRMED and money
+    // is deducted, but the user never actually appears in the contest's
+    // participant list because the match-doc write never landed.
     await updateDoc(userRef, { balance: newBalance, transactions: newTransactions });
-    await updateDoc(matchRef, matchUpdate);
+    try {
+      await updateDoc(matchRef, matchUpdate);
+    } catch (matchWriteErr) {
+      console.error('Match-doc write failed after balance was already deducted — rolling back:', matchWriteErr);
+      try {
+        await updateDoc(userRef, { balance: userData.balance || 0, transactions: userData.transactions || [] });
+      } catch (rollbackErr) {
+        // Rollback itself failed — this is the one case that can still
+        // leave a user charged with no entry. Surface it loudly so it can
+        // be manually corrected (e.g. via the admin Credit button) rather
+        // than silently disappearing like before.
+        console.error('CRITICAL: rollback after failed match-doc write also failed. User may be charged with no contest entry:', rollbackErr);
+        showNotif('Join failed partway through, and the automatic refund also failed — please contact support so we can fix your balance manually.', 'error');
+        return null;
+      }
+      showNotif('Join failed — your balance was not charged (refunded automatically). Please try again.', 'error');
+      return null;
+    }
 
     return { balance: newBalance, transactions: newTransactions, matchData: updatedMatchData };
   } catch (e) {
@@ -3235,7 +3256,20 @@ async function _atomicJoinCustomContest({ contestId, contestCollection, maxPlaye
     }
 
     await setDoc(userRef, { ...userData, balance: newBalance, transactions: newTransactions });
-    await setDoc(contestRef, updatedContestData);
+    try {
+      await setDoc(contestRef, updatedContestData);
+    } catch (contestWriteErr) {
+      console.error('Contest-doc write failed after balance was already deducted — rolling back:', contestWriteErr);
+      try {
+        await setDoc(userRef, userData);
+      } catch (rollbackErr) {
+        console.error('CRITICAL: rollback after failed contest-doc write also failed. User may be charged with no contest entry:', rollbackErr);
+        showNotif('Join failed partway through, and the automatic refund also failed — please contact support so we can fix your balance manually.', 'error');
+        return null;
+      }
+      showNotif('Join failed — your balance was not charged (refunded automatically). Please try again.', 'error');
+      return null;
+    }
 
     return { balance: newBalance, transactions: newTransactions, contestData: updatedContestData };
   } catch (e) {
@@ -5575,7 +5609,7 @@ function renderProfile() {
           </div>
           <div style="display:flex;gap:10px;align-items:center">
             ${c.entryFee>0 ? `<span style="color:#f87171">-Rs ${c.entryFee}</span>` : ''}
-            ${c.prize>0 ? `<span style="color:#4ade80;font-weight:700">+Rs ${c.prize}</span>` : ''}
+            ${c.prize>0 ? `<span style="color:#4ade80;font-weight:700">${c.refunded?'↩️ Refund ':''}+Rs ${c.prize}</span>` : ''}
             <span style="color:var(--dim);font-size:10px">›</span>
           </div>
         </div>`).join('')}
@@ -12824,22 +12858,38 @@ async function joinD11H2HContest(matchId, teamId) {
     const playerData = { email: currentUser.email, name: userData.name || u.name, submittedAt: getDateTime(), teamId };
 
     let resultContest = null, resultStatus = null, nextOpenContest = null;
-    if (targetData) {
-      const updatedContest = { ...targetData, player2: playerData, status: 'full', updatedAt: Date.now() };
-      await setDoc(targetSnap.ref, updatedContest);
-      resultContest = updatedContest;
-      resultStatus = 'full';
+    try {
+      if (targetData) {
+        const updatedContest = { ...targetData, player2: playerData, status: 'full', updatedAt: Date.now() };
+        await setDoc(targetSnap.ref, updatedContest);
+        resultContest = updatedContest;
+        resultStatus = 'full';
 
-      nextOpenContest = newD11H2HContest(matchId);
-      nextOpenContest.updatedAt = Date.now();
-      await setDoc(doc(window._fbDb, 'pp_dream11_h2h', nextOpenContest.id), nextOpenContest);
-    } else {
-      const newContest = newD11H2HContest(matchId);
-      newContest.player1 = playerData;
-      newContest.updatedAt = Date.now();
-      await setDoc(doc(window._fbDb, 'pp_dream11_h2h', newContest.id), newContest);
-      resultContest = newContest;
-      resultStatus = 'open';
+        nextOpenContest = newD11H2HContest(matchId);
+        nextOpenContest.updatedAt = Date.now();
+        await setDoc(doc(window._fbDb, 'pp_dream11_h2h', nextOpenContest.id), nextOpenContest);
+      } else {
+        const newContest = newD11H2HContest(matchId);
+        newContest.player1 = playerData;
+        newContest.updatedAt = Date.now();
+        await setDoc(doc(window._fbDb, 'pp_dream11_h2h', newContest.id), newContest);
+        resultContest = newContest;
+        resultStatus = 'open';
+      }
+    } catch (contestWriteErr) {
+      // Balance was already deducted above — roll it back so the user
+      // isn't left charged with no recorded H2H entry (the same silent
+      // failure mode fixed for Mega/Custom contest joins).
+      console.error('H2H contest-doc write failed after balance was already deducted — rolling back:', contestWriteErr);
+      try {
+        await setDoc(userRef, userData);
+      } catch (rollbackErr) {
+        console.error('CRITICAL: rollback after failed H2H contest-doc write also failed. User may be charged with no contest entry:', rollbackErr);
+        showNotif('Join failed partway through, and the automatic refund also failed — please contact support so we can fix your balance manually.', 'error');
+        return;
+      }
+      showNotif('Join failed — your balance was not charged (refunded automatically). Please try again.', 'error');
+      return;
     }
 
     u.balance = newBalance;
@@ -12895,6 +12945,13 @@ async function finalizeD11H2HContests(matchId) {
     contest.winnerId = winnerId;
     contest.p1Score = p1Score;
     contest.p2Score = p2Score;
+    // Persist the 'completed' status BEFORE paying out — so a concurrent
+    // second call to this function (e.g. Fix Score then Payouts All in
+    // quick succession) that re-reads this contest sees it's already
+    // completed and skips it, instead of both calls independently deciding
+    // to pay the winner / issue the draw refund.
+    d11h2hContests[contest.id] = contest;
+    await _saveD11H2HToFirestore(contest.id, contest);
 
     if (winnerId !== 'draw') {
       const winner = users[winnerId];
@@ -12905,9 +12962,6 @@ async function finalizeD11H2HContests(matchId) {
       await _adminWalletRefund(contest.player1.email, D11_H2H_ENTRY_FEE, matchId, 'D11 H2H draw refund', 'h2h_refund');
       await _adminWalletRefund(contest.player2.email, D11_H2H_ENTRY_FEE, matchId, 'D11 H2H draw refund', 'h2h_refund');
     }
-
-    await _saveD11H2HToFirestore(contest.id, contest);
-    d11h2hContests[contest.id] = contest;
   }
 
   // Clean up unmatched open slots for this match now that it's scored
@@ -12918,10 +12972,15 @@ async function finalizeD11H2HContests(matchId) {
         await _saveD11H2HToFirestore(id, c);
         d11h2hContests[id] = c;
       } else if (c.player1 && !c.player2) {
-        await _adminWalletRefund(c.player1.email, D11_H2H_ENTRY_FEE, c.matchId, 'D11 H2H no opponent refund', 'h2h_refund');
+        // Flip status to 'cancelled' and persist it BEFORE refunding, not
+        // after — so a second concurrent call to this function (e.g. Fix
+        // Score followed quickly by Payouts All) sees this contest as
+        // already handled and skips it, instead of both calls seeing
+        // status==='open' at the same time and both issuing a refund.
         c.status = 'cancelled';
-        await _saveD11H2HToFirestore(id, c);
         d11h2hContests[id] = c;
+        await _saveD11H2HToFirestore(id, c);
+        await _adminWalletRefund(c.player1.email, D11_H2H_ENTRY_FEE, c.matchId, 'D11 H2H no opponent refund', 'h2h_refund');
       }
     }
   }
@@ -19372,6 +19431,14 @@ function userTotalContestWinnings(u) {
 function userTotalContestSpent(u) {
   return (u.transactions||[]).reduce((sum, tx) => CONTEST_ENTRY_TX_TYPES.has(tx.type) ? sum + (tx.amount||0) : sum, 0);
 }
+// Refunds (no-opponent, draw, admin-cancelled contest, etc.) are money
+// coming back but NOT a win — kept as a separate total rather than folded
+// into userTotalContestWinnings, so "Total Winnings" stays an honest
+// measure of actual contest wins.
+const CONTEST_REFUND_TX_TYPES = new Set(['h2h_refund', 'admin_refund']);
+function userTotalContestRefunds(u) {
+  return (u.transactions||[]).reduce((sum, tx) => CONTEST_REFUND_TX_TYPES.has(tx.type) ? sum + (tx.amount||0) : sum, 0);
+}
 
 // ── Admin-only: full match-by-match, contest-by-contest breakdown for one
 // user — every Dream11 match they touched, every contest type within it
@@ -19439,12 +19506,20 @@ function getUserAdminContestBreakdown(email) {
         : (c.status || 'open');
       const isDraw = c.status === 'completed' && !c.winnerId;
       const isRefunded = c.status === 'cancelled' || isDraw; // both cases auto-refund the entry fee — see the finalize/cleanup logic that sets these statuses
+      const refundAmount = isRefunded ? D11_H2H_ENTRY_FEE : 0;
       contests.push({
         label: `H2H vs ${oppEmail ? (users[oppEmail]?.name || oppEmail) : 'Opponent'}`, icon: '🥊',
         entryFee: isRefunded ? 0 : D11_H2H_ENTRY_FEE,
-        prize: won ? (c.winnerPrize || 0) : 0,
+        // Show the refund as the "prize"/return for this contest — so it's
+        // visible in this match's Total Won and factors into Match Net,
+        // instead of the refunded money just silently vanishing from this
+        // breakdown (it zeroed entryFee above, correctly showing no net
+        // cost, but without this the refund itself was never shown as
+        // money coming back either).
+        prize: won ? (c.winnerPrize || 0) : refundAmount,
         status: displayStatus,
-        contestType: 'h2h', contestRef: c.id
+        contestType: 'h2h', contestRef: c.id,
+        refunded: isRefunded
       });
     });
     Object.values(d11CustomContests||{}).filter(c => c.matchId === mId && (c.participants||[]).includes(email)).forEach(c => {
@@ -19541,6 +19616,7 @@ function renderAdminUserDetail(email) {
   const matchSet = new Set(u.matchesJoined||[]);
   Object.values(dream11Teams||{}).forEach(t => { if (t.userEmail === email) matchSet.add(t.matchId); });
   const totalWinnings = userTotalContestWinnings(u);
+  const totalRefunds = userTotalContestRefunds(u);
   const txs = (u.transactions||[]).slice(0, 100); // most recent 100, newest first (already unshifted on write)
 
   return `
@@ -19568,6 +19644,10 @@ function renderAdminUserDetail(email) {
         <span style="font-weight:800;color:#fbbf24;font-size:16px">Rs ${totalWinnings.toFixed(2)}</span>
       </div>
       <div class="profit-row" style="flex-direction:column;align-items:flex-start;gap:2px">
+        <span style="color:var(--dim);font-size:11px">Total Refunds (↩️ no-win return)</span>
+        <span style="font-weight:800;color:#60a5fa;font-size:16px">Rs ${totalRefunds.toFixed(2)}</span>
+      </div>
+      <div class="profit-row" style="flex-direction:column;align-items:flex-start;gap:2px;grid-column:1/-1">
         <span style="color:var(--dim);font-size:11px">Current Balance</span>
         <span style="font-weight:800;color:var(--gold);font-size:16px">Rs ${(u.balance||0).toFixed(2)}</span>
       </div>
@@ -19611,7 +19691,7 @@ function renderAdminUserDetail(email) {
           </div>
           <div style="display:flex;gap:10px;align-items:center">
             ${c.entryFee>0 ? `<span style="color:#f87171">-Rs ${c.entryFee}</span>` : ''}
-            ${c.prize>0 ? `<span style="color:#4ade80;font-weight:700">+Rs ${c.prize}</span>` : ''}
+            ${c.prize>0 ? `<span style="color:#4ade80;font-weight:700">${c.refunded?'↩️ Refund ':''}+Rs ${c.prize}</span>` : ''}
             <span style="color:var(--dim);font-size:10px">›</span>
           </div>
         </div>`).join('')}
@@ -22973,7 +23053,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.87.0";
+const APP_VERSION = "3.89.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
