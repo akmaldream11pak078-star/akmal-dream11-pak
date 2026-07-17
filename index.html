@@ -19458,21 +19458,31 @@ function getUserAdminContestBreakdown(email) {
     const contests = [];
 
     if ((d11m.megaParticipants||[]).includes(email)) {
+      // "only 1 joiner" auto-cancels the Mega Contest and refunds the
+      // entry fee via a separate wallet-refund transaction — it's never
+      // stored in megaPrizes (that only holds real prize payouts), so
+      // without this check the refund was invisible here: the row always
+      // showed the full entry fee as spent with nothing won back, even
+      // though the money came right back. Same fix pattern as H2H/Custom.
+      const megaRefunded = !!d11m.megaCancelled;
       contests.push({
         label: 'Mega Contest', icon: '🎯',
-        entryFee: D11_MEGA_ENTRY_FEE,
-        prize: (d11m.megaPrizes||{})[email] || 0,
-        status: d11m.scored ? 'settled' : 'pending',
-        contestType: 'mega', contestRef: null
+        entryFee: megaRefunded ? 0 : D11_MEGA_ENTRY_FEE,
+        prize: megaRefunded ? D11_MEGA_ENTRY_FEE : ((d11m.megaPrizes||{})[email] || 0),
+        status: megaRefunded ? 'cancelled/refunded' : (d11m.scored ? 'settled' : 'pending'),
+        contestType: 'mega', contestRef: null,
+        refunded: megaRefunded
       });
     }
     if ((d11m.miniMegaParticipants||[]).includes(email)) {
+      const miniMegaRefunded = !!d11m.miniMegaCancelled;
       contests.push({
         label: 'Mini Mega Contest', icon: '🔸',
-        entryFee: D11_MINI_MEGA_ENTRY_FEE,
-        prize: (d11m.miniMegaPrizes||{})[email] || 0,
-        status: d11m.scored ? 'settled' : 'pending',
-        contestType: 'minimega', contestRef: null
+        entryFee: miniMegaRefunded ? 0 : D11_MINI_MEGA_ENTRY_FEE,
+        prize: miniMegaRefunded ? D11_MINI_MEGA_ENTRY_FEE : ((d11m.miniMegaPrizes||{})[email] || 0),
+        status: miniMegaRefunded ? 'cancelled/refunded' : (d11m.scored ? 'settled' : 'pending'),
+        contestType: 'minimega', contestRef: null,
+        refunded: miniMegaRefunded
       });
     }
     if ((d11m.freeParticipants||[]).includes(email)) {
@@ -23151,7 +23161,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.91.0";
+const APP_VERSION = "3.92.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
