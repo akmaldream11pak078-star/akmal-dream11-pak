@@ -5590,7 +5590,7 @@ function renderProfile() {
     <div class="section-title">🏏 Match-by-Match Contest Breakdown</div>
     <div class="card mb14">
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-size:11px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--card-b)">
-        <div><span style="color:var(--dim)">Total Spent</span><br/><b style="color:#f87171;font-size:14px">Rs ${bd.grandTotalEntry.toFixed(2)}</b></div>
+        <div><span style="color:var(--dim)">Net Spent</span><br/><b style="color:#f87171;font-size:14px">Rs ${bd.grandNetEntry.toFixed(2)}</b>${bd.grandTotalRefunds>0?`<div style="font-size:9px;color:var(--dim)">Rs ${bd.grandTotalEntry.toFixed(2)} paid − Rs ${bd.grandTotalRefunds.toFixed(2)} refunded</div>`:''}</div>
         <div><span style="color:var(--dim)">Total Won</span><br/><b style="color:#4ade80;font-size:14px">Rs ${bd.grandTotalPrize.toFixed(2)}</b></div>
         <div><span style="color:var(--dim)">Net</span><br/><b style="color:${bd.grandNet>=0?'#4ade80':'#f87171'};font-size:14px">${bd.grandNet>=0?'+':''}Rs ${bd.grandNet.toFixed(2)}</b></div>
       </div>
@@ -19551,11 +19551,113 @@ function getUserAdminContestBreakdown(email) {
   const u = users[email];
   const grandTotalEntry = u ? userTotalContestSpent(u) : out.reduce((s,m) => s + m.totalEntry, 0);
   const grandTotalPrize = u ? userTotalContestWinnings(u) : out.reduce((s,m) => s + m.totalPrize, 0);
-  return { matches: out, grandTotalEntry, grandTotalPrize, grandNet: grandTotalPrize - grandTotalEntry };
+  const grandTotalRefunds = u ? userTotalContestRefunds(u) : 0;
+  // "Net Spent" backs refunds out of the raw entry-fee total — a refunded
+  // entry (e.g. an H2H contest cancelled for lack of an opponent) is money
+  // that left and came straight back, not a real loss, so it shouldn't
+  // count against the person the same way an actual contest loss does.
+  // This is what makes the top summary agree with the per-match "Match
+  // Net" figures below, which already net refunds out per-contest.
+  const grandNetEntry = grandTotalEntry - grandTotalRefunds;
+  return { matches: out, grandTotalEntry, grandTotalPrize, grandTotalRefunds, grandNetEntry, grandNet: grandTotalPrize - grandNetEntry };
 }
 
 let adminUserSearchText = '';
 let adminUserDetailEmail = null; // set to open the full-detail view for one user
+
+// ── Admin tool: find & fix "orphaned" contest entries ────────────────────
+// Before the rollback fix in _atomicJoinPaidContest above existed, a
+// partial failure (balance deducted, but the match-doc write that actually
+// adds the person to the contest's participant list failed) left the
+// transaction ledger showing a confirmed charge with no corresponding
+// contest membership — money gone, but never actually entered. This scans
+// every user's ledger for exactly that mismatch and lets admin refund them
+// in one tap, instead of hunting for each case by hand.
+const ORPHAN_CHECK_TX_TYPES = {
+  'd11_mega_entry':      { collection: 'dream11Matches', participantsField: 'megaParticipants',     label: 'Dream11 Mega Contest' },
+  'd11_mini_mega_entry': { collection: 'dream11Matches', participantsField: 'miniMegaParticipants', label: 'Dream11 Mini Mega Contest' },
+  'mega_entry':          { collection: 'matches',        participantsField: 'megaParticipants',     label: 'Mega Contest' },
+};
+function findOrphanedContestEntries() {
+  const orphans = [];
+  Object.entries(users).forEach(([email, u]) => {
+    (u.transactions || []).forEach(tx => {
+      const rule = ORPHAN_CHECK_TX_TYPES[tx.type];
+      if (!rule || !tx.matchId) return;
+      const store = rule.collection === 'dream11Matches' ? dream11Matches : matches;
+      const record = store[tx.matchId];
+      // No match record at all, or the participants list doesn't include
+      // this user — the entry fee was charged (this transaction exists)
+      // but they never actually made it into the contest.
+      const participants = record ? (record[rule.participantsField] || []) : [];
+      const isMember = Array.isArray(participants) ? participants.includes(email) : !!participants[email];
+      if (!isMember) {
+        orphans.push({
+          email, txId: tx.id, matchId: tx.matchId, amount: tx.amount || 0,
+          label: rule.label, date: tx.date,
+          matchLabel: matches[tx.matchId] ? `${matches[tx.matchId].teamA||'?'} vs ${matches[tx.matchId].teamB||'?'}` : '(match no longer exists)'
+        });
+      }
+    });
+  });
+  return orphans.sort((a,b) => new Date(b.date||0) - new Date(a.date||0));
+}
+async function fixOrphanedContestEntry(email, txId, amount, label) {
+  const u = users[email];
+  if (!u) { showNotif('User not found', 'error'); return; }
+  if (!confirm(`Refund Rs ${amount} to ${u.name} for a ${label} entry that was charged but never registered?`)) return;
+  const newBalance = (u.balance || 0) + amount;
+  const newTransactions = [
+    { id: uid(), type: 'admin_refund', amount, matchId: null, date: getDateTime(), status: 'confirmed', note: `Refund for orphaned entry (tx ${txId})` },
+    ...(u.transactions || [])
+  ];
+  u.balance = newBalance;
+  u.transactions = newTransactions;
+  await _saveUserToFirestore(email, u);
+  showNotif(`✅ Refunded Rs ${amount} to ${u.name}`);
+  render();
+}
+async function fixAllOrphanedContestEntries() {
+  const orphans = findOrphanedContestEntries();
+  if (orphans.length === 0) { showNotif('No orphaned entries found — everything looks correct.'); return; }
+  if (!confirm(`Refund all ${orphans.length} orphaned entries (total Rs ${orphans.reduce((s,o)=>s+o.amount,0)})? This cannot be undone automatically.`)) return;
+  for (const o of orphans) {
+    const u = users[o.email];
+    if (!u) continue;
+    u.balance = (u.balance || 0) + o.amount;
+    u.transactions = [
+      { id: uid(), type: 'admin_refund', amount: o.amount, matchId: null, date: getDateTime(), status: 'confirmed', note: `Refund for orphaned entry (tx ${o.txId})` },
+      ...(u.transactions || [])
+    ];
+    await _saveUserToFirestore(o.email, u);
+  }
+  showNotif(`✅ Refunded ${orphans.length} orphaned entries`);
+  render();
+}
+let adminShowOrphanTool = false;
+function renderAdminOrphanTool() {
+  const orphans = findOrphanedContestEntries();
+  return `
+  <div class="card mb14" style="border-color:rgba(248,113,113,0.3)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <div style="font-weight:700;font-size:13px">🔎 Orphaned Contest Entries</div>
+      <button class="btn-secondary" style="width:auto;padding:5px 10px;font-size:10.5px" onclick="adminShowOrphanTool=false;render()">✕ Close</button>
+    </div>
+    <div style="font-size:11px;color:var(--dim);margin-bottom:10px">Entries where money was charged for a contest but the person never actually got added to it (a bug that's now fixed for new joins — this only catches cases from before the fix).</div>
+    ${orphans.length === 0 ? `<div class="empty-state" style="padding:16px">✅ None found — everything checks out.</div>` : `
+    <button class="btn-primary btn-block mb10" style="background:linear-gradient(135deg,#dc2626,#b91c1c)" onclick="fixAllOrphanedContestEntries()">💸 Refund All ${orphans.length} (Rs ${orphans.reduce((s,o)=>s+o.amount,0)})</button>
+    ${orphans.map(o => `
+      <div style="display:flex;justify-content:space-between;align-items:center;background:var(--input-bg);border-radius:8px;padding:8px 10px;margin-bottom:6px">
+        <div style="font-size:11px">
+          <div style="font-weight:700">${users[o.email]?.name || o.email}</div>
+          <div style="color:var(--dim);font-size:10px">${o.label} · ${o.matchLabel} · ${o.date||''}</div>
+        </div>
+        <button class="btn-secondary" style="width:auto;padding:6px 10px;font-size:10.5px;color:#f87171;border-color:rgba(248,113,113,0.3)" onclick="fixOrphanedContestEntry('${o.email}','${o.txId}',${o.amount},'${o.label}')">Refund Rs ${o.amount}</button>
+      </div>
+    `).join('')}
+    `}
+  </div>`;
+}
 
 function renderAdminUsers() {
   const list = Object.entries(users).filter(([e])=>e!==OWNER_EMAIL);
@@ -19578,6 +19680,8 @@ function renderAdminUsers() {
 
   return `
   <div class="section-title">👥 All Users (${list.length})</div>
+  <button class="btn-secondary btn-block mb10" style="background:rgba(248,113,113,0.08);border-color:rgba(248,113,113,0.3);color:#f87171" onclick="adminShowOrphanTool=true;render()">🔎 Find & Fix Orphaned Contest Entries</button>
+  ${adminShowOrphanTool ? renderAdminOrphanTool() : ''}
   <input class="input" style="margin-bottom:12px" placeholder="🔍 Search by name, email, or ID..." value="${adminUserSearchText||''}" oninput="adminUserSearchText=this.value;render()" />
   ${filteredList.length===0 ? `<div class="empty-state">${searchQ ? 'No users match your search.' : 'No users registered yet.'}</div>` :
   filteredList.map(([email,u]) => {
@@ -19672,7 +19776,7 @@ function renderAdminUserDetail(email) {
     <div class="card mb14">
       <div class="section-title" style="margin-bottom:6px">🏏 Match-by-Match Contest Breakdown</div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-size:11px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--card-b)">
-        <div><span style="color:var(--dim)">Total Spent</span><br/><b style="color:#f87171;font-size:14px">Rs ${bd.grandTotalEntry.toFixed(2)}</b></div>
+        <div><span style="color:var(--dim)">Net Spent</span><br/><b style="color:#f87171;font-size:14px">Rs ${bd.grandNetEntry.toFixed(2)}</b>${bd.grandTotalRefunds>0?`<div style="font-size:9px;color:var(--dim)">Rs ${bd.grandTotalEntry.toFixed(2)} paid − Rs ${bd.grandTotalRefunds.toFixed(2)} refunded</div>`:''}</div>
         <div><span style="color:var(--dim)">Total Won</span><br/><b style="color:#4ade80;font-size:14px">Rs ${bd.grandTotalPrize.toFixed(2)}</b></div>
         <div><span style="color:var(--dim)">Net</span><br/><b style="color:${bd.grandNet>=0?'#4ade80':'#f87171'};font-size:14px">${bd.grandNet>=0?'+':''}Rs ${bd.grandNet.toFixed(2)}</b></div>
       </div>
@@ -23053,7 +23157,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.89.0";
+const APP_VERSION = "3.90.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
