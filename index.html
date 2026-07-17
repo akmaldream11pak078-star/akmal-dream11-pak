@@ -12449,11 +12449,15 @@ async function distributeD11MegaPrizes(matchId) {
 
   // Rule: only 1 user joined → contest cancelled, full entry fee refunded
   if (parts.length === 1) {
-    await _adminWalletRefund(parts[0], D11_MEGA_ENTRY_FEE, matchId, 'D11 Mega Contest cancelled — only 1 joiner, full refund', 'd11_mega_refund');
     d11m.megaPrizes = {};
     d11m.megaDistributed = true;
     d11m.megaCancelled = true;
+    // Persist BEFORE refunding — same fix as finalizeD11H2HContests /
+    // finalizeD11CustomContests, so a duplicate/concurrent call to this
+    // function sees megaDistributed=true and skips it instead of both
+    // calls independently refunding the same person.
     await _saveDream11MatchToFirestore(matchId, d11m);
+    await _adminWalletRefund(parts[0], D11_MEGA_ENTRY_FEE, matchId, 'D11 Mega Contest cancelled — only 1 joiner, full refund', 'd11_mega_refund');
     try {
       localStorage.setItem('pp_users_cache', JSON.stringify(users));
       localStorage.setItem('pp_dream11_matches_cache', JSON.stringify(dream11Matches));
@@ -12508,16 +12512,18 @@ async function distributeD11MegaPrizes(matchId) {
     i = j + 1;
   }
 
-  const savePromises = [];
-  for (const [email, amount] of Object.entries(prizes)) {
-    if (amount <= 0) continue;
-    savePromises.push(_adminWalletPrize(email, amount, 'd11_mega_prize', matchId, 'D11 Mega'));
-  }
-  await Promise.all(savePromises);
-
   d11m.megaPrizes = prizes;
   d11m.megaDistributed = true;
+  // Persist BEFORE paying out — so a duplicate/concurrent call to this
+  // function (e.g. Fix Score then Payouts All tapped in quick succession)
+  // sees megaDistributed=true immediately and skips this match instead of
+  // both calls independently paying every winner again.
   await _saveDream11MatchToFirestore(matchId, d11m);
+
+  for (const [email, amount] of Object.entries(prizes)) {
+    if (amount <= 0) continue;
+    await _adminWalletPrize(email, amount, 'd11_mega_prize', matchId, 'D11 Mega');
+  }
   try {
     localStorage.setItem('pp_users_cache', JSON.stringify(users));
     localStorage.setItem('pp_dream11_matches_cache', JSON.stringify(dream11Matches));
@@ -12598,11 +12604,12 @@ async function distributeD11MiniMegaPrizes(matchId) {
 
   // Rule: only 1 user joined → contest cancelled, full entry fee refunded
   if (parts.length === 1) {
-    await _adminWalletRefund(parts[0], D11_MINI_MEGA_ENTRY_FEE, matchId, 'D11 Mini Mega Contest cancelled — only 1 joiner, full refund', 'd11_mini_mega_refund');
     d11m.miniMegaPrizes = {};
     d11m.miniMegaDistributed = true;
     d11m.miniMegaCancelled = true;
+    // Persist BEFORE refunding — same fix as the Mega/H2H/Custom versions.
     await _saveDream11MatchToFirestore(matchId, d11m);
+    await _adminWalletRefund(parts[0], D11_MINI_MEGA_ENTRY_FEE, matchId, 'D11 Mini Mega Contest cancelled — only 1 joiner, full refund', 'd11_mini_mega_refund');
     try {
       localStorage.setItem('pp_users_cache', JSON.stringify(users));
       localStorage.setItem('pp_dream11_matches_cache', JSON.stringify(dream11Matches));
@@ -12647,16 +12654,15 @@ async function distributeD11MiniMegaPrizes(matchId) {
     i = j + 1;
   }
 
-  const savePromises = [];
-  for (const [email, amount] of Object.entries(prizes)) {
-    if (amount <= 0) continue;
-    savePromises.push(_adminWalletPrize(email, amount, 'd11_mini_mega_prize', matchId, 'D11 Mini Mega'));
-  }
-  await Promise.all(savePromises);
-
   d11m.miniMegaPrizes = prizes;
   d11m.miniMegaDistributed = true;
+  // Persist BEFORE paying out — same fix as the Mega version above.
   await _saveDream11MatchToFirestore(matchId, d11m);
+
+  for (const [email, amount] of Object.entries(prizes)) {
+    if (amount <= 0) continue;
+    await _adminWalletPrize(email, amount, 'd11_mini_mega_prize', matchId, 'D11 Mini Mega');
+  }
   try {
     localStorage.setItem('pp_users_cache', JSON.stringify(users));
     localStorage.setItem('pp_dream11_matches_cache', JSON.stringify(dream11Matches));
@@ -13268,7 +13274,6 @@ async function finalizeD11CustomContests(matchId) {
   const contests = Object.values(d11CustomContests).filter(c => c.matchId === matchId && c.status === 'open');
   if (contests.length === 0) return;
 
-  const savePromises = [];
   for (const cc of contests) {
     const ranked = cc.participants
       .map(email => {
@@ -13279,13 +13284,19 @@ async function finalizeD11CustomContests(matchId) {
 
     // Rule: only 1 joiner → cancelled, full entry fee refunded (same as Mega)
     if (ranked.length <= 1) {
-      if (ranked.length === 1) {
-        savePromises.push(_adminWalletRefund(ranked[0].email, cc.entryFee, matchId, 'Custom Dream11 Contest cancelled — only 1 joiner, full refund', 'd11_custom_refund'));
-      }
       cc.prizes = {};
       cc.status = 'completed';
       cc.cancelled = ranked.length === 1;
-      savePromises.push(_saveD11CustomContestToFirestore(cc.id, cc));
+      // Persist the status flip to 'completed' BEFORE refunding — so a
+      // concurrent/duplicate call to this function (e.g. Fix Score
+      // followed quickly by Payouts All) that re-reads this contest sees
+      // it's already been handled and skips it, instead of both calls
+      // independently deciding "only 1 joiner, refund them".
+      d11CustomContests[cc.id] = cc;
+      await _saveD11CustomContestToFirestore(cc.id, cc);
+      if (ranked.length === 1) {
+        await _adminWalletRefund(ranked[0].email, cc.entryFee, matchId, 'Custom Dream11 Contest cancelled — only 1 joiner, full refund', 'd11_custom_refund');
+      }
       continue;
     }
 
@@ -13307,21 +13318,22 @@ async function finalizeD11CustomContests(matchId) {
       const combinedWeight = weightTable.slice(i, tieEndIdx + 1).reduce((a,b) => a + b, 0);
       const combinedPrize = Math.round(distributable * (combinedWeight / weightSum));
       const share = Math.round(combinedPrize / tieGroup.length);
-      tieGroup.forEach(p => {
-        if (share > 0) {
-          prizes[p.email] = share;
-          savePromises.push(_adminWalletPrize(p.email, share, 'd11_custom_prize', matchId, cc.code));
-        }
-      });
+      tieGroup.forEach(p => { if (share > 0) prizes[p.email] = share; });
       i = j + 1;
     }
 
     cc.prizes = prizes;
     cc.status = 'completed';
-    savePromises.push(_saveD11CustomContestToFirestore(cc.id, cc));
+    // Same ordering fix here: persist 'completed' status first, THEN pay
+    // out prizes — so a duplicate concurrent call can't see 'open' again
+    // and re-pay every winner.
+    d11CustomContests[cc.id] = cc;
+    await _saveD11CustomContestToFirestore(cc.id, cc);
+    for (const [email, share] of Object.entries(prizes)) {
+      await _adminWalletPrize(email, share, 'd11_custom_prize', matchId, cc.code);
+    }
   }
 
-  await Promise.all(savePromises);
   try {
     localStorage.setItem('pp_dream11_custom_contests_cache', JSON.stringify(d11CustomContests));
     localStorage.setItem('pp_users_cache', JSON.stringify(users));
@@ -23157,7 +23169,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.90.0";
+const APP_VERSION = "3.91.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
