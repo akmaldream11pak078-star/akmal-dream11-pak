@@ -1132,7 +1132,8 @@ let d11SimplePasteBowlB = '';      // bowling scorecard Team B
 let d11LiveScoreQuery = ''; // text in the "what to search for" box
 let d11ScanReview = null; // {rows:[...], source:'screenshot'|'search', noteTag?} — scanned/searched data staged here for admin to check/edit BEFORE it's applied & saved. null = no pending review.
 let d11ColPasteOpen = false; // true while the "Another Scoring Method" (Cricbuzz-style columnar copy-paste) panel is open
-let d11ColPasteText = null;  // raw textarea content for that panel
+let d11ColPasteText = null;  // 1st innings textarea content
+let d11ColPasteText2 = null; // 2nd innings textarea content
 
 // ── Squad screenshot scan (Player Add section) + photo crop flow ──
 let d11SquadScreenshotOpen = false; // true while the "scan squad screenshot" panel is open
@@ -5582,46 +5583,7 @@ function renderProfile() {
     <div class="stat-box"><div class="stat-val" style="color:#facc15">${d11Stats.winRatio}%</div><div class="stat-lbl">Win Ratio</div></div>
   </div>
 
-  ${(() => {
-    const bd = getUserAdminContestBreakdown(currentUser.email);
-    if (bd.matches.length === 0) return '';
-    const statusColor = (s) => s==='won'||s==='settled' ? '#4ade80' : s==='lost' ? '#f87171' : s==='cancelled/refunded' ? 'var(--dim)' : '#fbbf24';
-    return `
-    <div class="section-title">🏏 Match-by-Match Contest Breakdown</div>
-    <div class="card mb14">
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-size:11px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--card-b)">
-        <div><span style="color:var(--dim)">Net Spent</span><br/><b style="color:#f87171;font-size:14px">Rs ${bd.grandNetEntry.toFixed(2)}</b>${bd.grandTotalRefunds>0?`<div style="font-size:9px;color:var(--dim)">Rs ${bd.grandTotalEntry.toFixed(2)} paid − Rs ${bd.grandTotalRefunds.toFixed(2)} refunded</div>`:''}</div>
-        <div><span style="color:var(--dim)">Total Won</span><br/><b style="color:#4ade80;font-size:14px">Rs ${bd.grandTotalPrize.toFixed(2)}</b></div>
-        <div><span style="color:var(--dim)">Net</span><br/><b style="color:${bd.grandNet>=0?'#4ade80':'#f87171'};font-size:14px">${bd.grandNet>=0?'+':''}Rs ${bd.grandNet.toFixed(2)}</b></div>
-      </div>
-      ${bd.matches.map(mb => `
-      <div style="background:var(--input-bg);border-radius:10px;padding:10px 12px;margin-bottom:8px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-          <div style="font-weight:700;font-size:12.5px">${mb.teamA} vs ${mb.teamB}</div>
-          <span style="font-size:9.5px;font-weight:700;color:${mb.scored?'#4ade80':'#fbbf24'};background:${mb.scored?'rgba(34,197,94,0.12)':'rgba(251,191,36,0.12)'};padding:2px 7px;border-radius:5px">${mb.scored?'SCORED':'PENDING'}</span>
-        </div>
-        ${mb.contests.map(c => `
-        <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;font-size:11px;cursor:pointer" onclick="openD11ContestParticipants('${mb.matchId}','${c.contestType}',${c.contestRef ? `'${c.contestRef}'` : 'null'})">
-          <div style="display:flex;align-items:center;gap:6px">
-            <span>${c.icon}</span>
-            <span style="text-decoration:underline;text-decoration-style:dotted;text-underline-offset:2px">${c.label}</span>
-            <span style="color:${statusColor(c.status)};font-size:9.5px;font-weight:700;text-transform:uppercase">${c.status}</span>
-          </div>
-          <div style="display:flex;gap:10px;align-items:center">
-            ${c.entryFee>0 ? `<span style="color:#f87171">-Rs ${c.entryFee}</span>` : ''}
-            ${c.prize>0 ? `<span style="color:#4ade80;font-weight:700">${c.refunded?'↩️ Refund ':''}+Rs ${c.prize}</span>` : ''}
-            <span style="color:var(--dim);font-size:10px">›</span>
-          </div>
-        </div>`).join('')}
-        <div style="display:flex;justify-content:space-between;margin-top:6px;padding-top:6px;border-top:1px solid var(--card-b);font-size:11px;font-weight:700">
-          <span style="color:var(--dim)">Match Net</span>
-          <span style="color:${mb.net>=0?'#4ade80':'#f87171'}">${mb.net>=0?'+':''}Rs ${mb.net.toFixed(2)}</span>
-        </div>
-      </div>
-      `).join('')}
-    </div>
-    `;
-  })()}
+  ${renderMatchByMatchBreakdownCard(currentUser.email)}
 
   <div class="section-title">🎮 Last 5 Dream11 Match Performance</div>
   ${renderD11MatchHistoryList(d11Stats.history.slice(0,5))}
@@ -6097,6 +6059,9 @@ function renderHistory() {
 
   return `
   <button class="btn-secondary mb14" style="width:auto;padding:9px 16px" onclick="goTab('profile')">← Back</button>
+
+  ${renderMatchByMatchBreakdownCard(currentUser.email)}
+
   <div class="section-title">📜 Transaction History</div>
 
   ${txs.length===0 ? `<div class="empty-state"><div class="empty-icon">📭</div>No transactions yet.</div>` :
@@ -9138,11 +9103,13 @@ function d11OpenColPaste() {
   d11MdPasteOpen = false;
   d11ColPasteOpen = true;
   d11ColPasteText = '';
+  d11ColPasteText2 = '';
   render();
   setTimeout(() => { const el = document.getElementById('d11-col-paste-box'); if (el) el.focus(); }, 50);
 }
-function d11CloseColPaste() { d11ColPasteOpen = false; d11ColPasteText = null; render(); }
+function d11CloseColPaste() { d11ColPasteOpen = false; d11ColPasteText = null; d11ColPasteText2 = null; render(); }
 function d11UpdateColPasteText(val) { d11ColPasteText = val; }
+function d11UpdateColPasteText2(val) { d11ColPasteText2 = val; }
 
 function _d11ParseColumnarScorecard(text) {
   const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
@@ -9293,23 +9260,25 @@ function _d11ParseColumnarScorecard(text) {
 
 function d11ApplyColPaste() {
   const d11m = dream11Matches[d11ActiveMatchId];
-  if (!d11m || !d11ColPasteText) { showNotif('Paste a scorecard first', 'error'); return; }
-  const { battingRows, bowlingRows, fieldingRows } = _d11ParseColumnarScorecard(d11ColPasteText);
+  const combinedText = [d11ColPasteText, d11ColPasteText2].filter(t => (t||'').trim()).join('\n\n');
+  if (!d11m || !combinedText) { showNotif('Paste at least one innings first', 'error'); return; }
+  const { battingRows, bowlingRows, fieldingRows } = _d11ParseColumnarScorecard(combinedText);
   if (battingRows.length === 0 && bowlingRows.length === 0) {
-    showNotif('No players detected — make sure the paste starts with a "Batter" or "Bowler" header line, exactly as copied from the site', 'error');
+    showNotif('No players detected — make sure each paste starts with a "Batter" or "Bowler" header line, exactly as copied from the site', 'error');
     return;
   }
 
   // Also try to auto-fill match score + result while we're at it, same detection
   // logic already used for the plain scorecard textarea — so admin doesn't have
   // to paste the scorecard twice.
-  d11AutoDetectScoreFromText(d11ActiveMatchId, d11ColPasteText);
+  d11AutoDetectScoreFromText(d11ActiveMatchId, combinedText);
 
   const reviewRows = _d11BuildReviewRows(battingRows, bowlingRows, fieldingRows);
   d11ScanReview = { rows: reviewRows, source: 'paste' };
 
   d11ColPasteOpen = false;
   d11ColPasteText = null;
+  d11ColPasteText2 = null;
   render();
   showNotif(`📋 Parsed ${reviewRows.length} player${reviewRows.length===1?'':'s'} — check the numbers below (especially catches/stumpings/run-outs), then tap Apply`);
 }
@@ -11712,7 +11681,7 @@ async function d11FinalizeScoring() {
   const d11m = dream11Matches[d11ActiveMatchId];
   const m = matches[d11ActiveMatchId];
   if (!d11m) return;
-  if (!confirm(`Finalize scoring for "${m?.teamA||'Team A'} vs ${m?.teamB||'Team B'}"?\n\nThis locks the contest, freezes the leaderboard, and pays out Mega/H2H/Custom contests. This cannot be undone — only do this once the match has fully ended.`)) return;
+  if (!confirm(`Finalize scoring for "${m?.teamA||'Team A'} vs ${m?.teamB||'Team B'}"?\n\nThis locks the contest and freezes the leaderboard. It does NOT pay out any contests — use the separate "💰 Payouts All" button for that, whenever you're ready. Only do this once the match has fully ended.`)) return;
   recalcDream11MatchPoints(d11m);
   d11m.scored = true;
   d11m.locked = true;
@@ -11729,16 +11698,18 @@ async function d11FinalizeScoring() {
   // Mirror final players/points/scored status into any UT tournament that
   // added this match, and recompute its teams' totals the same way.
   await d11SyncToUtTournaments(d11ActiveMatchId, d11m);
-
-  // Auto-settle all Dream11 contests now that team totals are final
-  await distributeD11MegaPrizes(d11ActiveMatchId);
-  await distributeD11MiniMegaPrizes(d11ActiveMatchId);
-  await finalizeD11H2HContests(d11ActiveMatchId);
-  await finalizeD11CustomContests(d11ActiveMatchId);
   await d11CheckTournamentsForMatch(d11ActiveMatchId);
 
+  // NOTE: contest payouts (Mega/Mini-Mega/H2H/Custom) intentionally do NOT
+  // run here anymore. Finalizing scoring only locks the match and settles
+  // the leaderboard/points — no real money moves until the admin
+  // separately taps "💰 Payouts All" (d11RunAllPayouts) for this match.
+  // This means an admin can safely re-run Finalize/Fix Score as many
+  // times as needed to correct points without accidentally triggering a
+  // payout early, and payouts only ever happen on an explicit, deliberate
+  // action.
   render();
-  showNotif('✅ Scoring finalized — match closed, leaderboard updated & contests paid out 🏆');
+  showNotif('✅ Scoring finalized — match closed, leaderboard updated. Tap "💰 Payouts All" when you\'re ready to pay out contests.');
 }
 
 // ── Admin: One-click "Payouts" button ──────────────────────
@@ -11855,7 +11826,11 @@ async function d11ReScoreAndFinalize(matchId) {
   const d11m = dream11Matches[matchId];
   const m = matches[matchId];
   if (!d11m) return;
-  if (!confirm(`"${m?.teamA||'Team A'} vs ${m?.teamB||'Team B'}" ke stats update karo aur prizes re-distribute karo?\n\n⚠️ Purani prizes wapas le kar nayi calculate ki jayengi. Confirm karo?`)) return;
+  const alreadyPaidOut = d11m.megaDistributed || d11m.miniMegaDistributed;
+  const payoutWarning = alreadyPaidOut
+    ? '\n\n⚠️ Is match ke Mega/Mini Mega contest already pay ho chuke hain. Re-scoring sirf POINTS update karegi — purani prizes automatically reverse/redistribute NAHI hongi. Agar prizes galat ho gayi hain, unhe khud "↩️ Refund All" se wapas le kar phir "💰 Payouts All" se dobara pay karna hoga.'
+    : '';
+  if (!confirm(`"${m?.teamA||'Team A'} vs ${m?.teamB||'Team B'}" ke stats update karo?\n\nYe sirf players ke points recalculate karega aur leaderboard update karega — koi payout/refund automatically nahi hoga.${payoutWarning}\n\nConfirm karo?`)) return;
 
   showNotif('⏳ Re-scoring in progress...', 'info');
 
@@ -11878,57 +11853,18 @@ async function d11ReScoreAndFinalize(matchId) {
   // added this match, and recompute its teams' totals the same way.
   await d11SyncToUtTournaments(matchId, d11m);
 
-  // Step 3: Reverse old Mega prizes (if already distributed)
-  if (d11m.megaDistributed && d11m.megaPrizes) {
-    for (const [email, oldPrize] of Object.entries(d11m.megaPrizes)) {
-      const u = users[email];
-      if (u && oldPrize > 0) {
-        u.balance = Math.max(0, (u.balance || 0) - oldPrize);
-        u.transactions = u.transactions || [];
-        u.transactions.unshift({
-          id: uid(), type: 'admin_deduct', amount: oldPrize,
-          matchId, note: `Re-score: reverse old Mega prize`,
-          date: getDateTime(), status: 'confirmed'
-        });
-        await _saveUserToFirestore(email, u);
-      }
-    }
-    d11m.megaDistributed = false;
-    d11m.megaPrizes = {};
-    d11m.megaCancelled = false;
-    await _saveDream11MatchToFirestore(matchId, d11m);
-  }
-
-  // Step 3b: Reverse old Mini Mega prizes (if already distributed)
-  if (d11m.miniMegaDistributed && d11m.miniMegaPrizes) {
-    for (const [email, oldPrize] of Object.entries(d11m.miniMegaPrizes)) {
-      const u = users[email];
-      if (u && oldPrize > 0) {
-        u.balance = Math.max(0, (u.balance || 0) - oldPrize);
-        u.transactions = u.transactions || [];
-        u.transactions.unshift({
-          id: uid(), type: 'admin_deduct', amount: oldPrize,
-          matchId, note: `Re-score: reverse old Mini Mega prize`,
-          date: getDateTime(), status: 'confirmed'
-        });
-        await _saveUserToFirestore(email, u);
-      }
-    }
-    d11m.miniMegaDistributed = false;
-    d11m.miniMegaPrizes = {};
-    d11m.miniMegaCancelled = false;
-    await _saveDream11MatchToFirestore(matchId, d11m);
-  }
-
-  // Step 4: Re-distribute Mega prizes with new points
-  await distributeD11MegaPrizes(matchId);
-  await distributeD11MiniMegaPrizes(matchId);
-
-  // Step 5: Re-check tournaments
+  // NOTE: contest payouts (Mega/Mini-Mega/H2H/Custom) intentionally do NOT
+  // run or reverse here anymore — same rule as d11FinalizeScoring. Points
+  // can be corrected/re-scored as many times as needed without touching
+  // real money; payouts only ever happen via the explicit "💰 Payouts All"
+  // button. If a payout already ran before this re-score and the new
+  // points would change who should have won, the admin needs to sort that
+  // out manually (Refund All, then Payouts All again once points are
+  // correct) — this function no longer does that automatically.
   await d11CheckTournamentsForMatch(matchId);
 
   render();
-  showNotif('✅ Re-scoring complete! Points updated, prizes re-distributed 🏆');
+  showNotif('✅ Re-scoring complete! Points updated — tap "💰 Payouts All" if you need to (re)run payouts.');
 }
 
 // ── User: team building ──
@@ -12452,8 +12388,7 @@ async function distributeD11MegaPrizes(matchId) {
     d11m.megaPrizes = {};
     d11m.megaDistributed = true;
     d11m.megaCancelled = true;
-    // Persist BEFORE refunding — same fix as finalizeD11H2HContests /
-    // finalizeD11CustomContests, so a duplicate/concurrent call to this
+    // Persist BEFORE refunding — so a duplicate/concurrent call to this
     // function sees megaDistributed=true and skips it instead of both
     // calls independently refunding the same person.
     await _saveDream11MatchToFirestore(matchId, d11m);
@@ -12514,9 +12449,8 @@ async function distributeD11MegaPrizes(matchId) {
 
   d11m.megaPrizes = prizes;
   d11m.megaDistributed = true;
-  // Persist BEFORE paying out — so a duplicate/concurrent call to this
-  // function (e.g. Fix Score then Payouts All tapped in quick succession)
-  // sees megaDistributed=true immediately and skips this match instead of
+  // Persist BEFORE paying out — so a duplicate/concurrent call sees
+  // megaDistributed=true immediately and skips this match instead of
   // both calls independently paying every winner again.
   await _saveDream11MatchToFirestore(matchId, d11m);
 
@@ -12607,7 +12541,7 @@ async function distributeD11MiniMegaPrizes(matchId) {
     d11m.miniMegaPrizes = {};
     d11m.miniMegaDistributed = true;
     d11m.miniMegaCancelled = true;
-    // Persist BEFORE refunding — same fix as the Mega/H2H/Custom versions.
+    // Persist BEFORE refunding — same fix as the Mega version.
     await _saveDream11MatchToFirestore(matchId, d11m);
     await _adminWalletRefund(parts[0], D11_MINI_MEGA_ENTRY_FEE, matchId, 'D11 Mini Mega Contest cancelled — only 1 joiner, full refund', 'd11_mini_mega_refund');
     try {
@@ -12656,7 +12590,7 @@ async function distributeD11MiniMegaPrizes(matchId) {
 
   d11m.miniMegaPrizes = prizes;
   d11m.miniMegaDistributed = true;
-  // Persist BEFORE paying out — same fix as the Mega version above.
+  // Persist BEFORE paying out — same fix as the Mega version.
   await _saveDream11MatchToFirestore(matchId, d11m);
 
   for (const [email, amount] of Object.entries(prizes)) {
@@ -15960,9 +15894,12 @@ function renderDream11AdminScoring() {
       Bas ye header lines hona zaroori hain (site khud deti hai):<br/>
       <code style="font-size:10px;color:var(--text)">Batter → R → B → 4s → 6s → SR</code><br/>
       <code style="font-size:10px;color:var(--text)">Bowler → O → M → R → W → NB → WD → ECO</code><br/><br/>
-      Dono teams ka pura data (batting + bowling, dono innings) ek hi baar mein paste kar sakte ho. Score aur result bhi automatically fill ho jaayega.
+      Har innings ka data alag box mein paste karo — dono batting + bowling us innings ki, ek hi box mein. 2nd innings optional hai (agar match abhi 1st innings mein hi hai to khaali chhor do).
     </div>
-    <textarea id="d11-col-paste-box" class="input" style="min-height:280px;font-family:monospace;font-size:11px;line-height:1.6;resize:vertical;white-space:pre" placeholder="Yahan poora match summary (batting + bowling scorecard) copy-paste karo..." oninput="d11UpdateColPasteText(this.value)">${(d11ColPasteText||'').replace(/</g,'&lt;')}</textarea>
+    <div style="font-size:11.5px;font-weight:700;color:var(--text);margin:10px 0 6px">1️⃣ 1st Innings</div>
+    <textarea id="d11-col-paste-box" class="input" style="min-height:220px;font-family:monospace;font-size:11px;line-height:1.6;resize:vertical;white-space:pre" placeholder="1st innings ka poora scorecard (batting + bowling) yahan paste karo..." oninput="d11UpdateColPasteText(this.value)">${(d11ColPasteText||'').replace(/</g,'&lt;')}</textarea>
+    <div style="font-size:11.5px;font-weight:700;color:var(--text);margin:14px 0 6px">2️⃣ 2nd Innings <span style="font-weight:400;color:var(--dim)">(optional)</span></div>
+    <textarea id="d11-col-paste-box-2" class="input" style="min-height:220px;font-family:monospace;font-size:11px;line-height:1.6;resize:vertical;white-space:pre" placeholder="2nd innings ka poora scorecard (batting + bowling) yahan paste karo..." oninput="d11UpdateColPasteText2(this.value)">${(d11ColPasteText2||'').replace(/</g,'&lt;')}</textarea>
     <div style="display:flex;gap:8px;margin-top:12px">
       <button class="btn-secondary" style="flex:1" onclick="d11CloseColPaste()">Cancel</button>
       <button class="btn-primary" style="flex:1;background:linear-gradient(135deg,#ec4899,#db2777)" onclick="d11ApplyColPaste()">⚡ Apply & Calculate Now</button>
@@ -16007,7 +15944,7 @@ function renderDream11AdminScoring() {
 
   ${!d11m.scored ? `
   <button class="btn-primary btn-block mb14" style="margin-top:10px" onclick="d11FinalizeScoring()">🏁 Match Ended — Finalize Scoring & Close</button>
-  <div class="empty-state" style="padding:10px;font-size:11px">Only tap this once the match has fully ended. It locks the contest, freezes the leaderboard, and pays out Mega/H2H/Custom contests — this cannot be undone.</div>
+  <div class="empty-state" style="padding:10px;font-size:11px">Only tap this once the match has fully ended. It locks the contest and freezes the leaderboard — it does NOT pay out any contests. Use "💰 Payouts All" separately, whenever you're ready.</div>
   ` : `
   <button class="btn-secondary btn-block mb14" style="margin-top:10px" onclick="openDream11Leaderboard('${d11ActiveMatchId}')">🏅 View Leaderboard</button>
 
@@ -19458,6 +19395,51 @@ function userTotalContestRefunds(u) {
 // fee/loss) and what they actually won (prize), so admin can see the
 // complete picture for that user in one place without hunting through
 // separate contest screens.
+// Renders the "Match-by-Match Contest Breakdown" card (per-match entry fee/
+// prize/net across all contest types) for a given user — shared by both the
+// Profile screen and the Transaction History screen so the two stay
+// identical and in sync rather than duplicating this markup.
+function renderMatchByMatchBreakdownCard(email) {
+  const bd = getUserAdminContestBreakdown(email);
+  if (bd.matches.length === 0) return '';
+  const statusColor = (s) => s==='won'||s==='settled' ? '#4ade80' : s==='lost' ? '#f87171' : s==='cancelled/refunded' ? 'var(--dim)' : '#fbbf24';
+  return `
+  <div class="section-title">🏏 Match-by-Match Contest Breakdown</div>
+  <div class="card mb14">
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-size:11px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--card-b)">
+      <div><span style="color:var(--dim)">Net Spent</span><br/><b style="color:#f87171;font-size:14px">Rs ${bd.grandNetEntry.toFixed(2)}</b>${bd.grandTotalRefunds>0?`<div style="font-size:9px;color:var(--dim)">Rs ${bd.grandTotalEntry.toFixed(2)} paid − Rs ${bd.grandTotalRefunds.toFixed(2)} refunded</div>`:''}</div>
+      <div><span style="color:var(--dim)">Total Won</span><br/><b style="color:#4ade80;font-size:14px">Rs ${bd.grandTotalPrize.toFixed(2)}</b></div>
+      <div><span style="color:var(--dim)">Net</span><br/><b style="color:${bd.grandNet>=0?'#4ade80':'#f87171'};font-size:14px">${bd.grandNet>=0?'+':''}Rs ${bd.grandNet.toFixed(2)}</b></div>
+    </div>
+    ${bd.matches.map(mb => `
+    <div style="background:var(--input-bg);border-radius:10px;padding:10px 12px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="font-weight:700;font-size:12.5px">${mb.teamA} vs ${mb.teamB}</div>
+        <span style="font-size:9.5px;font-weight:700;color:${mb.scored?'#4ade80':'#fbbf24'};background:${mb.scored?'rgba(34,197,94,0.12)':'rgba(251,191,36,0.12)'};padding:2px 7px;border-radius:5px">${mb.scored?'SCORED':'PENDING'}</span>
+      </div>
+      ${mb.contests.map(c => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;font-size:11px;cursor:pointer" onclick="openD11ContestParticipants('${mb.matchId}','${c.contestType}',${c.contestRef ? `'${c.contestRef}'` : 'null'})">
+        <div style="display:flex;align-items:center;gap:6px">
+          <span>${c.icon}</span>
+          <span style="text-decoration:underline;text-decoration-style:dotted;text-underline-offset:2px">${c.label}</span>
+          <span style="color:${statusColor(c.status)};font-size:9.5px;font-weight:700;text-transform:uppercase">${c.status}</span>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center">
+          ${c.entryFee>0 ? `<span style="color:#f87171">-Rs ${c.entryFee}</span>` : ''}
+          ${c.prize>0 ? `<span style="color:#4ade80;font-weight:700">${c.refunded?'↩️ Refund ':''}+Rs ${c.prize}</span>` : ''}
+          <span style="color:var(--dim);font-size:10px">›</span>
+        </div>
+      </div>`).join('')}
+      <div style="display:flex;justify-content:space-between;margin-top:6px;padding-top:6px;border-top:1px solid var(--card-b);font-size:11px;font-weight:700">
+        <span style="color:var(--dim)">Match Net</span>
+        <span style="color:${mb.net>=0?'#4ade80':'#f87171'}">${mb.net>=0?'+':''}Rs ${mb.net.toFixed(2)}</span>
+      </div>
+    </div>
+    `).join('')}
+  </div>
+  `;
+}
+
 function getUserAdminContestBreakdown(email) {
   const teamMatchIds = Object.values(dream11Teams).filter(t => t.userEmail === email).map(t => t.matchId);
   const matchIds = Array.from(new Set([
