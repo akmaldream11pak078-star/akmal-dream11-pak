@@ -7232,6 +7232,24 @@ async function permanentlyDeleteD11Match(matchId) {
   render();
 }
 
+// ── Admin: set/fix a Dream11 match's Series/Tournament/League name. Needed
+// because imported-from-Cricbuzz matches occasionally come back with an
+// empty seriesName from the API (seen especially on some league fixtures
+// via the fallback API), and manually-created matches leave it blank
+// unless typed in at creation time — until now there was no way to add or
+// correct it after the fact without deleting and recreating the match. ──
+function d11EditSeriesName(matchId) {
+  const m = matches[matchId];
+  if (!m) return;
+  const current = m.seriesName || '';
+  const newVal = prompt('Series / Tournament / League name:\n(e.g. "ICC T20 World Cup 2026", "Lanka Premier League 2026")\n\nCurrent: ' + (current || '(not set)'), current);
+  if (newVal === null) return; // cancelled
+  m.seriesName = newVal.trim();
+  _saveMatchToFirestore(matchId, m);
+  render();
+  showNotif(m.seriesName ? '✅ Series name updated: ' + m.seriesName : '✅ Series name cleared');
+}
+
 function d11EditDeadline(matchId) {
   const m = matches[matchId];
   if (!m) return;
@@ -15343,6 +15361,10 @@ function renderD11CricbuzzHub() {
         <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11EditDeadline('${m.id}')">✏️ Change</button>
       </div>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:var(--input-bg);border-radius:8px;padding:8px 10px">
+        <span style="font-size:11px;color:#c084fc;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🏆 Series: ${m.seriesName ? m.seriesName : '<span style="opacity:0.6">(not set)</span>'}</span>
+        <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11EditSeriesName('${m.id}')">✏️ Change</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:var(--input-bg);border-radius:8px;padding:8px 10px">
         <span style="font-size:11px;color:#fbbf24;flex:1">🏏 Format: ${m.format||'T20'}</span>
         <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11EditFormat('${m.id}')">✏️ Change</button>
       </div>
@@ -15458,6 +15480,10 @@ function renderDream11Hub() {
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:var(--input-bg);border-radius:8px;padding:8px 10px">
           <span style="font-size:11px;color:var(--orange);flex:1">⏰ Deadline: ${deadlineStr}${dLocked && !d11m?.locked ? ' (auto-locked)' : ''}</span>
           <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11EditDeadline('${m.id}')">✏️ Change</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:var(--input-bg);border-radius:8px;padding:8px 10px">
+          <span style="font-size:11px;color:#c084fc;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🏆 Series: ${m.seriesName ? m.seriesName : '<span style="opacity:0.6">(not set)</span>'}</span>
+          <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11EditSeriesName('${m.id}')">✏️ Change</button>
         </div>
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:var(--input-bg);border-radius:8px;padding:8px 10px">
           <span style="font-size:11px;color:#fbbf24;flex:1">🏏 Format: ${m.format||'T20'}</span>
@@ -19397,8 +19423,19 @@ const CONTEST_ENTRY_TX_TYPES = new Set([
   'd11_mega_entry', 'd11_mini_mega_entry', 'd11_h2h_entry', 'd11_custom_entry',
   'ut_mega_entry', 'ut_h2h_entry', 'ut_custom_entry', 'ut_entry'
 ]);
+// admin_deduct is what the admin's "➖ Deduct" button uses — most commonly
+// to manually reverse a duplicate/erroneous prize payout (e.g. correcting
+// the double-payout bug from an earlier fix). Without subtracting it here,
+// a manual correction never actually reduced "Total Won"/Net: the
+// duplicate d11_custom_prize/etc. transaction stayed counted as a real win
+// even after the money was taken back out of the wallet, so Net kept
+// showing profit the person no longer actually had.
 function userTotalContestWinnings(u) {
-  return (u.transactions||[]).reduce((sum, tx) => CONTEST_PRIZE_TX_TYPES.has(tx.type) ? sum + (tx.amount||0) : sum, 0);
+  return (u.transactions||[]).reduce((sum, tx) => {
+    if (CONTEST_PRIZE_TX_TYPES.has(tx.type)) return sum + (tx.amount||0);
+    if (tx.type === 'admin_deduct') return sum - (tx.amount||0);
+    return sum;
+  }, 0);
 }
 function userTotalContestSpent(u) {
   return (u.transactions||[]).reduce((sum, tx) => CONTEST_ENTRY_TX_TYPES.has(tx.type) ? sum + (tx.amount||0) : sum, 0);
@@ -23204,7 +23241,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.96.0";
+const APP_VERSION = "3.97.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
