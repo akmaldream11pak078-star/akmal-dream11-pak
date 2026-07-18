@@ -9883,7 +9883,13 @@ async function d11ImportMatch(mt) {
     sport: 'cricket',
     format,
     teamA, teamB,
-    seriesName: info.seriesName || '',
+    // Some schedule responses (seen with the fallback API on certain
+    // league fixtures) come back with an empty/missing seriesName even
+    // though the series clearly has one — fall back to matchDesc (e.g.
+    // "1st Match", "Final") so the home-card shows SOMETHING more useful
+    // than the generic "Dream11 Match" placeholder, rather than silently
+    // storing an empty string.
+    seriesName: info.seriesName || info.matchDesc || '',
     cricbuzzSeriesId: info.seriesId || null, // used as a fallback for squads before the match's own squad is announced
     deadline: startMs,
     status: 'upcoming',
@@ -19420,6 +19426,13 @@ function renderMatchByMatchBreakdownCard(email) {
   const bd = getUserAdminContestBreakdown(email);
   if (bd.matches.length === 0) return '';
   const statusColor = (s) => s==='won'||s==='settled' ? '#4ade80' : s==='lost' ? '#f87171' : s==='cancelled/refunded' ? 'var(--dim)' : '#fbbf24';
+  // Tournament/UT prizes are recorded with matchId:null (a tournament spans
+  // many matches, not one) — so they're part of the grand total (from the
+  // ledger) but can never appear inside any single match's card below.
+  // Show them as their own line so "grand total" vs "sum of match cards"
+  // doesn't look like a mismatch/bug when someone's won a tournament prize.
+  const matchCardNetSum = bd.matches.reduce((s,m) => s + m.net, 0);
+  const tournamentPrizes = bd.grandNet - matchCardNetSum;
   return `
   <div class="section-title">🏏 Match-by-Match Contest Breakdown</div>
   <div class="card mb14">
@@ -19428,6 +19441,11 @@ function renderMatchByMatchBreakdownCard(email) {
       <div><span style="color:var(--dim)">Total Won</span><br/><b style="color:#4ade80;font-size:14px">Rs ${bd.grandTotalPrize.toFixed(2)}</b></div>
       <div><span style="color:var(--dim)">Net</span><br/><b style="color:${bd.grandNet>=0?'#4ade80':'#f87171'};font-size:14px">${bd.grandNet>=0?'+':''}Rs ${bd.grandNet.toFixed(2)}</b></div>
     </div>
+    ${Math.abs(tournamentPrizes) >= 1 ? `
+    <div style="display:flex;justify-content:space-between;align-items:center;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:11px">
+      <span>🏆 Tournament/League prizes <span style="color:var(--dim)">(not tied to one match, so not shown in cards below)</span></span>
+      <b style="color:#fbbf24">+Rs ${tournamentPrizes.toFixed(2)}</b>
+    </div>` : ''}
     ${bd.matches.map(mb => `
     <div style="background:var(--input-bg);border-radius:10px;padding:10px 12px;margin-bottom:8px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
@@ -23186,7 +23204,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.95.0";
+const APP_VERSION = "3.96.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
