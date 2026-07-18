@@ -1176,6 +1176,7 @@ window.addEventListener('popstate', () => {
 // ── Dream11 module state ──
 let d11AdminTab = 'pool'; // 'pool' | 'scoring'
 let d11ActiveMatchId = null; // which match admin is editing player pool / scoring for
+let subAdminXIMatchPicker = null; // 'xi' | 'scoring' | null — which match-picker list the 2nd Admin panel is showing
 let d11AdminSection = 'matches'; // 'matches' | 'teams' — sub-tab inside Dream11 admin inline section
 let d11AdminShowCompleted = false; // toggle completed matches in admin Dream11 panel
 let d11AdminParticipantsMatchId = null; // which match participants panel is open
@@ -1320,6 +1321,36 @@ function toggleAppTheme() {
   render();
 }
 function isAdmin() { return currentUser && currentUser.email === OWNER_EMAIL; }
+// ── Restricted "2nd Admin" role ─────────────────────────────────────────
+// Owner-only: grants a specific user access to exactly two tools —
+// "Paste Playing XI" and "Full Match Summary Paste" (scoring) — without
+// giving them the full Owner Control Panel (users, wallet, balances, etc).
+// Deliberately kept as a separate, narrow check from isAdmin() rather than
+// widening isAdmin() itself, since isAdmin() is relied on everywhere else
+// in the app to gate full owner-only powers.
+function isSubAdminXI() {
+  if (!currentUser) return false;
+  const u = users[currentUser.email] || currentUser;
+  return !!u.subAdminXI && currentUser.email !== OWNER_EMAIL;
+}
+async function adminToggleSubAdminXI(email) {
+  if (!isAdmin() || email === OWNER_EMAIL) return;
+  const u = users[email];
+  if (!u) return;
+  u.subAdminXI = !u.subAdminXI;
+  if (currentUser.email === email) currentUser.subAdminXI = u.subAdminXI;
+  try {
+    await _saveUserToFirestore(email, u);
+  } catch (e) {
+    console.error('subAdminXI toggle save failed:', e);
+    u.subAdminXI = !u.subAdminXI; // revert on failure
+    showNotif('Could not save — try again', 'error');
+    render();
+    return;
+  }
+  showNotif(u.subAdminXI ? `✅ ${u.name||email} is now a 2nd Admin (Playing XI + Scoring only)` : `${u.name||email} is no longer a 2nd Admin`);
+  render();
+}
 
 // ── Admin-only collections: loaded lazily, not on every app open ──
 // pp_deleted_matches and pp_deleted_dream11_matches (the trash/undo
@@ -4550,7 +4581,8 @@ function render() {
     ${renderHeader()}
     <div class="page">
       ${isAdmin() && tab==='home' ? renderAdminPanel() : ''}
-      ${!isAdmin() && tab==='home' ? renderHome() : ''}
+      ${!isAdmin() && isSubAdminXI() && tab==='home' ? renderSubAdminXIPanel() : ''}
+      ${!isAdmin() && !isSubAdminXI() && tab==='home' ? renderHome() : ''}
       ${tab==='dream11' ? renderDream11Hub() : ''}
       ${tab==='dream11CricbuzzHub' ? renderD11CricbuzzHub() : ''}
       ${tab==='myMatches' ? renderD11MyMatchesPage() : ''}
@@ -4595,6 +4627,7 @@ function render() {
     ${_d11ScheduleDebugData ? renderD11ScheduleDebugModal() : ''}
     ${_receiptModalImage ? renderReceiptImageModal() : ''}
     ${d11CleanupPoolMatchId ? renderD11CleanupPoolModal() : ''}
+    ${d11DupCleanupMatchId ? renderD11DupCleanupModal() : ''}
     ${d11JoinTeamPicker ? renderD11JoinTeamPickerModal() : ''}
     ${_tpinSetupMode ? renderTpinSetupModal() : ''}
   `;
@@ -4636,7 +4669,7 @@ function renderHeader() {
       </div>
     </div>
     <div class="header-right">
-      ${isAdmin() ? `<span class="pill pill-admin">👑 Owner</span>` : `<span class="pill pill-points">⭐ ${currentUser.points||0} pts</span>`}
+      ${isAdmin() ? `<span class="pill pill-admin">👑 Owner</span>` : isSubAdminXI() ? `<span class="pill pill-admin" style="background:rgba(34,197,94,0.15);color:#4ade80;border-color:rgba(34,197,94,0.35)">🛡️ 2nd Admin</span>` : `<span class="pill pill-points">⭐ ${currentUser.points||0} pts</span>`}
       <button class="pill-refresh" id="refresh-btn" onclick="handleRefreshApp()" title="Refresh">🔄</button>
       <button class="pill-logout" onclick="handleLogout()">Logout</button>
     </div>
@@ -4652,6 +4685,13 @@ function renderBottomNav() {
       ${navItem('myMatches','🗂️','Matches')}
       ${navItem('leaderboard','🏅','Ranking')}
       ${navItem('topWinners','💰','Top Won')}
+      ${navItem('profile','👤','Profile')}
+    </div>`;
+  }
+  if (isSubAdminXI()) {
+    return `
+    <div id="bottom-nav">
+      ${navItem('home','🛡️','Panel')}
       ${navItem('profile','👤','Profile')}
     </div>`;
   }
@@ -7881,6 +7921,89 @@ function d11ConfirmSquadPicker() {
   d11CloseSquadPicker();
   showNotif(`✅ ${added} player${added===1?'':'s'} added from saved squad${skipped ? ', '+skipped+' already in pool' : ''}`);
 }
+// ── Duplicate player finder/cleaner ──────────────────────────────────────
+// Fixes pools that ended up with the same player listed twice (e.g. a squad
+// import followed by a paste where a name didn't exactly match and got added
+// as a second row). Groups players by a loosely-normalized name so minor
+// spelling/spacing differences are still caught, then for each group with
+// more than one entry pre-selects every copy EXCEPT the one to keep: prefers
+// a Playing-XI-confirmed copy (so confirmed status is never lost), otherwise
+// keeps whichever was added first. Admin reviews/adjusts the pre-selected
+// list before anything is actually removed — nothing is deleted automatically.
+let d11DupCleanupMatchId = null;
+let d11DupCleanupSelected = [];
+let d11DupCleanupGroups = [];
+function d11FindDuplicatePlayers(matchId) {
+  const d11m = dream11Matches[matchId];
+  if (!d11m) return;
+  const groups = new Map(); // normalized name -> [players in original order]
+  d11m.players.forEach(p => {
+    const key = _d11NormalizeNameForMatch(p.name);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  });
+  const dupGroups = [...groups.values()].filter(g => g.length > 1);
+  if (dupGroups.length === 0) { showNotif('No duplicate players found in this pool. ✅'); return; }
+  d11DupCleanupMatchId = matchId;
+  d11DupCleanupGroups = dupGroups;
+  // Pre-select every copy except the one to keep in each group.
+  const preSelected = [];
+  dupGroups.forEach(group => {
+    const keepIdx = group.findIndex(p => p.isPlayingXI); // prefer a confirmed copy
+    const keep = keepIdx !== -1 ? keepIdx : 0; // else keep the first-added copy
+    group.forEach((p, i) => { if (i !== keep) preSelected.push(p.id); });
+  });
+  d11DupCleanupSelected = preSelected;
+  render();
+}
+function d11CloseDupCleanup() {
+  d11DupCleanupMatchId = null;
+  d11DupCleanupGroups = [];
+  d11DupCleanupSelected = [];
+  render();
+}
+function d11ToggleDupPick(playerId) {
+  const i = d11DupCleanupSelected.indexOf(playerId);
+  if (i === -1) d11DupCleanupSelected.push(playerId); else d11DupCleanupSelected.splice(i, 1);
+  render();
+}
+function d11ConfirmDupCleanup() {
+  const d11m = dream11Matches[d11DupCleanupMatchId];
+  if (!d11m || d11DupCleanupSelected.length === 0) { d11CloseDupCleanup(); return; }
+  const removedCount = d11DupCleanupSelected.length;
+  d11m.players = d11m.players.filter(p => !d11DupCleanupSelected.includes(p.id));
+  _saveDream11MatchToFirestore(d11DupCleanupMatchId, d11m);
+  showNotif(`🧹 Removed ${removedCount} duplicate entr${removedCount===1?'y':'ies'} from the pool.`);
+  d11CloseDupCleanup();
+}
+function renderD11DupCleanupModal() {
+  const d11m = dream11Matches[d11DupCleanupMatchId];
+  if (!d11m) return '';
+  const mm = matches[d11DupCleanupMatchId];
+  return `
+  <div style="position:fixed;inset:0;z-index:2000;background:rgba(5,10,20,0.85);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseDupCleanup()">
+    <div class="card" style="width:100%;max-width:600px;max-height:82vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:16px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div style="font-weight:700;font-size:14px">🧹 Duplicate Players Found (${d11DupCleanupGroups.length} group${d11DupCleanupGroups.length===1?'':'s'})</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseDupCleanup()">✕</button>
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-bottom:12px">Each group below is the same player listed more than once. The copy to KEEP is already unticked (confirmed-XI copy preferred); ticked ones will be removed. Review and adjust before confirming.</div>
+      ${d11DupCleanupGroups.map((group, gi) => `
+        <div style="margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--card-b)">
+          <div style="font-size:11px;color:var(--gold);font-weight:700;margin-bottom:6px">Group ${gi+1}</div>
+          ${group.map(p => `
+            <label style="display:flex;align-items:center;gap:10px;padding:6px 0;cursor:pointer">
+              <input type="checkbox" ${d11DupCleanupSelected.includes(p.id)?'checked':''} onchange="d11ToggleDupPick('${p.id}')" style="width:18px;height:18px;flex-shrink:0" />
+              <span style="flex:1;font-size:13px">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80;font-size:10px">🏏 XI confirmed</span>' : ''}</span>
+              <span style="font-size:10.5px;color:var(--dim)">${p.role} · ${p.side==='A'?mm?.teamA:mm?.teamB}</span>
+            </label>
+          `).join('')}
+        </div>
+      `).join('')}
+      <button class="btn-primary btn-block" style="margin-top:4px;background:linear-gradient(135deg,#dc2626,#b91c1c)" onclick="d11ConfirmDupCleanup()">🗑️ Remove Selected (${d11DupCleanupSelected.length})</button>
+    </div>
+  </div>`;
+}
 function d11RemovePlayer(playerId) {
   const d11m = dream11Matches[d11ActiveMatchId];
   if (!d11m) return;
@@ -8105,13 +8228,26 @@ function d11ParseSquadText(text, teamAName, teamBName) {
     return /^[A-Z]/.test(s) && s.length > 2 && !isSlug(s);
   }
 
-  // Pre-process: merge 3-line groups into single entries
+  // A standalone captain/vice-captain/keeper marker line, e.g. "(C)", "(VC)", "(WK)" —
+  // appears on its own line in some pastes (Cricbuzz squad-card style) between the
+  // player's name and their role label.
+  function isMarkerLine(s) { return /^\(\s*(c|vc|captain|vice[\s-]?captain|wk|wicket[\s-]?keeper)\s*\)$/i.test(s.trim()); }
+
+  // Pre-process: merge 3/4-line groups into single entries
   const processed = [];
   let i = 0;
   while (i < lines.length) {
     const l1 = lines[i];
-    const l2 = lines[i+1] || '';
-    const l3 = lines[i+2] || '';
+    let l2 = lines[i+1] || '';
+    let l3 = lines[i+2] || '';
+    let l4 = lines[i+3] || '';
+    // slug + proper name + (C)/(VC)/(WK) marker line + role label — 4-line group
+    if (isSlug(l1) && isTitleName(l2) && isMarkerLine(l3) && isRoleLabel(l4)) {
+      const roleCode = Object.keys(D11_ROLE_ALIASES).find(r => D11_ROLE_ALIASES[r].includes(l4.toLowerCase().trim())) || 'BAT';
+      processed.push(`${l2} - ${roleCode}`);
+      i += 4;
+      continue;
+    }
     const roleFromL3 = isRoleLabel(l3);
     // Check 3-line group: slug + proper name + role label
     if (isSlug(l1) && isTitleName(l2) && roleFromL3) {
@@ -8141,6 +8277,9 @@ function d11ParseSquadText(text, teamAName, teamBName) {
     if (normB && (low === normB || lowClean === normB)) { side = 'B'; sideSeen = true; return; }
     if (low === 'team a' || low === 'squad a' || lowClean === 'team a') { side = 'A'; sideSeen = true; return; }
     if (low === 'team b' || low === 'squad b' || lowClean === 'team b') { side = 'B'; sideSeen = true; return; }
+    // "playing XI" / "playing 11" as its own line is just a section label some
+    // pasted formats include right after the team name — skip it, not a player.
+    if (low === 'playing xi' || lowClean === 'playing xi' || low === 'playing 11' || lowClean === 'playing 11') { return; }
 
     // Section header — check both raw and markdown-stripped versions
     let isHeader = false;
@@ -8190,25 +8329,99 @@ function d11ParseSquadText(text, teamAName, teamBName) {
 
   return parsed;
 }
-function d11ConfirmPasteSquad() {
+// Loosely normalizes a player name for fuzzy duplicate-matching: lowercases,
+// strips punctuation/diacritics-ish noise, collapses whitespace. Used only as
+// a fallback when an exact (case-insensitive) name match fails, so pastes
+// with slightly different spacing/punctuation ("Mohammad Rizwan" vs
+// "Mohammad  Rizwan.") don't create duplicate player rows in the pool.
+function _d11NormalizeNameForMatch(name) {
+  return (name || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // strip accents
+    .replace(/[^a-z0-9\s]/g, '') // strip punctuation
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function d11ConfirmPasteSquad(confirmXI) {
   const m = matches[d11ActiveMatchId];
   const d11m = dream11Matches[d11ActiveMatchId];
   if (!d11m || !d11PasteText) return;
   const parsedPlayers = d11ParseSquadText(d11PasteText, m.teamA, m.teamB);
   if (parsedPlayers.length === 0) { showNotif('No players detected — please check the format', 'error'); return; }
-  const existingNames = new Set(d11m.players.map(p => p.name.toLowerCase()));
+
+  // Two lookup maps: exact lowercase name, and a loosely-normalized version
+  // (fallback) — so near-identical spellings match an existing pool player
+  // (e.g. Cricbuzz-fetched squad) instead of being treated as unmatched.
+  const existingByExact = new Map(d11m.players.map(p => [p.name.toLowerCase(), p]));
+  const existingByLoose = new Map();
+  d11m.players.forEach(p => {
+    const key = _d11NormalizeNameForMatch(p.name);
+    if (!existingByLoose.has(key)) existingByLoose.set(key, p);
+  });
+
+  if (confirmXI) {
+    // "Add & Confirm Playing XI" mode: this is ONLY a confirm step against
+    // the squad that's already in the pool (e.g. pulled in earlier via
+    // Fetch Squad). It never creates new player rows — a paste is assumed to
+    // be the announced XI selected FROM that known squad. If a pasted name
+    // doesn't match anyone already in the pool, that's reported to the
+    // admin as unmatched (likely a spelling difference or a player missing
+    // from the fetched squad) rather than silently added as a duplicate.
+    const matchedPlayerIds = new Set();
+    const unmatchedNames = [];
+    let confirmed = 0, alreadyConfirmed = 0;
+
+    parsedPlayers.forEach(({ name }) => {
+      const nameLower = name.toLowerCase();
+      const looseKey = _d11NormalizeNameForMatch(name);
+      const existing = existingByExact.get(nameLower) || existingByLoose.get(looseKey);
+      if (!existing) { unmatchedNames.push(name); return; }
+      matchedPlayerIds.add(existing.id);
+      if (!existing.isPlayingXI) { existing.isPlayingXI = true; confirmed++; }
+      else { alreadyConfirmed++; }
+    });
+
+    // A fresh XI paste is the full authoritative lineup — un-confirm anyone
+    // previously marked XI but absent from this new paste (covers admin
+    // re-pasting a corrected list). Never touches players outside the pool.
+    let unconfirmed = 0;
+    d11m.players.forEach(p => {
+      if (p.isPlayingXI && !matchedPlayerIds.has(p.id)) { p.isPlayingXI = false; unconfirmed++; }
+    });
+
+    _saveDream11MatchToFirestore(d11ActiveMatchId, d11m);
+    d11PasteText = null;
+    render();
+    const parts = [`🏏 ${confirmed} player${confirmed===1?'':'s'} confirmed as Playing XI`];
+    if (alreadyConfirmed) parts.push(`${alreadyConfirmed} already were`);
+    if (unconfirmed) parts.push(`${unconfirmed} un-confirmed (not in this list)`);
+    if (unmatchedNames.length) {
+      showNotif(`⚠️ ${parts.join(', ')} — but ${unmatchedNames.length} name${unmatchedNames.length===1?'':'s'} not found in the squad pool: ${unmatchedNames.join(', ')}`, 'error');
+    } else {
+      showNotif(`✅ ${parts.join(', ')}`);
+    }
+    return;
+  }
+
+  // "Add All Players" mode (confirmXI=false) — unchanged: adds anyone not
+  // already in the pool, matched the same exact/loose way to avoid dupes.
   let added = 0, skipped = 0;
   parsedPlayers.forEach(({ name, side, role }) => {
-    if (existingNames.has(name.toLowerCase())) { skipped++; return; }
-    d11m.players.push(newDream11Player(name, role, side)); // role auto-detected/guessed from pasted text
-    existingNames.add(name.toLowerCase());
+    const nameLower = name.toLowerCase();
+    const looseKey = _d11NormalizeNameForMatch(name);
+    const existing = existingByExact.get(nameLower) || existingByLoose.get(looseKey);
+    if (existing) { skipped++; return; }
+    const player = newDream11Player(name, role, side); // role auto-detected/guessed from pasted text
+    d11m.players.push(player);
+    existingByExact.set(nameLower, player);
+    existingByLoose.set(looseKey, player);
     d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
     added++;
   });
   _saveDream11MatchToFirestore(d11ActiveMatchId, d11m);
   d11PasteText = null;
   render();
-  showNotif(`✅ ${added} players added (roles auto-set)${skipped ? ', '+skipped+' duplicate skipped' : ''} — tap a role chip below to fix any that are wrong`);
+  showNotif(`✅ ${added} players added (roles auto-set)${skipped ? ', '+skipped+' already in pool' : ''} — tap a role chip below to fix any that are wrong`);
 }
 
 // ── Squad Screenshot Scan (Player Add section) ──
@@ -15340,9 +15553,10 @@ function renderD11Hero(subtitle) {
 // ── Live Sync status row shown on each Dream11 admin match card ──
 function _d11RenderLiveSyncRow(m) {
   if (!m.cricketDataMatchId) {
-    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:8px;padding:8px 10px">
-      <span style="font-size:11px;color:#4ade80;flex:1">📡 Cricbuzz: not linked (manual paste mode)</span>
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
+      <span style="font-size:11px;color:#4ade80;flex:1;min-width:140px">📡 Cricbuzz: not linked (manual paste mode)</span>
       <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;border:none" onclick="d11OpenLiveSyncPicker('${m.id}')">🔗 Link Live Match</button>
+      <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11ActiveMatchId='${m.id}';d11AdminTab='pool';tab='dream11Pool';d11StartPasteSquad();window.scrollTo(0,0)">✍️ Paste Playing XI</button>
     </div>`;
   }
   const lastSync = _d11LiveSyncLastSyncedAt[m.id];
@@ -15354,6 +15568,7 @@ function _d11RenderLiveSyncRow(m) {
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatch('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromCricbuzz('${m.id}')">📥 Fetch Squad</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11CheckPlayingXIAnnounced('${m.id}')">🏏 Check Playing XI</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11ActiveMatchId='${m.id}';d11AdminTab='pool';tab='dream11Pool';d11StartPasteSquad();window.scrollTo(0,0)">✍️ Paste Playing XI</button>
     ${_d11SquadDebugData ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11OpenSquadDebugModal()">🐛 View Raw Squad Data</button>` : ''}
     ${_d11SyncDebugData && _d11SyncDebugData.matchId === m.id ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.3);color:#fca5a5" onclick="d11OpenSyncDebugModal()">🐛 View Raw Sync Data</button>` : ''}
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(220,38,38,0.12);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11UnlinkLiveMatch('${m.id}')">✕ Unlink</button>
@@ -15789,6 +16004,7 @@ function renderDream11AdminPool() {
     </div>
     <div style="text-align:center;font-size:11px;color:var(--dim)">👥 ${d11m.players.length} players · 🏏 ${xiCount} Playing XI confirmed · ${dLocked ? '🔒 Locked' : '🔓 Open for teams'}</div>
     ${m.cricketDataMatchId ? `<div style="text-align:center;margin-top:6px"><button class="btn-secondary" style="font-size:10.5px;padding:5px 10px;background:rgba(220,38,38,0.1);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11OpenCleanupPool('${d11ActiveMatchId}')">🧹 Remove Coaches / Support Staff</button></div>` : ''}
+    ${d11m.players.length > 0 ? `<div style="text-align:center;margin-top:6px"><button class="btn-secondary" style="font-size:10.5px;padding:5px 10px;background:rgba(234,179,8,0.1);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11FindDuplicatePlayers('${d11ActiveMatchId}')">🧹 Find Duplicate Players</button></div>` : ''}
     <div style="text-align:center;font-size:11px;color:var(--orange);font-weight:600;margin-top:6px">⏰ Deadline: ${deadlineStr} ${dLocked && !d11m.locked ? '(passed — auto-locked)' : ''}</div>
     ${!dLocked && m.deadline ? `<div class="d11-countdown" data-deadline="${m.deadline}" style="text-align:center;font-size:12px;font-weight:700;color:var(--orange);margin-top:2px">${d11FormatCountdown(m.deadline - Date.now())}</div>` : ''}
     <div style="text-align:center;margin-top:8px">
@@ -15817,12 +16033,15 @@ function renderDream11AdminPool() {
       <br/><b style="color:var(--text)">${(m.teamA||'TEAM A').toUpperCase()}</b> then its players below, then <b style="color:var(--text)">${(m.teamB||'TEAM B').toUpperCase()}</b> then its players below.
       <br/><br/>Works either way: one player per line, OR a whole squad copy-pasted as a single comma-separated line (e.g. straight from a cricket website) — both get split into individual players automatically.
       <br/><br/>You can tag a role too (optional) — e.g. <b style="color:var(--text)">Rizwan - WK</b>, <b style="color:var(--text)">Shaheen Afridi (Bowler)</b>. If no role is given, the app guesses one — tap the role chip below to fix it if it's wrong.
+      <br/><br/>Also understands the Cricbuzz squad-card paste style — <b style="color:var(--text)">slug</b> line, then <b style="color:var(--text)">Full Name</b>, then optional <b style="color:var(--text)">(C)</b>/<b style="color:var(--text)">(WK)</b>, then role label like <b style="color:var(--text)">Batting Allrounder</b> — and a standalone <b style="color:var(--text)">playing XI</b> line is skipped automatically.
     </div>
     <textarea id="d11-paste-box" class="input" style="min-height:220px;font-family:monospace;font-size:12.5px;line-height:1.6;resize:vertical;white-space:pre" oninput="d11UpdatePasteText(this.value)">${(d11PasteText||'').replace(/</g,'&lt;')}</textarea>
     <div style="display:flex;gap:8px;margin-top:12px">
       <button class="btn-secondary" style="flex:1" onclick="d11CancelPasteSquad()">Cancel</button>
-      <button class="btn-primary" style="flex:1" onclick="d11ConfirmPasteSquad()">✅ Add All Players</button>
+      <button class="btn-secondary" style="flex:1" onclick="d11ConfirmPasteSquad(false)">✅ Add All Players</button>
     </div>
+    <button class="btn-primary btn-block" style="margin-top:8px;background:linear-gradient(135deg,#22c55e,#16a34a)" onclick="d11ConfirmPasteSquad(true)">🏏 Confirm Playing XI (match vs existing squad)</button>
+    <div style="font-size:10px;color:var(--dim);margin-top:6px;line-height:1.5">This does NOT add new players — it only marks matching names already in the pool as confirmed XI. Any pasted name that doesn't match someone in the pool is reported so you can fix a spelling or add them manually first.</div>
   </div>` : d11SquadScreenshotOpen ? renderD11SquadScreenshotScan()
     : d11SquadPickerOpen ? renderD11SquadPicker()
     : d11Draft ? `
@@ -17604,6 +17823,130 @@ function renderDream11ViewTeam() {
     </div>`;
   }).join('')}
   `;
+}
+</script>
+
+<script>
+// ═══════════════════════════════════════════════════════════
+// 2ND ADMIN PANEL — restricted access (Owner grants this via
+// adminToggleSubAdminXI). Deliberately reuses the exact same
+// underlying functions as the full Owner panel (d11StartPasteSquad /
+// d11ConfirmPasteSquad for Playing XI, d11OpenColPaste / d11ApplyColPaste /
+// renderD11ScanReview for scoring) so behaviour is identical — this is
+// just a narrower front door that skips every other owner-only screen
+// (users, wallet, balances, deletions, etc).
+// ═══════════════════════════════════════════════════════════
+function renderSubAdminXIPanel() {
+  // Mid-flow: paste box or scan-review is open — just show that, full width,
+  // exactly like the owner's scoring screen does, with its own back button.
+  if (d11PasteText !== null) {
+    return `
+    <div class="section-title">🛡️ 2nd Admin Panel</div>
+    <button class="btn-secondary" style="font-size:12px;padding:8px 14px;margin-bottom:14px" onclick="d11CancelPasteSquad();subAdminXIMatchPicker=null;render()">← Back</button>
+    ${renderD11SubAdminPasteXIBox()}
+    `;
+  }
+  if (d11ScanReview) {
+    return `
+    <div class="section-title">🛡️ 2nd Admin Panel</div>
+    <button class="btn-secondary" style="font-size:12px;padding:8px 14px;margin-bottom:14px" onclick="d11ReviewCancel();subAdminXIMatchPicker=null;render()">← Back</button>
+    ${renderD11ScanReview()}
+    `;
+  }
+  if (d11ColPasteOpen) {
+    return `
+    <div class="section-title">🛡️ 2nd Admin Panel</div>
+    <button class="btn-secondary" style="font-size:12px;padding:8px 14px;margin-bottom:14px" onclick="d11CloseColPaste();subAdminXIMatchPicker=null;render()">← Back</button>
+    ${renderD11SubAdminColPasteBox()}
+    `;
+  }
+  // Picking which match to act on
+  if (subAdminXIMatchPicker) {
+    const list = Object.values(matches)
+      .filter(m => dream11Matches[m.id] && !dream11Matches[m.id].scored) // upcoming/live only — hide already-scored matches
+      .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0)); // soonest/live matches first
+    return `
+    <div class="section-title">🛡️ 2nd Admin Panel</div>
+    <button class="btn-secondary" style="font-size:12px;padding:8px 14px;margin-bottom:14px" onclick="subAdminXIMatchPicker=null;render()">← Back</button>
+    <div class="section-title" style="font-size:14px">${subAdminXIMatchPicker==='xi' ? '✍️ Select Match — Paste Playing XI' : '📋 Select Match — Full Match Summary Paste'}</div>
+    ${list.length===0 ? `<div class="empty-state">No upcoming or live matches right now.</div>` : list.map(m => {
+      const d11m = dream11Matches[m.id];
+      const xiCount = (d11m.players||[]).filter(p=>p.isPlayingXI).length;
+      const isLive = m.deadline && new Date(m.deadline).getTime() <= Date.now();
+      return `
+      <div class="card mb10" style="cursor:pointer" onclick="${subAdminXIMatchPicker==='xi'
+        ? `d11ActiveMatchId='${m.id}';d11StartPasteSquad();`
+        : `d11ActiveMatchId='${m.id}';d11OpenColPaste();`}">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div style="font-weight:700;font-size:13.5px">${m.teamA||'?'} vs ${m.teamB||'?'} ${isLive ? '<span style="color:#ef4444;font-size:10px;font-weight:800">🔴 LIVE</span>' : ''}</div>
+            <div style="font-size:10.5px;color:var(--dim);margin-top:2px">${m.deadline ? new Date(m.deadline).toLocaleString('en-PK',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : ''}${m.matchSeqNo ? ` · MATCH ID NO: ${formatMatchSeqNo(m.matchSeqNo)}` : ''}</div>
+          </div>
+          <div style="text-align:right;font-size:10.5px;color:var(--dim)">
+            ${xiCount>0 ? `<span style="color:#4ade80;font-weight:700">🏏 ${xiCount} XI confirmed</span>` : `<span style="color:var(--gold)">Pending</span>`}
+          </div>
+        </div>
+      </div>`;
+    }).join('')}
+    `;
+  }
+  // Home — just the two tool entry points
+  return `
+  <div class="section-title">🛡️ 2nd Admin Panel</div>
+  <div class="empty-state" style="padding:6px 2px;font-size:11.5px;text-align:left;line-height:1.6;margin-bottom:14px">
+    You have access to Playing XI confirmation and match scoring only.
+  </div>
+  <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#22c55e,#16a34a);padding:16px" onclick="subAdminXIMatchPicker='xi';render()">✍️ Paste Playing XI</button>
+  <button class="btn-primary btn-block" style="background:linear-gradient(135deg,#ec4899,#db2777);padding:16px" onclick="subAdminXIMatchPicker='scoring';render()">📋 Another Scoring Method — Full Match Summary Paste</button>
+  `;
+}
+
+// Same markup as the owner's paste-squad box (see renderDream11AdminScoring),
+// factored out so both panels render identically from one source.
+function renderD11SubAdminPasteXIBox() {
+  const m = matches[d11ActiveMatchId];
+  if (!m) return `<div class="empty-state">Match not found.</div>`;
+  return `
+  <div class="card mb14" style="border-color:rgba(192,132,252,0.4)">
+    <div class="section-title" style="margin-bottom:10px">📋 Paste Full Squad</div>
+    <div class="empty-state" style="padding:6px 2px;font-size:11.5px;text-align:left;line-height:1.6">
+      Paste both teams' squads together. A line matching the team name switches which side new players go to:
+      <br/><b style="color:var(--text)">${(m.teamA||'TEAM A').toUpperCase()}</b> then its players below, then <b style="color:var(--text)">${(m.teamB||'TEAM B').toUpperCase()}</b> then its players below.
+      <br/><br/>Also understands the Cricbuzz squad-card paste style — <b style="color:var(--text)">slug</b> line, then <b style="color:var(--text)">Full Name</b>, then optional <b style="color:var(--text)">(C)</b>/<b style="color:var(--text)">(WK)</b>, then role label like <b style="color:var(--text)">Batting Allrounder</b> — and a standalone <b style="color:var(--text)">playing XI</b> line is skipped automatically.
+    </div>
+    <textarea id="d11-paste-box" class="input" style="min-height:220px;font-family:monospace;font-size:12.5px;line-height:1.6;resize:vertical;white-space:pre" oninput="d11UpdatePasteText(this.value)">${(d11PasteText||'').replace(/</g,'&lt;')}</textarea>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn-secondary" style="flex:1" onclick="d11CancelPasteSquad();subAdminXIMatchPicker=null;render()">Cancel</button>
+      <button class="btn-secondary" style="flex:1" onclick="d11ConfirmPasteSquad(false)">✅ Add All Players</button>
+    </div>
+    <button class="btn-primary btn-block" style="margin-top:8px;background:linear-gradient(135deg,#22c55e,#16a34a)" onclick="d11ConfirmPasteSquad(true)">🏏 Confirm Playing XI (match vs existing squad)</button>
+    <div style="font-size:10px;color:var(--dim);margin-top:6px;line-height:1.5">This does NOT add new players — it only marks matching names already in the pool as confirmed XI. Any pasted name that doesn't match someone in the pool is reported so you can fix a spelling or add them manually first.</div>
+  </div>`;
+}
+
+// Same markup as the owner's columnar-paste box (see renderDream11AdminScoring).
+function renderD11SubAdminColPasteBox() {
+  const m = matches[d11ActiveMatchId];
+  if (!m) return `<div class="empty-state">Match not found.</div>`;
+  return `
+  <div class="card mb14" style="border-color:rgba(236,72,153,0.4)">
+    <div class="section-title" style="margin-bottom:10px">📋 Another Scoring Method — Full Match Summary Paste</div>
+    <div class="empty-state" style="padding:6px 2px;font-size:11.5px;text-align:left;line-height:1.6">
+      Cricbuzz/ESPN scorecard page se <b style="color:var(--text)">poora batting + bowling summary select karke copy-paste karo</b> — jaisa hai waisa, koi formatting change nahi karni.<br/><br/>
+      Bas ye header lines hona zaroori hain (site khud deti hai):<br/>
+      <code style="font-size:10px;color:var(--text)">Batter → R → B → 4s → 6s → SR</code><br/>
+      <code style="font-size:10px;color:var(--text)">Bowler → O → M → R → W → NB → WD → ECO</code><br/><br/>
+      Har innings ka data alag box mein paste karo — dono batting + bowling us innings ki, ek hi box mein. 2nd innings optional hai.
+    </div>
+    <div style="font-size:11.5px;font-weight:700;color:var(--text);margin:10px 0 6px">1️⃣ 1st Innings</div>
+    <textarea id="d11-col-paste-box" class="input" style="min-height:220px;font-family:monospace;font-size:11px;line-height:1.6;resize:vertical;white-space:pre" placeholder="1st innings ka poora scorecard (batting + bowling) yahan paste karo..." oninput="d11UpdateColPasteText(this.value)">${(d11ColPasteText||'').replace(/</g,'&lt;')}</textarea>
+    <div style="font-size:11.5px;font-weight:700;color:var(--text);margin:14px 0 6px">2️⃣ 2nd Innings <span style="font-weight:400;color:var(--dim)">(optional)</span></div>
+    <textarea id="d11-col-paste-box-2" class="input" style="min-height:220px;font-family:monospace;font-size:11px;line-height:1.6;resize:vertical;white-space:pre" placeholder="2nd innings ka poora scorecard (batting + bowling) yahan paste karo..." oninput="d11UpdateColPasteText2(this.value)">${(d11ColPasteText2||'').replace(/</g,'&lt;')}</textarea>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn-secondary" style="flex:1" onclick="d11CloseColPaste();subAdminXIMatchPicker=null;render()">Cancel</button>
+      <button class="btn-primary" style="flex:1;background:linear-gradient(135deg,#ec4899,#db2777)" onclick="d11ApplyColPaste()">⚡ Apply &amp; Calculate Now</button>
+    </div>
+  </div>`;
 }
 </script>
 
@@ -19886,6 +20229,15 @@ function renderAdminUserDetail(email) {
     <div style="font-size:16px;font-weight:800">${u.name}</div>
     <div style="font-size:11.5px;color:var(--dim);margin-bottom:2px">${email}</div>
     ${u.idNumber ? `<div style="font-size:11px;color:var(--dim);font-family:monospace">ID: ${u.idNumber}</div>` : ''}
+  </div>
+
+  <div class="card mb14" style="border-color:${u.subAdminXI ? 'rgba(34,197,94,0.4)' : 'var(--card-b)'}">
+    <div class="section-title" style="margin-bottom:8px">🛡️ 2nd Admin Access</div>
+    <div style="font-size:11px;color:var(--dim);margin-bottom:10px;line-height:1.6">Grants access to exactly two tools only — Paste Playing XI, and Full Match Summary Paste (scoring). No wallet, users, or other owner controls.</div>
+    ${u.subAdminXI
+      ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><span style="font-size:11.5px;color:#4ade80;font-weight:700">✅ Currently a 2nd Admin</span></div>
+         <button class="btn-secondary btn-block" style="background:rgba(220,38,38,0.12);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="adminToggleSubAdminXI('${email}')">✕ Remove 2nd Admin Access</button>`
+      : `<button class="btn-primary btn-block" style="background:linear-gradient(135deg,#22c55e,#16a34a)" onclick="adminToggleSubAdminXI('${email}')">🛡️ Make 2nd Admin</button>`}
   </div>
 
   <div class="card mb14">
@@ -23313,7 +23665,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.98.1";
+const APP_VERSION = "3.99.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
