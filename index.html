@@ -3517,10 +3517,15 @@ function getGlobalLeaderboard() {
     .sort((a,b) => b.points - a.points);
 }
 
-// ── "Top Players" leaderboard — ranked by total REAL MONEY won across all
-// contests (not points), so users can see who's actually cashing out the
-// most. Uses the same userTotalContestWinnings sum as the admin's per-user
-// breakdown, so the numbers always agree with each other. ──
+// ── "Top Players" leaderboard — ranked by NET real money won across all
+// contests (total won minus total spent on entry fees — NOT gross
+// winnings), so users can see who's actually come out ahead the most,
+// rather than someone who joined a huge number of contests and happened
+// to win a modest amount back while spending far more to get there.
+// Refunds are neutral either way (they're excluded from both the
+// winnings and spent totals), so a refunded contest never affects this
+// ranking. Uses the same userTotalContestWinnings/userTotalContestSpent
+// sums as the admin's per-user breakdown, so the numbers always agree.
 function getTopWinnersLeaderboard() {
   return Object.entries(users)
     .filter(([e,u]) => !u.isAdmin)
@@ -3528,7 +3533,7 @@ function getTopWinnersLeaderboard() {
       email: e,
       name: u.name,
       idNumber: u.idNumber || '',
-      totalWon: userTotalContestWinnings(u)
+      totalWon: userTotalContestWinnings(u) - userTotalContestSpent(u)
     }))
     .filter(p => p.totalWon > 0)
     .sort((a,b) => b.totalWon - a.totalWon);
@@ -4500,6 +4505,7 @@ function render() {
       ${tab==='dream11ViewTeam' ? renderDream11ViewTeam() : ''}
       ${tab==='dream11PointsBreakup' ? renderD11PointsBreakup() : ''}
       ${tab==='leaderboard' ? renderGlobalLeaderboard() : ''}
+      ${tab==='topWinners' ? renderTopWinnersScreen() : ''}
       ${tab==='profile' ? renderProfile() : ''}
       ${tab==='viewProfile' ? renderViewProfile() : ''}
       ${tab==='compareStats' ? renderCompareStats() : ''}
@@ -4574,6 +4580,7 @@ function renderBottomNav() {
       ${navItem('dream11','🎮','Dream11')}
       ${navItem('myMatches','🗂️','Matches')}
       ${navItem('leaderboard','🏅','Ranking')}
+      ${navItem('topWinners','💰','Top Won')}
       ${navItem('profile','👤','Profile')}
     </div>`;
   }
@@ -4583,6 +4590,7 @@ function renderBottomNav() {
     ${navItem('dream11','🎮','Dream11')}
     ${navItem('myMatches','🗂️','Matches')}
     ${navItem('leaderboard','🏅','Rank')}
+    ${navItem('topWinners','💰','Top Won')}
     ${navItem('profile','👤','Me')}
   </div>`;
 }
@@ -5377,25 +5385,34 @@ function renderGlobalLeaderboard() {
     </div>
     <div class="lb-pts">${p.points} pts</div>
   </div>`}).join('')}
+  `;
+}
 
+// ── Dedicated "Top Players — Most Won" screen, its own bottom-nav tab
+// (between Ranking and Profile) rather than a section tacked onto the
+// points-based Ranking screen. Ranked by NET winnings — see
+// getTopWinnersLeaderboard's own comment for why gross winnings alone
+// would be misleading. ──
+function renderTopWinnersScreen() {
+  return `
+  <div class="section-title">💰 Top Players — Most Won</div>
   ${(() => {
     const winners = getTopWinnersLeaderboard();
-    if (winners.length === 0) return '';
+    if (winners.length === 0) return `<div class="empty-state">Abhi tak kisi ne net winnings nahi banayi.</div>`;
     const myWinRank = winners.findIndex(x => x.email === currentUser.email) + 1;
     const myWinEntry = winners.find(x => x.email === currentUser.email);
     return `
-    <div class="section-title" style="margin-top:22px">💰 Top Players — Most Won</div>
     ${myWinEntry ? `
     <div class="card mb14" style="text-align:center;background:linear-gradient(135deg,rgba(34,197,94,0.1),rgba(16,185,129,0.06));border-color:rgba(34,197,94,0.25)">
       <div style="font-size:12px;color:var(--dim);font-weight:600">YOUR WINNINGS RANK</div>
       <div class="display" style="font-size:32px;color:#4ade80;margin-top:4px">#${myWinRank||'-'}</div>
-      <div style="font-size:12px;color:var(--dim);margin-top:2px">Rs ${myWinEntry.totalWon.toFixed(2)} total won</div>
+      <div style="font-size:12px;color:var(--dim);margin-top:2px">Rs ${myWinEntry.totalWon.toFixed(2)} net won</div>
     </div>` : ''}
     ${winners.slice(0,50).map((p,i) => {
       const dp = users[p.email]?.dpBase64;
       const av = dp ? '<img src="'+dp+'" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid '+(i===0?'#fbbf24':'rgba(255,255,255,0.12)')+';flex-shrink:0" />' : '<div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#16a34a,#0d9488);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;flex-shrink:0;font-family:Rajdhani,sans-serif">'+(p.name||'?').charAt(0).toUpperCase()+'</div>';
       return `
-    <div class="lb-row" style="${p.email===currentUser.email?'border-color:#22c55e;background:rgba(34,197,94,0.08)':'cursor:pointer'}" ${p.email!==currentUser.email?`onclick="viewedProfileEmail='${p.email}';_viewProfileReturnTab='leaderboard';tab='viewProfile';render();window.scrollTo(0,0)"`:''}>
+    <div class="lb-row" style="${p.email===currentUser.email?'border-color:#22c55e;background:rgba(34,197,94,0.08)':'cursor:pointer'}" ${p.email!==currentUser.email?`onclick="viewedProfileEmail='${p.email}';_viewProfileReturnTab='topWinners';tab='viewProfile';render();window.scrollTo(0,0)"`:''}>
       <div class="lb-rank ${i===0?'r1':i===1?'r2':i===2?'r3':''}">${i+1}</div>
       ${av}
       <div style="flex:1;min-width:0;margin-left:8px">
@@ -19538,10 +19555,18 @@ function getUserAdminContestBreakdown(email) {
 
     const totalEntry = contests.reduce((s,c) => s + c.entryFee, 0);
     const totalPrize = contests.reduce((s,c) => s + c.prize, 0);
+    // Net excludes refunds entirely — a refund is money coming back with
+    // zero net effect (not a win), so it must not move Match Net. Only
+    // real prize winnings count as "won" for net purposes; entryFee is
+    // already 0 for refunded contests, so subtracting refund amounts from
+    // totalPrize here (leaving only actual win prizes) gets net back to
+    // the correct 0-for-refunds / normal-for-wins-and-losses behavior.
+    const totalRefundedThisMatch = contests.reduce((s,c) => s + (c.refunded ? c.prize : 0), 0);
+    const netWinnings = totalPrize - totalRefundedThisMatch;
 
     return {
       matchId: mId, teamA: m.teamA, teamB: m.teamB, format: m.format,
-      scored: !!d11m.scored, contests, totalEntry, totalPrize, net: totalPrize - totalEntry
+      scored: !!d11m.scored, contests, totalEntry, totalPrize, net: netWinnings - totalEntry
     };
   }).filter(Boolean);
 
@@ -23161,7 +23186,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.92.0";
+const APP_VERSION = "3.95.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
