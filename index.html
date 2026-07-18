@@ -9421,6 +9421,38 @@ function d11UpdateMdPasteText(val) { d11StatsPasteText = val; }
 // A player's name is recognized because it's immediately followed by either
 // a dismissal-looking line (batting) or a number-looking line (bowling), and
 // is NOT one of the known stop-words (Extras/Total/Did not Bat/etc).
+// Lightweight companion to d11ApplyColPaste — saves score/result/scorecard
+// text only (via the same auto-detect used by Apply), without parsing player
+// stats or opening the review screen. Useful when the admin just wants the
+// live score/result updated for users without recalculating XI points yet.
+async function d11SaveScoreResultOnly() {
+  const d11m = dream11Matches[d11ActiveMatchId];
+  const m = matches[d11ActiveMatchId];
+  const combinedText = [d11ColPasteText, d11ColPasteText2].filter(t => (t||'').trim()).join('\n\n');
+  if (!d11m || !m || !combinedText) { showNotif('Paste at least one innings first', 'error'); return; }
+
+  d11AutoDetectScoreFromText(d11ActiveMatchId, combinedText);
+  d11m.colPasteText1 = d11ColPasteText || '';
+  d11m.colPasteText2 = d11ColPasteText2 || '';
+
+  try {
+    if (window._fbDb && window._fbFns) {
+      const { doc, setDoc } = window._fbFns;
+      await setDoc(doc(window._fbDb, 'pp_matches', d11ActiveMatchId), m);
+    }
+    try {
+      const cache = JSON.parse(localStorage.getItem('pp_matches_cache') || '{}');
+      cache[d11ActiveMatchId] = m;
+      localStorage.setItem('pp_matches_cache', JSON.stringify(cache));
+    } catch(e) {}
+    await _saveDream11MatchToFirestore(d11ActiveMatchId, d11m); // persists the remembered paste text too
+    showNotif(`💾 Score/result saved${m.scoreA || m.scoreB ? ` — ${m.scoreA||'?'} / ${m.scoreB||'?'}` : ''}${m.resultText ? ' · ' + m.resultText : ''}`);
+  } catch (err) {
+    console.error('d11SaveScoreResultOnly failed:', err);
+    showNotif('Save failed — try again', 'error');
+  }
+}
+
 function d11OpenColPaste() {
   const d11m = dream11Matches[d11ActiveMatchId];
   if (!d11m || (d11m.players||[]).length === 0) { showNotif('Please add players first', 'error'); return; }
@@ -9428,8 +9460,11 @@ function d11OpenColPaste() {
   d11ScreenshotOpen = false;
   d11MdPasteOpen = false;
   d11ColPasteOpen = true;
-  d11ColPasteText = '';
-  d11ColPasteText2 = '';
+  // Restore whatever was pasted last time for this match, so admins don't
+  // have to re-paste the 1st innings again just to add the 2nd innings later,
+  // or after navigating away and coming back.
+  d11ColPasteText = d11m.colPasteText1 || '';
+  d11ColPasteText2 = d11m.colPasteText2 || '';
   render();
   setTimeout(() => { const el = document.getElementById('d11-col-paste-box'); if (el) el.focus(); }, 50);
 }
@@ -9598,6 +9633,12 @@ function d11ApplyColPaste() {
   // logic already used for the plain scorecard textarea — so admin doesn't have
   // to paste the scorecard twice.
   d11AutoDetectScoreFromText(d11ActiveMatchId, combinedText);
+
+  // Remember what was pasted so re-opening this match's paste box later
+  // (e.g. to add the 2nd innings once it's finished) doesn't start blank.
+  d11m.colPasteText1 = d11ColPasteText || '';
+  d11m.colPasteText2 = d11ColPasteText2 || '';
+  _saveDream11MatchToFirestore(d11ActiveMatchId, d11m);
 
   const reviewRows = _d11BuildReviewRows(battingRows, bowlingRows, fieldingRows);
   d11ScanReview = { rows: reviewRows, source: 'paste' };
@@ -11693,7 +11734,7 @@ function d11ReviewCancel() {
   d11ScanReview = null;
   render();
 }
-function d11ReviewConfirmApply() {
+async function d11ReviewConfirmApply() {
   if (!d11ScanReview || d11ScanReview.rows.length === 0) { showNotif('Nothing to apply', 'error'); return; }
   const d11m = dream11Matches[d11ActiveMatchId];
   if (!d11m) return;
@@ -11709,10 +11750,35 @@ function d11ReviewConfirmApply() {
   });
 
   const { matched, unmatched } = _d11ApplyParsedRows(battingRows, bowlingRows, fieldingRows);
+
+  // Persist the match score/result/scorecard text too — d11AutoDetectScoreFromText
+  // (called back when the paste was first applied) only set these on the
+  // in-memory `matches[id]` object; without this explicit save they were lost
+  // on refresh, which is why "Save Result & Scorecard" felt like it wasn't
+  // working from this flow. This makes Apply do that save automatically —
+  // no separate button/tap needed here.
+  const m = matches[d11ActiveMatchId];
+  if (m) {
+    try {
+      if (window._fbDb && window._fbFns) {
+        const { doc, setDoc } = window._fbFns;
+        await setDoc(doc(window._fbDb, 'pp_matches', d11ActiveMatchId), m);
+      }
+      try {
+        const cache = JSON.parse(localStorage.getItem('pp_matches_cache') || '{}');
+        cache[d11ActiveMatchId] = m;
+        localStorage.setItem('pp_matches_cache', JSON.stringify(cache));
+      } catch(e) {}
+    } catch (err) {
+      console.error('Saving match result/scorecard failed:', err);
+      showNotif('⚠️ Player points saved, but the score/result text failed to save — try again', 'error');
+    }
+  }
+
   const liveTag = !d11m.scored ? ' — live scores updated for users 🔴' : '';
   d11ScanReview = null;
   render();
-  showNotif(`✅ Applied for ${matched} entr${matched===1?'y':'ies'}${liveTag}${unmatched.length ? `, ${unmatched.length} not matched: ${unmatched.slice(0,3).join(', ')}${unmatched.length>3?'…':''}` : ''}`);
+  showNotif(`✅ Applied for ${matched} entr${matched===1?'y':'ies'} + result/scorecard saved${liveTag}${unmatched.length ? `, ${unmatched.length} not matched: ${unmatched.slice(0,3).join(', ')}${unmatched.length>3?'…':''}` : ''}`);
 }
 
 async function d11ScanScreenshots() {
@@ -16251,6 +16317,7 @@ function renderDream11AdminScoring() {
       <button class="btn-secondary" style="flex:1" onclick="d11CloseColPaste()">Cancel</button>
       <button class="btn-primary" style="flex:1;background:linear-gradient(135deg,#ec4899,#db2777)" onclick="d11ApplyColPaste()">⚡ Apply & Calculate Now</button>
     </div>
+    <button class="btn-secondary btn-block" style="margin-top:8px;background:rgba(79,70,229,0.12);border-color:rgba(79,70,229,0.3);color:#818cf8" onclick="d11SaveScoreResultOnly()">💾 Save Result & Scorecard (score/result only, no points calc)</button>
   </div>
   ` : ''}
 
@@ -17946,6 +18013,7 @@ function renderD11SubAdminColPasteBox() {
       <button class="btn-secondary" style="flex:1" onclick="d11CloseColPaste();subAdminXIMatchPicker=null;render()">Cancel</button>
       <button class="btn-primary" style="flex:1;background:linear-gradient(135deg,#ec4899,#db2777)" onclick="d11ApplyColPaste()">⚡ Apply &amp; Calculate Now</button>
     </div>
+    <button class="btn-secondary btn-block" style="margin-top:8px;background:rgba(79,70,229,0.12);border-color:rgba(79,70,229,0.3);color:#818cf8" onclick="d11SaveScoreResultOnly()">💾 Save Result & Scorecard (score/result only, no points calc)</button>
   </div>`;
 }
 </script>
@@ -23665,7 +23733,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.99.0";
+const APP_VERSION = "3.99.2";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
