@@ -929,6 +929,77 @@ const UT_ROLE_LABELS = { WK:'Wicket-Keeper', BAT:'Batsman', AR:'All-Rounder', BO
 
 let users = {};
 let matches = {};
+// ── Stable, sequential "Match ID No" (starts at 000100) ───────────────────
+// Firestore document IDs (matches[mId].id) are opaque random strings — fine
+// for the app internally, but no good as a human-facing reference number:
+// admin can't read one aloud to a user, users can't quote one when
+// disputing a transaction, and there's no way to tell at a glance which
+// match came before which. This gives every match a small, permanent,
+// sequential number (matchSeqNo) that never changes once assigned, so every
+// transaction/contest tied to a match can be traced back to one unambiguous
+// number — a real anti-fraud/audit trail, not just cosmetic.
+//
+// The counter itself lives in Firestore (pp_meta/match_seq_counter) so two
+// admins creating matches at the same moment don't hand out the same
+// number — _nextMatchSeqNo() reads-then-writes it, and match creation
+// always awaits it before saving the match doc.
+let _matchSeqCounterCache = null; // last known counter value, for instant local next-number without waiting on a read every time
+const MATCH_SEQ_START = 100; // first number handed out is 000100
+function formatMatchSeqNo(n) {
+  if (n === null || n === undefined) return '—';
+  return String(n).padStart(6, '0');
+}
+async function _nextMatchSeqNo() {
+  if (!window._fbDb || !window._fbFns?.runTransaction) {
+    // Offline/no-Firebase fallback — derive from the highest seq number
+    // already seen locally so numbering still advances sensibly.
+    const highest = Object.values(matches).reduce((mx,m) => Math.max(mx, m.matchSeqNo||0), MATCH_SEQ_START-1);
+    return highest + 1;
+  }
+  const { doc, runTransaction } = window._fbFns;
+  const ref = doc(window._fbDb, 'pp_meta', 'match_seq_counter');
+  try {
+    // A plain read-then-write here would let two admins creating matches
+    // at nearly the same instant both read the same counter value and
+    // hand out the same Match ID No — exactly the kind of ambiguity this
+    // feature exists to prevent. runTransaction makes the read+increment
+    // atomic against Firestore, so concurrent creates always get distinct,
+    // gapless-in-order numbers.
+    const next = await runTransaction(window._fbDb, async (tx) => {
+      const snap = await tx.get(ref);
+      const current = snap.exists() ? (snap.data().value || (MATCH_SEQ_START-1)) : (MATCH_SEQ_START-1);
+      const n = current + 1;
+      tx.set(ref, { value: n }, { merge: true });
+      return n;
+    });
+    _matchSeqCounterCache = next;
+    return next;
+  } catch(e) {
+    console.error('Match seq counter error:', e);
+    const highest = Object.values(matches).reduce((mx,m) => Math.max(mx, m.matchSeqNo||0), MATCH_SEQ_START-1);
+    return highest + 1;
+  }
+}
+// One-time admin action: assign a matchSeqNo to every existing match that
+// doesn't have one yet (oldest createdAt first), so matches created before
+// this feature existed get folded into the same numbering scheme instead
+// of being left as an un-numbered gap in the audit trail.
+async function d11AdminBackfillMatchSeqNos() {
+  const unNumbered = Object.values(matches)
+    .filter(m => !m.matchSeqNo)
+    .sort((a,b) => (a.createdAt||'').localeCompare(b.createdAt||'') || String(a.id).localeCompare(String(b.id)));
+  if (unNumbered.length === 0) { showNotif('All matches already have a Match ID No.'); return; }
+  if (!confirm(`Assign a permanent Match ID No to ${unNumbered.length} old match(es)? This cannot be undone.`)) return;
+  showNotif(`Assigning Match ID Nos to ${unNumbered.length} old match(es)...`);
+  for (const m of unNumbered) {
+    const seq = await _nextMatchSeqNo();
+    matches[m.id].matchSeqNo = seq;
+    await _saveMatchToFirestore(m.id, matches[m.id]);
+  }
+  render();
+  showNotif(`✅ Done — ${unNumbered.length} match(es) now have a Match ID No.`);
+}
+
 let h2hContests = {}; // H2H contests stored separately
 let customContests = {}; // User-created custom contests
 let dream11Matches = {}; // Dream11 player pools per match (keyed by matchId)
@@ -4686,7 +4757,10 @@ function renderHome() {
 
       return `<div class="i11-match-banner">
         <div class="i11-match-banner-head">
-          <div class="i11-match-banner-title">🎟️ ${m.seriesName || 'Dream11 Match'}</div>
+          <div>
+            <div class="i11-match-banner-title">🎟️ ${m.seriesName || 'Dream11 Match'}</div>
+            ${m.matchSeqNo ? `<div style="font-size:9px;color:rgba(255,255,255,0.65);font-weight:700;margin-top:1px">Match ID No: ${formatMatchSeqNo(m.matchSeqNo)}</div>` : ''}
+          </div>
           <div style="display:flex;align-items:center;gap:6px">
             ${statusPill}
             <button onclick="shareD11MatchWhatsApp('${m.id}')" title="WhatsApp share" style="width:28px;height:28px;border-radius:50%;background:rgba(255,255,255,0.18);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0">📲</button>
@@ -7083,7 +7157,7 @@ function d11TeamPickerSelect(side, teamName) {
   render();
 }
 
-function d11AdminSaveNewMatch() {
+async function d11AdminSaveNewMatch() {
   if (!draftMatch) return;
   const teamA = document.getElementById('dm-teamA')?.value?.trim() || draftMatch.teamA;
   const teamB = document.getElementById('dm-teamB')?.value?.trim() || draftMatch.teamB;
@@ -7098,6 +7172,10 @@ function d11AdminSaveNewMatch() {
   // Save match
   const mid = draftMatch.id;
   matches[mid] = { ...draftMatch, status: 'upcoming' };
+  // Every match gets a permanent, sequential Match ID No (000100, 000101, ...)
+  // at creation time — assigned before the first save so it's there from
+  // the very first Firestore write, not patched in afterward.
+  matches[mid].matchSeqNo = await _nextMatchSeqNo();
   _saveMatchToFirestore(mid, matches[mid]);
   // Auto-create dream11 slot (unpublished by default — admin must Publish before users can see it)
   if (!dream11Matches[mid]) {
@@ -7111,7 +7189,7 @@ function d11AdminSaveNewMatch() {
   tab = 'dream11Pool';
   render();
   window.scrollTo(0,0);
-  showNotif('✅ Match created! Now add players to the pool.');
+  showNotif(`✅ Match created! Match ID No ${formatMatchSeqNo(matches[mid].matchSeqNo)} — now add players to the pool.`);
 }
 
 async function d11DeleteMatch(matchId) {
@@ -9911,7 +9989,8 @@ async function d11ImportMatch(mt) {
     cricbuzzSeriesId: info.seriesId || null, // used as a fallback for squads before the match's own squad is announced
     deadline: startMs,
     status: 'upcoming',
-    questions: []
+    questions: [],
+    matchSeqNo: await _nextMatchSeqNo()
   };
   await _saveMatchToFirestore(mid, matches[mid]);
 
@@ -17911,6 +17990,7 @@ function _d11AdminMatchCard(m) {
     const isOpen = d11AdminParticipantsMatchId === m.id;
     return `
     <div class="card mb14">
+      <div style="font-size:9px;color:var(--dim);font-weight:700;letter-spacing:0.3px;margin-bottom:3px">MATCH ID NO: ${formatMatchSeqNo(m.matchSeqNo)}</div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <div class="match-teams" style="gap:8px">
           <span class="team-name" style="font-size:14px">${m.teamA||'TBD'}</span>
@@ -17955,6 +18035,7 @@ function renderAdminD11MatchesList() {
   // eligible matches (manual + Cricbuzz-imported) show together.
   const active = eligible.filter(m => !dream11Matches[m.id]?.scored)
     .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
+  const unNumberedCount = Object.values(matches).filter(m => !m.matchSeqNo).length;
 
   return `
   <div style="margin-bottom:14px">
@@ -17963,6 +18044,11 @@ function renderAdminD11MatchesList() {
   <div style="margin-bottom:14px">
     <button class="btn-secondary btn-block" style="background:rgba(37,99,235,0.1);border-color:rgba(37,99,235,0.3);color:#60a5fa" onclick="goD11CricbuzzHub()">📡 Cricbuzz Matches (Auto-Import)</button>
   </div>
+  ${unNumberedCount > 0 ? `
+  <div style="margin-bottom:14px">
+    <button class="btn-secondary btn-block" style="background:rgba(251,191,36,0.12);color:var(--gold);border-color:rgba(251,191,36,0.3)" onclick="d11AdminBackfillMatchSeqNos()">🔢 Assign Match ID No to ${unNumberedCount} old match${unNumberedCount===1?'':'es'}</button>
+  </div>
+  ` : ''}
   ${active.length===0?`<div class="empty-state"><div class="empty-icon">🎮</div>Koi upcoming/live Dream11 match nahi hai.</div>`:''}
   ${active.length>0?`<div style="font-size:12px;font-weight:700;color:#4ade80;margin-bottom:10px">🟢 Active Matches (${active.length})</div>${active.map(_d11AdminMatchCard).join('')}`:''}
   `;
@@ -18139,14 +18225,19 @@ async function sendBroadcastNotification() {
 
 // ── Admin: Matches list + create button ─────────────────────
 function renderAdminMatches(allMatches) {
+  const unNumberedCount = allMatches.filter(m => !m.matchSeqNo).length;
   return `
   <button class="btn-primary btn-orange mb18" onclick="startNewMatch()">+ Create New Match</button>
+  ${unNumberedCount > 0 ? `
+  <button class="btn-secondary btn-block mb14" style="background:rgba(251,191,36,0.12);color:var(--gold);border-color:rgba(251,191,36,0.3)" onclick="d11AdminBackfillMatchSeqNos()">🔢 Assign Match ID No to ${unNumberedCount} old match${unNumberedCount===1?'':'es'}</button>
+  ` : ''}
 
   ${allMatches.length===0 ? `<div class="empty-state">No matches created yet.</div>` :
   allMatches.sort((a,b)=>b.deadline-a.deadline).map(m => `
   <div class="card mb10">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
       <div>
+        <div style="font-size:10px;color:var(--dim);font-weight:700;letter-spacing:0.3px">MATCH ID NO: ${formatMatchSeqNo(m.matchSeqNo)}</div>
         <div style="font-weight:700;font-size:14px">${m.teamA} vs ${m.teamB}</div>
         <div style="font-size:11px;color:var(--dim);margin-top:2px">${m.sport==='cricket'?'🏏':'⚽'} ${(m.questions||[]).length} questions · ${(m.participants||[]).length} joined</div>
       </div>
@@ -19463,30 +19554,18 @@ function renderMatchByMatchBreakdownCard(email) {
   const bd = getUserAdminContestBreakdown(email);
   if (bd.matches.length === 0) return '';
   const statusColor = (s) => s==='won'||s==='settled' ? '#4ade80' : s==='lost' ? '#f87171' : s==='cancelled/refunded' ? 'var(--dim)' : '#fbbf24';
-  // Tournament/UT prizes are recorded with matchId:null (a tournament spans
-  // many matches, not one) — so they're part of the grand total (from the
-  // ledger) but can never appear inside any single match's card below.
-  // Show them as their own line so "grand total" vs "sum of match cards"
-  // doesn't look like a mismatch/bug when someone's won a tournament prize.
-  const matchCardNetSum = bd.matches.reduce((s,m) => s + m.net, 0);
-  const tournamentPrizes = bd.grandNet - matchCardNetSum;
   return `
   <div class="section-title">🏏 Match-by-Match Contest Breakdown</div>
   <div class="card mb14">
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-size:11px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--card-b)">
-      <div><span style="color:var(--dim)">Net Spent</span><br/><b style="color:#f87171;font-size:14px">Rs ${bd.grandNetEntry.toFixed(2)}</b>${bd.grandTotalRefunds>0?`<div style="font-size:9px;color:var(--dim)">Rs ${bd.grandTotalEntry.toFixed(2)} paid − Rs ${bd.grandTotalRefunds.toFixed(2)} refunded</div>`:''}</div>
+      <div><span style="color:var(--dim)">Total Spent</span><br/><b style="color:#f87171;font-size:14px">Rs ${bd.grandTotalEntry.toFixed(2)}</b></div>
       <div><span style="color:var(--dim)">Total Won</span><br/><b style="color:#4ade80;font-size:14px">Rs ${bd.grandTotalPrize.toFixed(2)}</b></div>
-      <div><span style="color:var(--dim)">Net</span><br/><b style="color:${bd.grandNet>=0?'#4ade80':'#f87171'};font-size:14px">${bd.grandNet>=0?'+':''}Rs ${bd.grandNet.toFixed(2)}</b></div>
+      <div><span style="color:var(--dim)">Net Profit</span><br/><b style="color:${bd.grandNet>=0?'#4ade80':'#f87171'};font-size:14px">${bd.grandNet>=0?'+':''}Rs ${bd.grandNet.toFixed(2)}</b></div>
     </div>
-    ${Math.abs(tournamentPrizes) >= 1 ? `
-    <div style="display:flex;justify-content:space-between;align-items:center;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:11px">
-      <span>🏆 Tournament/League prizes <span style="color:var(--dim)">(not tied to one match, so not shown in cards below)</span></span>
-      <b style="color:#fbbf24">+Rs ${tournamentPrizes.toFixed(2)}</b>
-    </div>` : ''}
     ${bd.matches.map(mb => `
     <div style="background:var(--input-bg);border-radius:10px;padding:10px 12px;margin-bottom:8px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <div style="font-weight:700;font-size:12.5px">${mb.teamA} vs ${mb.teamB}</div>
+        <div><div style="font-size:9px;color:var(--dim);font-weight:700">MATCH ID NO: ${formatMatchSeqNo(mb.matchSeqNo)}</div><div style="font-weight:700;font-size:12.5px">${mb.teamA} vs ${mb.teamB}</div></div>
         <span style="font-size:9.5px;font-weight:700;color:${mb.scored?'#4ade80':'#fbbf24'};background:${mb.scored?'rgba(34,197,94,0.12)':'rgba(251,191,36,0.12)'};padding:2px 7px;border-radius:5px">${mb.scored?'SCORED':'PENDING'}</span>
       </div>
       ${mb.contests.map(c => `
@@ -19620,30 +19699,23 @@ function getUserAdminContestBreakdown(email) {
     const netWinnings = totalPrize - totalRefundedThisMatch;
 
     return {
-      matchId: mId, teamA: m.teamA, teamB: m.teamB, format: m.format,
+      matchId: mId, teamA: m.teamA, teamB: m.teamB, format: m.format, matchSeqNo: m.matchSeqNo,
       scored: !!d11m.scored, contests, totalEntry, totalPrize, net: netWinnings - totalEntry
     };
   }).filter(Boolean);
 
-  // Grand totals come from the transaction ledger, not summed from the
-  // per-match contest breakdown above — the ledger is the definitive
-  // record of real money moving and also captures prize types the
-  // breakdown loop above can't reconstruct per-match (tournament prizes
-  // especially, which don't keep a convenient per-user-per-match record).
-  // This guarantees the top summary always matches "Top Players — Most
-  // Won" on the Rank tab, which also reads from the ledger.
-  const u = users[email];
-  const grandTotalEntry = u ? userTotalContestSpent(u) : out.reduce((s,m) => s + m.totalEntry, 0);
-  const grandTotalPrize = u ? userTotalContestWinnings(u) : out.reduce((s,m) => s + m.totalPrize, 0);
-  const grandTotalRefunds = u ? userTotalContestRefunds(u) : 0;
-  // "Net Spent" backs refunds out of the raw entry-fee total — a refunded
-  // entry (e.g. an H2H contest cancelled for lack of an opponent) is money
-  // that left and came straight back, not a real loss, so it shouldn't
-  // count against the person the same way an actual contest loss does.
-  // This is what makes the top summary agree with the per-match "Match
-  // Net" figures below, which already net refunds out per-contest.
-  const grandNetEntry = grandTotalEntry - grandTotalRefunds;
-  return { matches: out, grandTotalEntry, grandTotalPrize, grandTotalRefunds, grandNetEntry, grandNet: grandTotalPrize - grandNetEntry };
+  // Grand totals: simple sum of every contest's entry fee / prize across all
+  // matches shown below — "Total Spent" is everything actually paid to join
+  // a contest, "Total Won" is everything actually won back, "Net Profit" is
+  // the difference. Refunded contests correctly contribute 0 to both sides
+  // (entryFee is zeroed for them above, and their "prize" is the refund
+  // itself, which nets out per-match already) — no separate refund
+  // bookkeeping needed here, keeping this simple and always non-negative
+  // in the way a person would expect "Total Spent"/"Total Won" to read.
+  const grandTotalEntry = out.reduce((s,m) => s + m.totalEntry, 0);
+  const grandTotalPrize = out.reduce((s,m) => s + (m.totalPrize - m.contests.reduce((rs,c) => rs + (c.refunded ? c.prize : 0), 0)), 0);
+  const grandNet = out.reduce((s,m) => s + m.net, 0);
+  return { matches: out, grandTotalEntry, grandTotalPrize, grandNet };
 }
 
 let adminUserSearchText = '';
@@ -19860,14 +19932,14 @@ function renderAdminUserDetail(email) {
     <div class="card mb14">
       <div class="section-title" style="margin-bottom:6px">🏏 Match-by-Match Contest Breakdown</div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-size:11px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--card-b)">
-        <div><span style="color:var(--dim)">Net Spent</span><br/><b style="color:#f87171;font-size:14px">Rs ${bd.grandNetEntry.toFixed(2)}</b>${bd.grandTotalRefunds>0?`<div style="font-size:9px;color:var(--dim)">Rs ${bd.grandTotalEntry.toFixed(2)} paid − Rs ${bd.grandTotalRefunds.toFixed(2)} refunded</div>`:''}</div>
+        <div><span style="color:var(--dim)">Total Spent</span><br/><b style="color:#f87171;font-size:14px">Rs ${bd.grandTotalEntry.toFixed(2)}</b></div>
         <div><span style="color:var(--dim)">Total Won</span><br/><b style="color:#4ade80;font-size:14px">Rs ${bd.grandTotalPrize.toFixed(2)}</b></div>
-        <div><span style="color:var(--dim)">Net</span><br/><b style="color:${bd.grandNet>=0?'#4ade80':'#f87171'};font-size:14px">${bd.grandNet>=0?'+':''}Rs ${bd.grandNet.toFixed(2)}</b></div>
+        <div><span style="color:var(--dim)">Net Profit</span><br/><b style="color:${bd.grandNet>=0?'#4ade80':'#f87171'};font-size:14px">${bd.grandNet>=0?'+':''}Rs ${bd.grandNet.toFixed(2)}</b></div>
       </div>
       ${bd.matches.map(mb => `
       <div style="background:var(--input-bg);border-radius:10px;padding:10px 12px;margin-bottom:8px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-          <div style="font-weight:700;font-size:12.5px">${mb.teamA} vs ${mb.teamB}</div>
+          <div><div style="font-size:9px;color:var(--dim);font-weight:700">MATCH ID NO: ${formatMatchSeqNo(mb.matchSeqNo)}</div><div style="font-weight:700;font-size:12.5px">${mb.teamA} vs ${mb.teamB}</div></div>
           <span style="font-size:9.5px;font-weight:700;color:${mb.scored?'#4ade80':'#fbbf24'};background:${mb.scored?'rgba(34,197,94,0.12)':'rgba(251,191,36,0.12)'};padding:2px 7px;border-radius:5px">${mb.scored?'SCORED':'PENDING'}</span>
         </div>
         ${mb.contests.map(c => `
@@ -23241,7 +23313,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.97.0";
+const APP_VERSION = "3.98.1";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
