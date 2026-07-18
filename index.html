@@ -8203,6 +8203,16 @@ function d11GuessRoleFromName(name) {
 // Role can be tagged explicitly per name (e.g. "Rizwan - WK"); otherwise it's guessed from a
 // known-players list, defaulting to BAT. Captain/vice-captain markers like "(c)"/"(vc)" are
 // stripped from the name (not treated as a role).
+// Strips a trailing captain/vice-captain/wicketkeeper marker from a pasted
+// player name, e.g. "Kusal Mendis(w/c)" → "Kusal Mendis", "Sam Harper(w)" →
+// "Sam Harper", "Dasun Shanaka(c)" → "Dasun Shanaka". Covers single tags
+// (c, vc, wk, w, captain, wicket-keeper) and combined tags (w/c, c/wk, vc/wk
+// in either order), with or without a space before the parenthesis.
+function _d11StripCaptainKeeperTag(name) {
+  return (name || '').trim()
+    .replace(/\(\s*(c\s*\/\s*wk|wk\s*\/\s*c|w\s*\/\s*c|c\s*\/\s*w|vc\s*\/\s*wk|wk\s*\/\s*vc|captain|vice[\s-]?captain|wicket[\s-]?keeper|c|vc|wk|w)\s*\)\s*$/i, '')
+    .trim();
+}
 function d11ParseSquadText(text, teamAName, teamBName) {
   const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
   const normA = (teamAName||'').trim().toLowerCase();
@@ -8310,7 +8320,7 @@ function d11ParseSquadText(text, teamAName, teamBName) {
     pieces.forEach(piece => {
       let cleaned = piece.replace(/^\s*[\d]+[\.]\s*/, '').replace(/^[-•*]\s*/, '').trim();
       if (!cleaned) return;
-      cleaned = cleaned.replace(/\(\s*(c|vc|captain|vice[\s-]?captain)\s*\)\s*$/i, '').trim();
+      cleaned = _d11StripCaptainKeeperTag(cleaned);
       if (!cleaned) return;
 
       // Convert slug → proper name
@@ -8524,7 +8534,7 @@ async function d11ScanSquadScreenshots() {
     let skipped = 0;
 
     detected.forEach(({ name, role, team }) => {
-      const cleanName = name.trim().replace(/\(\s*(c|vc|captain|vice[\s-]?captain)\s*\)\s*$/i, '').trim();
+      const cleanName = _d11StripCaptainKeeperTag(name);
       if (!cleanName) return;
       if (existingNames.has(cleanName.toLowerCase())) { skipped++; return; }
       const finalRole = validRoles.has(role) ? role : d11GuessRoleFromName(cleanName);
@@ -8948,7 +8958,7 @@ function masterTeamsConfirmPaste(key) {
       let cleaned = piece.replace(/^\s*[\d]+\.\s*/, '').replace(/^[-•*]\s*/, '').trim();
       // Strip any leading markdown from individual piece
       cleaned = cleaned.replace(/^[#\s]+/, '').replace(/\*+/g, '').replace(/_+/g, '').trim();
-      cleaned = cleaned.replace(/\(\s*(c|vc|captain|vice[\s-]?captain)\s*\)\s*$/i, '').trim();
+      cleaned = _d11StripCaptainKeeperTag(cleaned);
       if (!cleaned || cleaned.length < 2) return;
       const { cleanName, role: explicitRole } = d11DetectExplicitRole(cleaned);
       const finalName = cleanName || cleaned;
@@ -21202,7 +21212,7 @@ function utTeamsConfirmPaste(key) {
     pieces.forEach(piece => {
       let cleaned = piece.replace(/^\s*[\d]+\.\s*/, '').replace(/^[-•*]\s*/, '').trim();
       cleaned = cleaned.replace(/^[#\s]+/, '').replace(/\*+/g, '').replace(/_+/g, '').trim();
-      cleaned = cleaned.replace(/\(\s*(c|vc|captain|vice[\s-]?captain)\s*\)\s*$/i, '').trim();
+      cleaned = _d11StripCaptainKeeperTag(cleaned);
       if (!cleaned || cleaned.length < 2) return;
       const { cleanName, role: explicitRole } = d11DetectExplicitRole(cleaned);
       const finalName = cleanName || cleaned;
@@ -21344,7 +21354,7 @@ function utConfirmPastePool() {
     pieces.forEach(piece => {
       let cleaned = piece.replace(/^\s*[\d]+\.\s*/, '').replace(/^[-•*]\s*/, '').trim();
       cleaned = cleaned.replace(/^[#\s]+/, '').replace(/\*+/g, '').replace(/_+/g, '').trim();
-      cleaned = cleaned.replace(/\(\s*(c|vc|captain|vice[\s-]?captain)\s*\)\s*$/i, '').trim();
+      cleaned = _d11StripCaptainKeeperTag(cleaned);
       if (!cleaned || cleaned.length < 2) return;
       const { cleanName, role: explicitRole } = d11DetectExplicitRole(cleaned);
       const finalName = cleanName || cleaned;
@@ -23733,7 +23743,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.99.2";
+const APP_VERSION = "3.99.3";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
