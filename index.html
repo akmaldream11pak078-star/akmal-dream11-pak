@@ -1121,6 +1121,24 @@ let d11ImportLoading = false;
 let d11ImportError = null;
 let d11ImportRawMatchCount = 0; // how many matches Cricbuzz returned before the upcoming/junior-women filter — lets the empty state distinguish "API gave nothing" from "API gave data, but none of it was upcoming"
 let d11ImportUsedFallback = false; // true if this schedule fetch had to use the fallback API (primary quota exhausted) — that data has been observed to occasionally lag behind Cricbuzz's real schedule
+
+// ── ESPN Cricinfo API (via Parse.bot) — second, independent Live Sync
+// source, fully parallel to the Cricbuzz integration above. A Dream11 match
+// links to EITHER Cricbuzz OR ESPN Cricinfo (never both), tracked by
+// m.espnMatchId / m.espnSeriesId (as opposed to m.cricketDataMatchId for
+// Cricbuzz) so the two never collide on the same match. Same automation:
+// Sync Now / Fetch Squad / Check Playing XI / Fetch Final Result, all
+// admin-triggered on demand — no background polling.
+// Free tier: 100 credits/month, 5 requests/min (1 credit = 1 call regardless
+// of endpoint). This is far tighter than Cricbuzz's quota, so use ESPN
+// Cricinfo for a handful of matches Cricbuzz can't cover, not as the
+// default for every match.
+const ESPN_CRICINFO_API_KEY = "pmx_c03c70699b84311cbc84af3eef403493";
+const ESPN_CRICINFO_SCRAPER_ID = "1d60bec3-9a21-42ea-8ee9-e5ef840ba233";
+const ESPN_CRICINFO_BASE = `https://api.parse.bot/scraper/${ESPN_CRICINFO_SCRAPER_ID}`;
+let _d11EspnSearchResults = []; // last ESPN Cricinfo live-scores results shown in the "Link Match" picker
+let _d11EspnSearchLoading = false;
+let _d11EspnSearchError = null;
 // TEMP DEBUG — holds the raw Cricbuzz team response so admin can view/copy
 // it on-screen (see renderD11SquadDebugModal). Remove once squad-shape
 // issue is confirmed/fixed.
@@ -1376,6 +1394,7 @@ function _ensureAdminDataLoaded() {
     _loadAllDeletedMatchesFromFirestore(),
     _loadAllDeletedD11MatchesFromFirestore(),
     typeof _loadCricbuzzApiLog === 'function' ? _loadCricbuzzApiLog() : Promise.resolve(),
+    typeof _loadEspnCricinfoApiLog === 'function' ? _loadEspnCricinfoApiLog() : Promise.resolve(),
   ]).then(() => render()).catch(() => {});
 }
 
@@ -4685,6 +4704,7 @@ function render() {
     ${renderBottomNav()}
     ${masterTeamsPhotoSearchTarget ? renderMasterTeamsPhotoSearchModal() : ''}
     ${d11LiveSyncPickerMatchId ? renderD11LiveSyncPickerModal() : ''}
+    ${d11EspnLinkPickerMatchId ? renderD11EspnLinkPickerModal() : ''}
     ${d11ImportPanelOpen ? renderD11ImportPanelModal() : ''}
     ${_d11SquadDebugData ? renderD11SquadDebugModal() : ''}
     ${d11PlayerInfoTarget ? renderD11PlayerInfoModal() : ''}
@@ -10167,6 +10187,65 @@ async function _cricbuzzFetch(path, params, _isRetry, callCtx, matchCtx) {
   return data;
 }
 
+// ── ESPN Cricinfo (via Parse.bot) — low-level fetch wrapper ──────────────
+// endpoint is one of: get_live_scores, get_match_details, get_match_scorecard,
+// get_match_commentary, get_series_fixtures, get_global_feed. params become
+// query-string args (GET). Throws on any non-OK response or network error —
+// callers catch and show a friendly message / fall back to manual paste,
+// same contract as _cricbuzzFetch.
+let espnCricinfoApiLog = []; // { at, month, feature, matchId, matchLabel, endpoint } — separate from cricbuzzApiLog so usage of the two providers can be told apart
+async function _logEspnCricinfoApiCall(feature, matchId, endpoint) {
+  const now = getDateTime();
+  const month = now.slice(0, 7);
+  const m = matchId ? matches[matchId] : null;
+  const entry = { at: now, month, feature, matchId: matchId || null, matchLabel: m ? `${m.teamA} vs ${m.teamB}` : null, endpoint };
+  espnCricinfoApiLog = [entry, ...espnCricinfoApiLog].filter(e => e.month === month);
+  try {
+    await setDoc(doc(window._fbDb, 'pp_meta', 'espn_cricinfo_api_log'), { entries: espnCricinfoApiLog });
+  } catch (e) { console.warn('Could not persist ESPN Cricinfo API log:', e.message); }
+}
+async function _loadEspnCricinfoApiLog() {
+  try {
+    const snap = await getDoc(doc(window._fbDb, 'pp_meta', 'espn_cricinfo_api_log'));
+    if (snap.exists()) {
+      const month = getDateTime().slice(0, 7);
+      espnCricinfoApiLog = (snap.data().entries || []).filter(e => e.month === month);
+    }
+  } catch (e) { console.warn('Could not load ESPN Cricinfo API log:', e.message); }
+}
+async function _espnCricinfoFetch(endpoint, params, callCtx) {
+  if (!ESPN_CRICINFO_API_KEY) {
+    throw new Error('No ESPN Cricinfo API key configured — paste a Parse.bot key into ESPN_CRICINFO_API_KEY in the code to restore ESPN Cricinfo features.');
+  }
+  const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+  const url = `${ESPN_CRICINFO_BASE}/${endpoint}${qs}`;
+  let res;
+  try {
+    res = await fetch(url, { headers: { 'X-API-Key': ESPN_CRICINFO_API_KEY } });
+  } catch (e) {
+    throw new Error('Could not reach ESPN Cricinfo API — check your internet connection and try again.');
+  }
+  if (res.status === 429) {
+    throw new Error('HTTP 429 — ESPN Cricinfo API rate limit hit (free tier: 5 req/min, 100 credits/month) — wait a moment and try again.');
+  }
+  if (!res.ok) {
+    throw new Error(`ESPN Cricinfo API returned HTTP ${res.status}`);
+  }
+  const text = await res.text();
+  if (!text) throw new Error('ESPN Cricinfo API returned an empty response — likely a temporary hiccup, please try again.');
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`ESPN Cricinfo API returned an unreadable response (${text.slice(0,60)}...) — please try again.`);
+  }
+  if (json.status && json.status !== 'success') {
+    throw new Error(`ESPN Cricinfo API error: ${json.error || json.status}`);
+  }
+  if (callCtx) _logEspnCricinfoApiCall(callCtx.feature || '', callCtx.matchId, endpoint).catch(()=>{});
+  return json.data !== undefined ? json.data : json;
+}
+
 // Cricbuzz's match-list endpoints nest matches inside
 // typeMatches[].seriesMatches[].seriesAdWrapper.matches[].matchInfo — pull
 // every matchInfo out into a flat array regardless of which endpoint
@@ -10732,6 +10811,89 @@ async function d11FetchSquadFromCricbuzz(matchId) {
 // browser DevTools. Remove once squad-shape issue is confirmed/fixed.
 function d11OpenSquadDebugModal() { render(); }
 function d11CloseSquadDebugModal() { _d11SquadDebugData = null; render(); }
+
+// ── Fetch Squad from ESPN Cricinfo (get_match_details) ───────────────────
+// Populates the Dream11 player pool from ESPN's matchPlayers field for a
+// linked match. Written defensively — matchPlayers' exact shape isn't
+// published, so this tries every plausible shape (flat array, grouped by
+// team, grouped by category) and always stashes the raw response in the
+// same _d11SquadDebugData panel the Cricbuzz flow uses, so a shape mismatch
+// is visible/fixable rather than silently returning 0 players.
+async function d11FetchSquadFromEspn(matchId) {
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m) return;
+  if (!m.espnMatchId) {
+    return showNotif('Link this match to ESPN Cricinfo first (🔗 Link ESPN Cricinfo), then try again', 'error');
+  }
+  showNotif('📥 Fetching squad from ESPN Cricinfo…');
+  try {
+    const data = await _espnCricinfoFetch('get_match_details', { match_id: m.espnMatchId, series_id: m.espnSeriesId || '' }, { feature: 'Fetch Squad', matchId });
+    _d11SquadDebugData = { espnRaw: data, espnMatchId: m.espnMatchId };
+
+    // matchPlayers can plausibly be: a flat array of {name, team, role,...},
+    // an object keyed by team name/id each holding an array, or an array of
+    // {team, players:[...]} groups. Try each in turn.
+    const mp = data?.matchPlayers ?? data?.match?.matchPlayers ?? [];
+    let flatPlayers = [];
+    if (Array.isArray(mp)) {
+      if (mp.length && Array.isArray(mp[0]?.players)) {
+        // [{team:{...}, players:[...]}, ...]
+        mp.forEach(group => {
+          const teamNameL = (group.team?.name || group.teamName || '').toLowerCase();
+          (group.players || []).forEach(p => flatPlayers.push({ ...p, _teamNameL: teamNameL }));
+        });
+      } else {
+        // flat array — each player carries its own team reference
+        mp.forEach(p => flatPlayers.push({ ...p, _teamNameL: (p.team?.name || p.teamName || '').toLowerCase() }));
+      }
+    } else if (mp && typeof mp === 'object') {
+      // { "TeamName": [...], ... }
+      Object.entries(mp).forEach(([teamKey, arr]) => {
+        if (Array.isArray(arr)) arr.forEach(p => flatPlayers.push({ ...p, _teamNameL: teamKey.toLowerCase() }));
+      });
+    }
+
+    if (flatPlayers.length === 0) {
+      showNotif('📭 ESPN Cricinfo hasn\'t published this squad yet (or the response shape was unexpected — check 🐛 View Raw Squad Data). Try again closer to match time, or add players manually for now.', 'error');
+      render();
+      return;
+    }
+
+    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    let addedCount = 0;
+    flatPlayers.forEach(p => {
+      const name = (p.name || p.fullName || p.player?.name || '').trim();
+      if (!name || existingNamesLower.has(name.toLowerCase())) return;
+      const roleTextL = (p.role || p.playingRole || '').toLowerCase();
+      if (roleTextL.includes('coach') || roleTextL.includes('physio') || roleTextL.includes('manager') || roleTextL.includes('trainer') || roleTextL.includes('support staff')) return;
+      const side = _d11TeamNameMatches(p._teamNameL || '', m.teamA) ? 'A'
+                 : _d11TeamNameMatches(p._teamNameL || '', m.teamB) ? 'B'
+                 : (flatPlayers.indexOf(p) < flatPlayers.length / 2 ? 'A' : 'B'); // last-resort guess if team name didn't match either side
+      const role = _d11MapCricbuzzRole(p.role || p.playingRole, p.isKeeper || p.keeper);
+      const player = newDream11Player(name, role, side);
+      d11m.players.push(player);
+      d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
+      existingNamesLower.add(name.toLowerCase());
+      addedCount++;
+    });
+
+    if (addedCount === 0) {
+      showNotif('No new players to add — squad already matches what\'s in your pool.');
+      render();
+      return;
+    }
+
+    await _saveDream11MatchToFirestore(matchId, d11m);
+    showNotif(`✅ Added ${addedCount} players from ESPN Cricinfo squad!`);
+    render();
+  } catch (e) {
+    console.error('ESPN Cricinfo squad fetch failed:', e);
+    showNotif('Could not fetch squad from ESPN Cricinfo — ' + (e.message||'unknown error'), 'error');
+    render();
+  }
+}
+
 // ── Player Info modal (team builder) ─────────────────────────────────────
 // Shown when the person taps a player's name/photo while building a team.
 // Points/credits/role come from the current match's pool; the "last
@@ -10924,6 +11086,126 @@ function d11UnlinkLiveMatch(matchId) {
 // Live sync is fully manual now (see d11LinkLiveMatch) — no background
 // polling scheduler. d11SyncLiveMatch (below) is called only when the
 // admin taps "🔄 Sync Now" or "🏁 Fetch Final Result".
+
+// ══════════════════════════════════════════════════════════════════════
+// ESPN CRICINFO — parallel link/search flow (see _espnCricinfoFetch above).
+// Uses m.espnMatchId (ESPN's objectId) + m.espnSeriesId instead of
+// m.cricketDataMatchId, so a match links to EITHER Cricbuzz OR ESPN
+// Cricinfo, never both — the two integrations never touch each other's
+// fields. Squad/Playing-XI/score sync (below) all key off m.espnMatchId.
+// ══════════════════════════════════════════════════════════════════════
+async function d11SearchLiveMatchEspn(matchId) {
+  const m = matches[matchId];
+  if (!m) return;
+  _d11EspnSearchLoading = true;
+  _d11EspnSearchError = null;
+  _d11EspnSearchResults = [];
+  render();
+  try {
+    const data = await _espnCricinfoFetch('get_live_scores', null, { feature: 'Link Match Search', matchId: null });
+    const pool = data?.matches || [];
+    if (pool.length === 0) throw new Error('No live/recent matches returned from ESPN Cricinfo right now');
+
+    const teamAWords = (m.teamA||'').toLowerCase().split(/\s+/).filter(w=>w.length>2);
+    const teamBWords = (m.teamB||'').toLowerCase().split(/\s+/).filter(w=>w.length>2);
+    const juniorWomenTags = ['women','u19','u-19','u16','u-16','under-19','under 19'];
+    const ourMatchIsJuniorWomen = juniorWomenTags.some(t => (m.teamA+' '+m.teamB).toLowerCase().includes(t));
+
+    const scored = pool.map(mt => {
+      const nameL = [mt.teams?.[0]?.team?.name, mt.teams?.[1]?.team?.name, mt.series?.name, mt.title].filter(Boolean).join(' ').toLowerCase();
+      const isJuniorWomen = juniorWomenTags.some(t => nameL.includes(t));
+      if (isJuniorWomen && !ourMatchIsJuniorWomen) return { mt, score: -1 };
+      const aHit = teamAWords.some(w => nameL.includes(w));
+      const bHit = teamBWords.some(w => nameL.includes(w));
+      if (!aHit || !bHit) return { mt, score: 0 };
+      let score = 0;
+      teamAWords.forEach(w => { if (nameL.includes(w)) score++; });
+      teamBWords.forEach(w => { if (nameL.includes(w)) score++; });
+      const stateL = (mt.state||mt.status||'').toLowerCase();
+      if (!stateL.includes('complete') && !stateL.includes('won by') && !stateL.includes('drawn')) score += 0.5;
+      return { mt, score };
+    }).filter(x => x.score > 0).sort((a,b)=>b.score-a.score);
+
+    _d11EspnSearchResults = scored.slice(0, 8).map(x => x.mt);
+    if (_d11EspnSearchResults.length === 0) {
+      _d11EspnSearchError = 'No exact match found on ESPN Cricinfo for both team names together. Showing all live/recent matches instead — pick manually, or use manual paste if not listed.';
+      _d11EspnSearchResults = pool.slice(0, 15);
+    }
+  } catch (e) {
+    console.error(e);
+    _d11EspnSearchError = 'Could not reach ESPN Cricinfo API — ' + (e.message||'unknown error');
+  } finally {
+    _d11EspnSearchLoading = false;
+    render();
+  }
+}
+
+function d11LinkEspnMatch(matchId, espnObjectId, espnSeriesId) {
+  const m = matches[matchId];
+  if (!m) return;
+  m.espnMatchId = espnObjectId;
+  if (espnSeriesId) m.espnSeriesId = espnSeriesId;
+  _saveMatchToFirestore(matchId, m);
+  _d11EspnSearchResults = [];
+  showNotif('🔗 Linked to ESPN Cricinfo! Fetching squad…');
+  render();
+  d11FetchSquadFromEspn(matchId).catch(e => console.warn('Auto squad fetch after ESPN link failed:', e.message));
+}
+
+function d11UnlinkEspnMatch(matchId) {
+  const m = matches[matchId];
+  if (!m) return;
+  delete m.espnMatchId;
+  delete m.espnSeriesId;
+  _saveMatchToFirestore(matchId, m);
+  showNotif('Unlinked from ESPN Cricinfo — switched back to manual paste');
+  render();
+}
+
+let d11EspnLinkPickerMatchId = null;
+function d11OpenEspnLinkPicker(matchId) {
+  d11EspnLinkPickerMatchId = matchId;
+  _d11EspnSearchResults = [];
+  _d11EspnSearchError = null;
+  render();
+  d11SearchLiveMatchEspn(matchId);
+}
+function d11CloseEspnLinkPicker() {
+  d11EspnLinkPickerMatchId = null;
+  _d11EspnSearchResults = [];
+  render();
+}
+function renderD11EspnLinkPickerModal() {
+  if (!d11EspnLinkPickerMatchId) return '';
+  const m = matches[d11EspnLinkPickerMatchId];
+  if (!m) return '';
+  return `<div style="position:fixed;inset:0;z-index:2000;background:rgba(5,10,20,0.82);backdrop-filter:blur(4px);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseEspnLinkPicker()">
+    <div class="card" style="width:100%;max-width:600px;max-height:82vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:18px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div style="font-size:15px;font-weight:700">🔗 Link ESPN Cricinfo Match</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseEspnLinkPicker()">✕</button>
+      </div>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:12px">Searching ESPN Cricinfo for: <b>${m.teamA} vs ${m.teamB}</b> <span style="color:#f87171">(uses 1 credit — free tier: 100/month)</span></div>
+      ${_d11EspnSearchLoading ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">🔄 Searching…</div>` : ''}
+      ${_d11EspnSearchError ? `<div style="background:rgba(220,38,38,0.1);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:10px;font-size:12px;color:#f87171;margin-bottom:10px">${_d11EspnSearchError}</div>` : ''}
+      ${!_d11EspnSearchLoading ? _d11EspnSearchResults.map(mt => {
+        const title = [mt.teams?.[0]?.team?.name, mt.teams?.[1]?.team?.name].filter(Boolean).join(' vs ') || mt.title || '—';
+        const sub = [mt.format, mt.series?.name].filter(Boolean).join(' · ');
+        const status = mt.statusText || mt.status || mt.state || '';
+        return `
+        <div style="background:var(--input-bg);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+          <div style="font-size:12.5px;font-weight:600;line-height:1.4;margin-bottom:2px">${title}</div>
+          <div style="font-size:10.5px;color:var(--dim);margin-bottom:2px">${sub}</div>
+          ${status ? `<div style="font-size:10px;color:var(--dim2);margin-bottom:8px">${status}</div>` : `<div style="margin-bottom:8px"></div>`}
+          <button class="btn-secondary btn-block" style="font-size:11px;padding:8px;background:linear-gradient(135deg,#dc2626,#991b1b);color:#fff;border:none" onclick="d11LinkEspnMatch('${d11EspnLinkPickerMatchId}',${mt.objectId},${mt.series?.objectId||'null'})">Link this match</button>
+        </div>
+      `;
+      }).join('') : ''}
+      ${!_d11EspnSearchLoading && !_d11EspnSearchResults.length && !_d11EspnSearchError ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">No matches found</div>` : ''}
+      <button class="btn-secondary btn-block" style="margin-top:10px;font-size:12px" onclick="d11SearchLiveMatchEspn('${d11EspnLinkPickerMatchId}')">🔄 Search Again (uses 1 more credit)</button>
+    </div>
+  </div>`;
+}
 
 // ── Manual "📥 Fetch Squad / Check Playing XI" check ──────────────────────
 // Same logic as before, but now only ever runs when the admin taps a
@@ -11256,9 +11538,9 @@ async function d11SyncLiveMatch(matchId, showToast) {
       const p = _d11FindPlayerByName(d11m, row.name);
       if (!p) return;
       p.stats = { ...(p.stats||{}),
-        catches: (Number(p.stats?.catches)||0) + row.catches,
-        stumpings: (Number(p.stats?.stumpings)||0) + row.stumpings,
-        runOuts: (Number(p.stats?.runOuts)||0) + row.runOuts,
+        catches: row.catches,
+        stumpings: row.stumpings,
+        runOuts: row.runOuts,
         isPlayingXI: true
       };
       fieldersApplied++;
@@ -11309,6 +11591,169 @@ function _d11TeamNameMatches(cricbuzzName, ourTeamName) {
   if (!cricbuzzName || !ourTeamName) return false;
   const words = ourTeamName.toLowerCase().split(/\s+/).filter(w=>w.length>2);
   return words.some(w => cricbuzzName.includes(w));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ESPN CRICINFO — score/points sync (get_match_scorecard) + Playing XI
+// check. Reuses _d11ApplyLiveBattingRow/_d11ApplyLiveBowlingRow/
+// _d11ExtractLiveFieldingCredit — those only need a plain
+// {name, runs, balls/ballsFaced, outdec, fours, sixes} /
+// {name, overs, wickets, maidens, runs} shape, so ESPN's scorecard rows are
+// mapped into that same shape here rather than duplicating the scoring
+// logic. Everything else (points calc, live team-points push, final-result
+// detection) is the exact same downstream flow as the Cricbuzz path.
+// ══════════════════════════════════════════════════════════════════════
+async function d11SyncLiveMatchEspn(matchId, showToast) {
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m || !m.espnMatchId) return;
+  try {
+    const data = await _espnCricinfoFetch('get_match_scorecard', { match_id: m.espnMatchId, series_id: m.espnSeriesId || '' }, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
+    _d11SyncDebugData = { matchId, fetchedAt: Date.now(), raw: data, source: 'ESPN Cricinfo' };
+
+    const matchObj = data?.match || {};
+    const statusText = data?.status || matchObj.status || matchObj.statusText || '';
+    const isComplete = matchObj.state ? /complete|finished|result/i.test(matchObj.state) : undefined;
+
+    // Scorecard innings — plausible shapes: data.innings[] or data.scorecard[],
+    // each with batting/bowling lists under a few possible key names.
+    const innings = data?.innings || data?.scorecard || [];
+    let battersApplied = 0, bowlersApplied = 0;
+    const fieldingRowsAll = [];
+
+    innings.forEach(inn => {
+      const battingTeamNameL = (inn.battingTeam?.name || inn.team?.name || inn.batTeamName || '').toLowerCase();
+      const score = inn.runs ?? inn.score;
+      const wkts = inn.wickets;
+      const overs = inn.overs;
+      if (score !== undefined) {
+        const scoreStr = `${score}/${wkts ?? 0} (${overs ?? 0} Ov)`;
+        if (_d11TeamNameMatches(battingTeamNameL, m.teamA)) m.scoreA = scoreStr;
+        else if (_d11TeamNameMatches(battingTeamNameL, m.teamB)) m.scoreB = scoreStr;
+      }
+
+      const battingCard = inn.batting || inn.batsmen || inn.batsman || [];
+      const bowlingCard = inn.bowling || inn.bowlers || inn.bowler || [];
+
+      battingCard.forEach(b => {
+        // Map ESPN's field names into the shape _d11ApplyLiveBattingRow expects.
+        const mapped = {
+          name: b.name || b.player?.name || b.batsman?.name,
+          runs: b.runs, balls: b.balls ?? b.ballsFaced,
+          outdec: b.dismissal || b.howOut || b.outDesc || (b.notOut ? 'not out' : ''),
+          fours: b.fours ?? b.four4s, sixes: b.sixes ?? b.six6s,
+        };
+        if (_d11ApplyLiveBattingRow(d11m, mapped)) battersApplied++;
+        _d11ExtractLiveFieldingCredit(mapped, fieldingRowsAll);
+      });
+      bowlingCard.forEach(bl => {
+        const mapped = {
+          name: bl.name || bl.player?.name || bl.bowler?.name,
+          overs: bl.overs, wickets: bl.wickets, maidens: bl.maidens,
+          runs: bl.runs ?? bl.runsConceded,
+        };
+        if (_d11ApplyLiveBowlingRow(d11m, mapped)) bowlersApplied++;
+      });
+    });
+
+    const mergedFieldingAll = {};
+    fieldingRowsAll.forEach(r => {
+      const key = r.name.toLowerCase();
+      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0 };
+      mergedFieldingAll[key].catches += r.catches;
+      mergedFieldingAll[key].stumpings += r.stumpings;
+      mergedFieldingAll[key].runOuts += r.runOuts;
+    });
+    let fieldersApplied = 0;
+    Object.values(mergedFieldingAll).forEach(row => {
+      const p = _d11FindPlayerByName(d11m, row.name);
+      if (!p) return;
+      p.stats = { ...(p.stats||{}),
+        catches: row.catches,
+        stumpings: row.stumpings,
+        runOuts: row.runOuts,
+        isPlayingXI: true
+      };
+      fieldersApplied++;
+    });
+
+    if (statusText) m.liveStatusText = statusText;
+
+    (d11m.players || []).forEach(p => { if (p.stats) p.points = calcDream11PlayerPoints(p.stats, matchId); });
+    recalcDream11MatchPoints(d11m);
+
+    _d11LiveSyncLastSyncedAt[matchId] = Date.now();
+    await _saveMatchToFirestore(matchId, m);
+    await _saveDream11MatchToFirestore(matchId, d11m);
+    await d11RefreshLiveTeamPoints(matchId);
+
+    const statusL = statusText.toLowerCase();
+    const isFinished = isComplete === true || statusL.includes('won by') || statusL.includes('drawn') || statusL.includes('tied') || statusL.includes('no result');
+    if (isFinished) {
+      m.resultText = statusText || m.resultText;
+      m.status = 'completed';
+      if (d11m) d11m.scored = true;
+      _d11MarkTeamsScoredForMatch(matchId);
+      await _saveMatchToFirestore(matchId, m);
+      await _saveDream11MatchToFirestore(matchId, d11m);
+      if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
+    } else if (showToast) {
+      if (battersApplied === 0 && bowlersApplied === 0) {
+        showNotif('⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected ESPN Cricinfo format).', 'error');
+      } else {
+        showNotif(`✅ Live data synced — ${battersApplied} batting + ${bowlersApplied} bowling + ${fieldersApplied} fielding rows updated`);
+      }
+    }
+    render();
+  } catch (e) {
+    console.error('ESPN Cricinfo live sync error:', e);
+    if (showToast) showNotif('Could not sync — ' + (e.message||'unknown error') + '. You can still paste manually.', 'error');
+  }
+}
+
+// Playing XI check for ESPN-linked matches — ESPN's matchPlayers (via
+// get_match_details) doesn't expose a distinct "confirmed XI vs full squad"
+// split the way Cricbuzz's pre-toss endpoint does, so this goes straight to
+// the scorecard: anyone who has actually batted or bowled is proof-positive
+// part of the Playing XI. Reliable once the match has started; before that,
+// it correctly reports "not started yet" rather than guessing.
+async function d11CheckPlayingXIAnnouncedEspn(matchId, silent) {
+  const notify = silent ? (()=>{}) : showNotif;
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m || !m.espnMatchId) return;
+  if ((d11m.players || []).some(p => p.isPlayingXI)) {
+    notify('Playing XI already confirmed for this match.');
+    return;
+  }
+  notify('🔍 Checking ESPN Cricinfo scorecard for Playing XI…');
+  try {
+    const data = await _espnCricinfoFetch('get_match_scorecard', { match_id: m.espnMatchId, series_id: m.espnSeriesId || '' }, { feature: silent ? 'Auto Playing XI Check' : 'Check Playing XI', matchId });
+    const innings = data?.innings || data?.scorecard || [];
+    const namesInPlay = new Set();
+    innings.forEach(inn => {
+      (inn.batting || inn.batsmen || inn.batsman || []).forEach(b => { const n = (b.name || b.player?.name || '').trim(); if (n) namesInPlay.add(n.toLowerCase()); });
+      (inn.bowling || inn.bowlers || inn.bowler || []).forEach(bl => { const n = (bl.name || bl.player?.name || '').trim(); if (n) namesInPlay.add(n.toLowerCase()); });
+    });
+    if (namesInPlay.size === 0) {
+      notify('Playing XI not available yet — the match hasn\'t started on ESPN Cricinfo, or the scorecard is still empty. Try again closer to/after match start.', 'error');
+      return;
+    }
+    let confirmedCount = 0;
+    (d11m.players || []).forEach(p => {
+      if (namesInPlay.has(p.name.toLowerCase().trim()) && !p.isPlayingXI) { p.isPlayingXI = true; confirmedCount++; }
+    });
+    if (confirmedCount > 0) {
+      await _saveDream11MatchToFirestore(matchId, d11m);
+      notify(`🏏 Playing XI confirmed from live scorecard — ${confirmedCount} players confirmed ✅`);
+      render();
+    } else {
+      notify('No new players matched — squad names may not match your pool exactly, or Playing XI was already confirmed.', 'error');
+    }
+  } catch (e) {
+    console.error('ESPN Cricinfo Playing XI check failed:', e);
+    notify('Could not check Playing XI — ' + (e.message||'unknown error'), 'error');
+  }
 }
 
 function _d11FindPlayerByName(d11m, name) {
@@ -15793,6 +16238,34 @@ function _d11RenderLiveSyncRow(m) {
   </div>`;
 }
 
+// ── ESPN Cricinfo link/sync row — only shown when this match ISN'T already
+// linked to Cricbuzz (a match uses exactly one live-sync provider). Same
+// visual pattern as _d11RenderLiveSyncRow, red-tinted to visually
+// distinguish the provider at a glance.
+function _d11RenderEspnSyncRow(m) {
+  if (m.cricketDataMatchId) return ''; // already on Cricbuzz — don't offer a second provider on the same match
+  if (!m.espnMatchId) {
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(220,38,38,0.08);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
+      <span style="font-size:11px;color:#f87171;flex:1;min-width:140px">🏏 ESPN Cricinfo: not linked</span>
+      <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:linear-gradient(135deg,#dc2626,#991b1b);color:#fff;border:none" onclick="d11OpenEspnLinkPicker('${m.id}')">🔗 Link ESPN Cricinfo</button>
+    </div>`;
+  }
+  const lastSync = _d11LiveSyncLastSyncedAt[m.id];
+  const lastSyncStr = lastSync ? new Date(lastSync).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : 'not yet';
+  return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(220,38,38,0.08);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
+    <span style="font-size:11px;color:#f87171;flex:1;min-width:140px">🏏 Linked to ESPN Cricinfo · Last synced: ${lastSyncStr}</span>
+    <span style="font-size:10.5px;color:#fca5a5;width:100%">Free tier: 100 credits/month, 5 req/min — every tap here uses 1 credit. Nothing happens automatically.</span>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchEspn('${m.id}', true)">🔄 Sync Now</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchEspn('${m.id}', true)">🏁 Fetch Final Result</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromEspn('${m.id}')">📥 Fetch Squad</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11CheckPlayingXIAnnouncedEspn('${m.id}')">🏏 Check Playing XI</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11ActiveMatchId='${m.id}';d11AdminTab='pool';tab='dream11Pool';d11StartPasteSquad();window.scrollTo(0,0)">✍️ Paste Playing XI</button>
+    ${_d11SquadDebugData ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11OpenSquadDebugModal()">🐛 View Raw Squad Data</button>` : ''}
+    ${_d11SyncDebugData && _d11SyncDebugData.matchId === m.id ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.3);color:#fca5a5" onclick="d11OpenSyncDebugModal()">🐛 View Raw Sync Data</button>` : ''}
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(220,38,38,0.12);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11UnlinkEspnMatch('${m.id}')">✕ Unlink</button>
+  </div>`;
+}
+
 // ── "🔗 Link Live Match" picker modal state + open/close ──
 let d11LiveSyncPickerMatchId = null;
 function d11OpenLiveSyncPicker(matchId) {
@@ -15881,6 +16354,7 @@ function renderD11CricbuzzHub() {
         <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11EditFormat('${m.id}')">✏️ Change</button>
       </div>
       ${_d11RenderLiveSyncRow(m)}
+      ${_d11RenderEspnSyncRow(m)}
       <button class="btn-primary btn-block" style="font-size:12px;padding:10px;margin-bottom:8px;background:${d11m?.published ? 'linear-gradient(135deg,#dc2626,#b91c1c)' : 'linear-gradient(135deg,#16a34a,#15803d)'}" onclick="d11TogglePublish('${m.id}')">${d11m?.published ? '🚫 Unpublish (hide from users)' : '🚀 Publish (show to users)'}</button>
       <div style="display:flex;gap:8px">
         <button class="btn-secondary" style="flex:1;font-size:12px;padding:10px" onclick="openDream11Match('${m.id}')">⚙️ Manage Pool</button>
@@ -16002,6 +16476,7 @@ function renderDream11Hub() {
           <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11EditFormat('${m.id}')">✏️ Change</button>
         </div>
         ${_d11RenderLiveSyncRow(m)}
+        ${_d11RenderEspnSyncRow(m)}
         <button class="btn-primary btn-block" style="font-size:12px;padding:10px;margin-bottom:8px;background:${d11m?.published ? 'linear-gradient(135deg,#dc2626,#b91c1c)' : 'linear-gradient(135deg,#16a34a,#15803d)'}" onclick="d11TogglePublish('${m.id}')">${d11m?.published ? '🚫 Unpublish (hide from users)' : '🚀 Publish (show to users)'}</button>
         <div style="display:flex;gap:8px">
           <button class="btn-secondary" style="flex:1;font-size:12px;padding:10px" onclick="openDream11Match('${m.id}')">⚙️ Manage Pool</button>
@@ -23885,7 +24360,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.0.2";
+const APP_VERSION = "4.1.1";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
