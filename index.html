@@ -11413,7 +11413,7 @@ function _d11ParseMdTable(text) {
 // batting + bowling contributions for all-rounders. Used by both the
 // markdown-paste flow and the screenshot-scan flow so matching behavior
 // stays identical between them.
-function _d11ApplyParsedRows(battingRows, bowlingRows, fieldingRows) {
+async function _d11ApplyParsedRows(battingRows, bowlingRows, fieldingRows) {
   const d11m = dream11Matches[d11ActiveMatchId];
   if (!d11m) return { matched: 0, unmatched: [] };
 
@@ -11478,10 +11478,21 @@ function _d11ApplyParsedRows(battingRows, bowlingRows, fieldingRows) {
     p.points = calcDream11PlayerPoints(p.stats, d11ActiveMatchId);
   });
   recalcDream11MatchPoints(d11m);
-  _saveDream11MatchToFirestore(d11ActiveMatchId, d11m);
+  let saveFailed = false;
+  try {
+    await _saveDream11MatchToFirestore(d11ActiveMatchId, d11m);
+  } catch (err) {
+    console.error('Saving match points failed:', err);
+    saveFailed = true;
+  }
   d11ApplyBackupReplacements(d11ActiveMatchId);
-  d11RefreshLiveTeamPoints(d11ActiveMatchId);
-  return { matched, unmatched: [...new Set(unmatched)] };
+  try {
+    await d11RefreshLiveTeamPoints(d11ActiveMatchId); // this is what actually pushes the updated result to every user's team
+  } catch (err) {
+    console.error('Refreshing live team points failed — users will NOT see the updated result:', err);
+    saveFailed = true;
+  }
+  return { matched, unmatched: [...new Set(unmatched)], saveFailed };
 }
 
 // ── Admin: Screenshot Scan — upload one or more scorecard screenshots
@@ -11759,7 +11770,14 @@ async function d11ReviewConfirmApply() {
     fieldingRows.push({ name, catches: row.catches||0, stumpings: row.stumpings||0, runOuts: row.runOuts||0 });
   });
 
-  const { matched, unmatched } = _d11ApplyParsedRows(battingRows, bowlingRows, fieldingRows);
+  const { matched, unmatched, saveFailed } = await _d11ApplyParsedRows(battingRows, bowlingRows, fieldingRows);
+
+  if (saveFailed) {
+    d11ScanReview = null;
+    render();
+    showNotif('⚠️ Points were calculated but saving failed — users will NOT see the update yet. Check your connection and try again, or ask the Owner to check Firestore access for this account.', 'error');
+    return;
+  }
 
   // Persist the match score/result/scorecard text too — d11AutoDetectScoreFromText
   // (called back when the paste was first applied) only set these on the
@@ -23743,7 +23761,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "3.99.3";
+const APP_VERSION = "3.99.6";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
