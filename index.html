@@ -17722,6 +17722,12 @@ function renderD11ContestParticipants() {
     ? `<button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="tab='home';adminTab='users';adminUserDetailEmail='${d11ParticipantsReturnToAdminUser}';d11ParticipantsReturnToAdminUser=null;render();window.scrollTo(0,0)">← Back to User</button>`
     : `<button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="tab='dream11JoinContest';d11ContestMatchId='${matchId}';render();window.scrollTo(0,0)">← Back</button>`;
 
+  // Full match detail card (teams, live score, series, deadline/countdown) —
+  // same info shown on the Join Contest hero header, repeated here so users
+  // don't have to go back just to check the score while browsing a
+  // contest's leaderboard.
+  const phDLocked = isD11Locked(matchId);
+  const phDeadlineStr = m.deadline ? pkDateTime(m.deadline) : '';
   const matchHeader = `
   <div class="card mb14">
     <div class="match-teams" style="margin-bottom:4px">
@@ -17729,6 +17735,16 @@ function renderD11ContestParticipants() {
       <span class="vs-badge">VS</span>
       <span class="team-name">${m.teamB||'TBD'}</span>
     </div>
+    ${m.seriesName ? `<div style="text-align:center;font-size:10.5px;color:var(--dim);margin-bottom:2px">${m.seriesName}</div>` : ''}
+    ${(m.scoreA || m.scoreB) ? `
+    <div style="display:flex;justify-content:center;gap:18px;margin-top:6px">
+      ${m.scoreA ? `<div style="text-align:center"><div style="font-size:10px;color:var(--dim)">${m.teamA||''}</div><div style="font-weight:800;font-size:14px;color:var(--text)">${m.scoreA}</div></div>` : ''}
+      ${m.scoreB ? `<div style="text-align:center"><div style="font-size:10px;color:var(--dim)">${m.teamB||''}</div><div style="font-weight:800;font-size:14px;color:var(--text)">${m.scoreB}</div></div>` : ''}
+    </div>` : ''}
+    ${m.resultText ? `<div style="text-align:center;margin-top:8px"><span style="display:inline-flex;align-items:center;gap:6px;background:rgba(74,222,128,0.14);color:#4ade80;font-weight:700;font-size:11.5px;padding:6px 12px;border-radius:16px">✅ ${m.resultText}</span></div>`
+      : `<div style="text-align:center;margin-top:8px"><span style="font-size:11px;font-weight:700;color:${d11m.scored ? '#4ade80' : (m.scoreA||m.scoreB) ? '#f87171' : 'var(--dim)'}">${d11m.scored ? '✅ Completed' : (m.scoreA||m.scoreB) ? '🔴 Live' : '⏳ Upcoming'}</span></div>`}
+    ${phDeadlineStr ? `<div class="match-deadline" style="margin-top:6px">${phDLocked ? '🔒 Deadline passed' : `⏰ Deadline: ${phDeadlineStr}`}</div>` : ''}
+    ${!phDLocked && m.deadline ? `<div class="d11-countdown" data-deadline="${m.deadline}" style="font-size:11.5px;font-weight:700;color:var(--orange);text-align:center;margin-top:4px">${d11FormatCountdown(m.deadline - Date.now())}</div>` : ''}
   </div>`;
 
   // Renders a ranked leaderboard for one specific contest's participants —
@@ -20307,8 +20323,21 @@ function renderDream11BuildTeam() {
 
   const roleTab = (role, label) => `<button class="d11-role-tab ${d11BuildTeamRoleTab===role?'active':''}" onclick="d11BuildTeamRoleTab='${role}';render()">${label}</button>`;
 
-  const sideAAll = d11m.players.filter(p => p.side === 'A');
-  const sideBAll = d11m.players.filter(p => p.side === 'B');
+  // Playing XI confirmed players float to the top of each team's list once
+  // XI is announced — makes it obvious at a glance who's actually playing,
+  // without needing to scroll/scan the ✅ ticks. Stable sort: within the
+  // XI-confirmed group and within the not-yet-confirmed group, original
+  // squad order is preserved.
+  const d11SortXIFirst = (arr) => arr
+    .map((p, idx) => ({ p, idx }))
+    .sort((a, b) => {
+      const xiDiff = (b.p.isPlayingXI ? 1 : 0) - (a.p.isPlayingXI ? 1 : 0);
+      return xiDiff !== 0 ? xiDiff : a.idx - b.idx;
+    })
+    .map(x => x.p);
+
+  const sideAAll = d11SortXIFirst(d11m.players.filter(p => p.side === 'A'));
+  const sideBAll = d11SortXIFirst(d11m.players.filter(p => p.side === 'B'));
   const matchesTab = (p) => d11BuildTeamRoleTab === 'ALL' || p.role === d11BuildTeamRoleTab;
   const sideA = sideAAll.filter(matchesTab);
   const sideB = sideBAll.filter(matchesTab);
@@ -26599,7 +26628,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.5.0";
+const APP_VERSION = "4.6.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
