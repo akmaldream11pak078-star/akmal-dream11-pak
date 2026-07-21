@@ -931,7 +931,7 @@ const UT_TEAM_SIZE = 11;
 const UT_CREDIT_BUDGET = 100; // same 100-credit Dream11 budget system
 const UT_DEFAULT_CREDIT = 9.0;
 const UT_MAX_PER_SIDE = 7;
-const UT_ROLE_LIMITS = { WK:[1,4], BAT:[3,6], AR:[1,4], BOWL:[3,6] };
+const UT_ROLE_LIMITS = { WK:[1,10], BAT:[3,10], AR:[1,10], BOWL:[3,10] };
 const UT_MAX_BACKUPS = 3; // same as D11_MAX_BACKUPS — free (no credit cost), auto-replace a same-role main player who isn't in the confirmed Playing XI
 const UT_ROLE_LABELS = { WK:'Wicket-Keeper', BAT:'Batsman', AR:'All-Rounder', BOWL:'Bowler' };
 
@@ -1139,6 +1139,11 @@ const ESPN_CRICINFO_BASE = `https://api.parse.bot/scraper/${ESPN_CRICINFO_SCRAPE
 let _d11EspnSearchResults = []; // last ESPN Cricinfo live-scores results shown in the "Link Match" picker
 let _d11EspnSearchLoading = false;
 let _d11EspnSearchError = null;
+let d11EspnImportPanelOpen = false;
+let d11EspnImportLoading = false;
+let d11EspnImportError = null;
+let d11EspnImportResults = []; // filtered list of individual match objects (with objectId, teams[], series, startDate/startTime, format) from get_live_scores
+let _d11EspnDebugData = null; // separate from _d11SquadDebugData (Cricbuzz) — different shape ({espnRaw}/{espnFixturesRaw}), own debug modal
 // TEMP DEBUG — holds the raw Cricbuzz team response so admin can view/copy
 // it on-screen (see renderD11SquadDebugModal). Remove once squad-shape
 // issue is confirmed/fixed.
@@ -1146,6 +1151,12 @@ let _d11SquadDebugData = null;
 let _d11ScheduleDebugData = null; // raw /schedule/v1/international response — shape confirmed (matchScheduleMap[].scheduleAdWrapper.matchScheduleList[].matchInfo[]), kept for future debugging if Cricbuzz changes it again
 let _d11SyncDebugData = null; // { matchId, fetchedAt, raw } — last raw hscard response from d11SyncLiveMatch, for the "View Raw Sync Data" debug panel
 let _d11LiveSyncLastSyncedAt = {}; // { [matchId]: timestamp } — for the "Last synced" label in admin UI
+// Guards against a single bad/stale API response auto-finishing a match.
+// A "finished" signal only locks the match as completed once it has been
+// seen on two separate syncs in a row for the same matchId — one glitchy
+// response (e.g. Cricbuzz briefly returning a cached "won by" string mid-
+// match) can no longer flip status to 'completed' by itself.
+let _d11PendingFinish = {}; // { [matchId]: true } — set on first "finished" signal, confirmed+cleared on the next
 
 // ── Mobile hardware/system back-button support ──────────────────────
 // The app is a single-page state machine driven entirely by the `tab`
@@ -1299,7 +1310,7 @@ let utViewTeamId = null; // for viewing a submitted UT team's detail
 let utLeaderboardMatchId = null; // which UT match's leaderboard is open
 let utShowTournamentLb = false; // show full tournament-wide leaderboard screen
 
-const D11_ROLE_LIMITS = { WK:[1,4], BAT:[1,6], AR:[1,4], BOWL:[1,6] };
+const D11_ROLE_LIMITS = { WK:[1,10], BAT:[1,10], AR:[1,10], BOWL:[1,10] };
 const D11_ROLE_LABELS = { WK:'Wicket-Keeper', BAT:'Batsman', AR:'All-Rounder', BOWL:'Bowler' };
 const D11_TEAM_SIZE = 11;
 const D11_CREDIT_BUDGET = 100; // total credit budget users have to build their 11 — same as real Dream11
@@ -4649,6 +4660,22 @@ function tpinForgotFlow() {
 }
 
 function render() {
+  try {
+    _renderInner();
+  } catch (e) {
+    console.error('render() crashed:', e);
+    const app = document.getElementById('app');
+    if (app) {
+      app.innerHTML = `
+        <div style="padding:24px;text-align:center;font-family:sans-serif">
+          <div style="font-size:15px;font-weight:700;color:#f87171;margin-bottom:10px">⚠️ Something went wrong while rendering this screen</div>
+          <div style="font-size:12px;color:#94a3b8;margin-bottom:16px;word-break:break-word">${(e.message||'Unknown error').replace(/</g,'&lt;')}</div>
+          <button style="padding:12px 20px;border-radius:10px;border:none;background:#16a34a;color:#fff;font-weight:700;font-size:13px" onclick="tab='home';render()">← Go Back Home</button>
+        </div>`;
+    }
+  }
+}
+function _renderInner() {
   const app = document.getElementById('app');
   if (!currentUser) {
     app.innerHTML = renderAuth();
@@ -4669,6 +4696,7 @@ function render() {
       ${!isAdmin() && !isSubAdminXI() && tab==='home' ? renderHome() : ''}
       ${tab==='dream11' ? renderDream11Hub() : ''}
       ${tab==='dream11CricbuzzHub' ? renderD11CricbuzzHub() : ''}
+      ${tab==='dream11EspnCricinfoHub' ? renderD11EspnCricinfoHub() : ''}
       ${tab==='myMatches' ? renderD11MyMatchesPage() : ''}
       ${tab==='dream11Completed' ? renderDream11CompletedMatches() : ''}
       ${tab==='completedMatchDetail' ? renderCompletedMatchDetail() : ''}
@@ -4706,7 +4734,9 @@ function render() {
     ${d11LiveSyncPickerMatchId ? renderD11LiveSyncPickerModal() : ''}
     ${d11EspnLinkPickerMatchId ? renderD11EspnLinkPickerModal() : ''}
     ${d11ImportPanelOpen ? renderD11ImportPanelModal() : ''}
+    ${d11EspnImportPanelOpen ? renderD11EspnImportPanelModal() : ''}
     ${_d11SquadDebugData ? renderD11SquadDebugModal() : ''}
+    ${_d11EspnDebugData ? renderD11EspnDebugModal() : ''}
     ${d11PlayerInfoTarget ? renderD11PlayerInfoModal() : ''}
     ${_d11SyncDebugData ? renderD11SyncDebugModal() : ''}
     ${_d11ScheduleDebugData ? renderD11ScheduleDebugModal() : ''}
@@ -7227,6 +7257,12 @@ function goD11CricbuzzHub() {
   window.scrollTo(0,0);
 }
 
+function goD11EspnCricinfoHub() {
+  tab = 'dream11EspnCricinfoHub';
+  render();
+  window.scrollTo(0,0);
+}
+
 function goD11Tournaments() {
   tab = 'dream11Tournaments';
   d11TournamentDraft = null;
@@ -7255,6 +7291,21 @@ function openD11TournamentDetail(tId) {
 function d11AdminCreateMatch() {
   startNewMatch();
   if (draftMatch) draftMatch.sport = 'cricket';
+  adminTab = 'create';
+  tab = 'dream11';
+  d11AdminCreatePending = true;
+  render();
+  window.scrollTo(0,0);
+}
+
+// Same create-match form as d11AdminCreateMatch, but flags the draft so
+// d11AdminSaveNewMatch opens the ESPN Cricinfo link picker immediately after
+// saving — for admins who want to create-and-link in one motion from the
+// ESPN Cricinfo hub instead of creating a match manually first and coming
+// back to link it separately.
+function d11AdminCreateMatchForEspn() {
+  startNewMatch();
+  if (draftMatch) { draftMatch.sport = 'cricket'; draftMatch._linkToEspnAfterSave = true; }
   adminTab = 'create';
   tab = 'dream11';
   d11AdminCreatePending = true;
@@ -7306,7 +7357,9 @@ async function d11AdminSaveNewMatch() {
   if (deadlineEl?.value) draftMatch.deadline = new Date(deadlineEl.value).getTime();
   // Save match
   const mid = draftMatch.id;
+  const wantsEspnLink = !!draftMatch._linkToEspnAfterSave;
   matches[mid] = { ...draftMatch, status: 'upcoming' };
+  delete matches[mid]._linkToEspnAfterSave; // internal navigation flag only — never persisted
   // Every match gets a permanent, sequential Match ID No (000100, 000101, ...)
   // at creation time — assigned before the first save so it's there from
   // the very first Firestore write, not patched in afterward.
@@ -7320,6 +7373,14 @@ async function d11AdminSaveNewMatch() {
   d11AdminCreatePending = false;
   draftMatch = null;
   d11ActiveMatchId = mid;
+  if (wantsEspnLink) {
+    tab = 'dream11EspnCricinfoHub';
+    render();
+    window.scrollTo(0,0);
+    showNotif(`✅ Match created! Match ID No ${formatMatchSeqNo(matches[mid].matchSeqNo)} — now searching ESPN Cricinfo…`);
+    d11OpenEspnLinkPicker(mid);
+    return;
+  }
   d11AdminTab = 'pool';
   tab = 'dream11Pool';
   render();
@@ -10461,6 +10522,187 @@ async function d11ImportMatch(mt) {
   // below, same as Sync Now / Check Playing XI / Fetch Final Result.
 }
 
+async function d11OpenEspnImportPanel() {
+  d11EspnImportPanelOpen = true;
+  d11EspnImportResults = [];
+  d11EspnImportError = null;
+  render();
+  d11FetchEspnImportList();
+}
+function d11CloseEspnImportPanel() {
+  d11EspnImportPanelOpen = false;
+  d11EspnImportResults = [];
+  d11EspnImportError = null;
+  render();
+}
+async function d11FetchEspnImportList() {
+  d11EspnImportLoading = true;
+  d11EspnImportError = null;
+  render();
+  try {
+    // get_live_scores returns INDIVIDUAL matches (not just series info) —
+    // each with its own objectId, exact startDate/startTime, format, and
+    // team names — confirmed live-tested shape:
+    // { status: "success", data: { matches: [ {...}, ... ] } }
+    // This replaces get_series_fixtures, which only gave series-level data
+    // with no per-match objectId, forcing a separate manual search-and-link
+    // step after creating a placeholder match for each series. Same
+    // endpoint the "\ud83d\udd17 Link ESPN Cricinfo" search picker already uses
+    // successfully (see d11SearchLiveMatchEspn above) — reusing the same
+    // parsing approach here.
+    const raw = await _espnCricinfoFetch('get_live_scores', null, { feature: 'Import List', matchId: null });
+    const data = raw?.data ?? raw;
+    _d11EspnDebugData = { espnFixturesRaw: raw };
+
+    const allMatches = Array.isArray(data?.matches) ? data.matches : [];
+    if (allMatches.length === 0) {
+      throw new Error('ESPN Cricinfo has no matches listed right now — try again later, or create the match manually and link it instead.');
+    }
+
+    // internationalClassId being present is ESPN's own signal for "this is
+    // an international match" (bilateral series, ICC events) — present on
+    // international fixtures, null/absent on plain domestic ones. League/
+    // franchise tournaments (LPL, MLC, BBL, etc.) don't set
+    // internationalClassId either, so also allow anything whose series
+    // isTrophy===true (ESPN's flag for a proper tournament, as opposed to
+    // a bilateral tour) through — covers both categories the admin wants
+    // (International Tours + League/Tournament cricket) while excluding
+    // plain domestic first-class/list-A matches.
+    const nowMs = Date.now();
+    const juniorWomenTags = ['women',' u19','u-19','u16','u-16','under-19','under 19',"women's",'girls'];
+    const seen = new Set();
+    d11EspnImportResults = allMatches.filter(mt => {
+      const title = mt.title || '';
+      const teams = Array.isArray(mt.teams) ? mt.teams : [];
+      if (teams.length < 2) return false; // need both team names to build teamA/teamB
+      const teamAName = teams[0]?.team?.name || teams[0]?.team?.longName || '';
+      const teamBName = teams[1]?.team?.name || teams[1]?.team?.longName || '';
+      if (!teamAName || !teamBName) return false;
+      const label = `${teamAName} vs ${teamBName}`;
+      if (seen.has(label)) return false;
+
+      const isInternational = mt.internationalClassId != null;
+      const isTournament = mt.series?.isTrophy === true;
+      if (!isInternational && !isTournament) return false; // excludes plain domestic first-class/list-A cricket
+
+      const combinedText = `${title} ${teamAName} ${teamBName} ${mt.series?.name||''}`.toLowerCase();
+      if (juniorWomenTags.some(t => combinedText.includes(t))) return false;
+
+      // Only current/upcoming — drop anything that's already finished
+      // (state/stage tell us directly, more reliable than date math here).
+      if (mt.state === 'POST' || mt.stage === 'FINISHED') return false;
+
+      // Belt-and-suspenders date check in case state/stage are missing.
+      const startMs = mt.startDate ? new Date(mt.startDate).getTime() : (mt.startTime ? new Date(mt.startTime).getTime() : 0);
+      if (startMs && startMs < nowMs - 24*3600*1000) return false;
+
+      seen.add(label);
+      return true;
+    }).sort((a,b) => {
+      const aMs = a.startTime ? new Date(a.startTime).getTime() : (a.startDate ? new Date(a.startDate).getTime() : 0);
+      const bMs = b.startTime ? new Date(b.startTime).getTime() : (b.startDate ? new Date(b.startDate).getTime() : 0);
+      return aMs - bMs;
+    });
+
+    if (d11EspnImportResults.length === 0) {
+      throw new Error(`ESPN Cricinfo returned ${allMatches.length} match(es), but none were current international/tournament fixtures (all domestic, finished, or women's/junior, which are filtered). Try \ud83d\udc1b View Raw ESPN Data to check, or create the match manually and link it instead.`);
+    }
+  } catch (e) {
+    console.error(e);
+    d11EspnImportError = 'Could not reach ESPN Cricinfo API — ' + (e.message||'unknown error');
+  } finally {
+    d11EspnImportLoading = false;
+    render();
+  }
+}
+
+// One-tap import: creates the Dream11 match (unpublished), auto-fills team
+// names/deadline/format directly from ESPN's own match data — get_live_scores
+// gives us the real per-match objectId, so this can link immediately (no
+// separate search-and-link step needed, unlike the old series-fixtures-based
+// flow) — then fetches the squad right away. Mirrors d11ImportMatch
+// (Cricbuzz) exactly.
+async function d11ImportMatchFromEspn(mt) {
+  if (!mt || !mt.objectId) return;
+  const teams = Array.isArray(mt.teams) ? mt.teams : [];
+  const teamA = (teams[0]?.team?.name || teams[0]?.team?.longName || 'TBD').trim();
+  const teamB = (teams[1]?.team?.name || teams[1]?.team?.longName || 'TBD').trim();
+  const startMs = mt.startTime ? new Date(mt.startTime).getTime() : (mt.startDate ? new Date(mt.startDate).getTime() : Date.now());
+  const formatMap = { TEST: 'Test', ODI: 'ODI', T20: 'T20', T10: 'T10' };
+  const format = formatMap[mt.format] || 'T20';
+
+  const mid = 'm_' + Date.now() + '_' + Math.random().toString(36).slice(2,8);
+  matches[mid] = {
+    id: mid,
+    sport: 'cricket',
+    format,
+    teamA, teamB,
+    seriesName: mt.series?.name || mt.series?.longName || '',
+    deadline: startMs,
+    status: 'upcoming',
+    questions: [],
+    matchSeqNo: await _nextMatchSeqNo(),
+    espnMatchId: mt.objectId,
+    espnSeriesId: mt.series?.objectId || null
+  };
+  await _saveMatchToFirestore(mid, matches[mid]);
+
+  dream11Matches[mid] = { players: [], scored: false, locked: false, published: false, megaPool: 0, freePool: 0 };
+  await _saveDream11MatchToFirestore(mid, dream11Matches[mid]);
+
+  d11EspnImportPanelOpen = false;
+  d11EspnImportResults = [];
+  showNotif(`✅ Created & linked "${teamA} vs ${teamB}" — fetching squad now...`);
+  d11ActiveMatchId = mid;
+  d11AdminTab = 'pool';
+  tab = 'dream11Pool';
+  render();
+  window.scrollTo(0,0);
+  // Squad fetch right away, same as what a manual "\ud83d\udd17 Link ESPN Cricinfo"
+  // triggers — the match already has espnMatchId set above, so this works
+  // immediately without any extra step.
+  d11FetchSquadFromEspn(mid).catch(e => console.warn('Auto squad fetch after ESPN import failed:', e.message));
+}
+
+function renderD11EspnImportPanelModal() {
+  if (!d11EspnImportPanelOpen) return '';
+  return `<div style="position:fixed;inset:0;z-index:2000;background:rgba(5,10,20,0.82);backdrop-filter:blur(4px);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseEspnImportPanel()">
+    <div class="card" style="width:100%;max-width:600px;max-height:82vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:18px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="font-size:15px;font-weight:700">🏏 Import from ESPN Cricinfo</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseEspnImportPanel()">✕</button>
+      </div>
+      <div style="font-size:11.5px;color:var(--dim);margin-bottom:14px">Current & upcoming fixtures from ESPN Cricinfo — tap one to create + auto-link a Dream11 match in one step. <span style="color:#f87171">Uses 1 credit</span> (free tier: 100/month).</div>
+      ${_d11EspnDebugData ? `<button class="btn-secondary btn-block" style="font-size:11px;padding:7px;margin-bottom:10px;background:rgba(239,68,68,0.1);border-color:rgba(239,68,68,0.3);color:#fca5a5" onclick="d11OpenEspnDebugModal()">🐛 View Raw ESPN Data</button>` : ''}
+      ${d11EspnImportLoading ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">🔄 Loading fixtures…</div>` : ''}
+      ${d11EspnImportError ? `<div style="background:rgba(220,38,38,0.1);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:10px;font-size:12px;color:#f87171;margin-bottom:10px">${d11EspnImportError}</div>` : ''}
+      ${!d11EspnImportLoading ? d11EspnImportResults.map(mt => {
+        const teams = Array.isArray(mt.teams) ? mt.teams : [];
+        const teamAName = teams[0]?.team?.name || teams[0]?.team?.longName || 'TBD';
+        const teamBName = teams[1]?.team?.name || teams[1]?.team?.longName || 'TBD';
+        const title = `${teamAName} vs ${teamBName}`;
+        const sub = [mt.title, mt.series?.name].filter(Boolean).join(' · ');
+        const startMs = mt.startTime ? new Date(mt.startTime).getTime() : (mt.startDate ? new Date(mt.startDate).getTime() : 0);
+        const dateStr = startMs ? pkDateTime(startMs) : '';
+        const fmtBadge = mt.format ? `<span style="font-size:9.5px;font-weight:700;color:#c084fc;background:#c084fc1a;border-radius:5px;padding:2px 6px;white-space:nowrap;margin-left:6px">${mt.format}</span>` : '';
+        return `
+        <div style="background:var(--input-bg);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+          <div style="font-size:12.5px;font-weight:600;line-height:1.4;margin-bottom:2px">${title}${fmtBadge}</div>
+          <div style="font-size:10.5px;color:var(--dim);margin-bottom:2px">${sub}</div>
+          ${dateStr ? `<div style="font-size:10px;color:var(--dim2);margin-bottom:8px">⏰ ${dateStr}</div>` : `<div style="margin-bottom:8px"></div>`}
+          <button class="btn-secondary btn-block" style="font-size:11px;padding:8px;background:linear-gradient(135deg,#dc2626,#991b1b);color:#fff;border:none" onclick='d11ImportMatchFromEspn(${JSON.stringify(mt).replace(/'/g,"&apos;")})'>➕ Create & Link This Match</button>
+        </div>
+      `;
+      }).join('') : ''}
+      ${!d11EspnImportLoading && !d11EspnImportResults.length && !d11EspnImportError ? `<div style="text-align:center;padding:14px 4px 4px">
+        <div style="color:var(--dim);font-size:13px;margin-bottom:12px">No upcoming fixtures found</div>
+        <button class="btn-secondary btn-block" style="font-size:12px;padding:9px;background:linear-gradient(135deg,#dc2626,#991b1b);color:#fff;border:none" onclick="d11CloseEspnImportPanel();d11AdminCreateMatchForEspn()">➕ Create Match Manually Instead</button>
+      </div>` : ''}
+      <button class="btn-secondary btn-block" style="margin-top:10px;font-size:12px" onclick="d11FetchEspnImportList()">🔄 Refresh (uses 1 more credit)</button>
+    </div>
+  </div>`;
+}
+
 function renderD11ImportPanelModal() {
   if (!d11ImportPanelOpen) return '';
   const fmtBadge = (fmt) => {
@@ -10810,6 +11052,65 @@ async function d11FetchSquadFromCricbuzz(matchId) {
 // Fetch Squad attempt, so the admin can screenshot/copy it without needing
 // browser DevTools. Remove once squad-shape issue is confirmed/fixed.
 function d11OpenSquadDebugModal() { render(); }
+function d11OpenEspnDebugModal() { render(); }
+// One-click copy for the debug-modal textareas — takes the textarea's own
+// id so each modal's button copies its own content. Tries the modern
+// Clipboard API first (works in the vast majority of cases here since
+// these are same-origin HTTPS PWA views), and falls back to the older
+// select+execCommand approach if that's unavailable or denied, rather than
+// leaving the person to long-press and select all manually every time.
+async function d11CopyDebugText(textareaId, btnEl) {
+  const el = document.getElementById(textareaId);
+  if (!el) return;
+  const text = el.value;
+  let ok = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  } catch (e) { /* fall through to the legacy path below */ }
+  if (!ok) {
+    try {
+      el.removeAttribute('readonly');
+      el.focus();
+      el.select();
+      ok = document.execCommand('copy');
+      el.setAttribute('readonly', 'readonly');
+      window.getSelection()?.removeAllRanges();
+    } catch (e) { ok = false; }
+  }
+  if (btnEl) {
+    const original = btnEl.textContent;
+    btnEl.textContent = ok ? '✅ Copied!' : '⚠️ Copy failed — long-press to select instead';
+    setTimeout(() => { if (btnEl) btnEl.textContent = original; }, 1800);
+  }
+  if (!ok) showNotif('Could not auto-copy — long-press the text box and select all instead', 'error');
+}
+
+function d11CloseEspnDebugModal() { _d11EspnDebugData = null; render(); }
+function renderD11EspnDebugModal() {
+  if (!_d11EspnDebugData) return '';
+  let pretty;
+  try {
+    pretty = JSON.stringify(_d11EspnDebugData, null, 2).replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  } catch (e) {
+    pretty = 'Could not stringify this response: ' + e.message;
+  }
+  return `<div style="position:fixed;inset:0;z-index:2100;background:rgba(5,10,20,0.9);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseEspnDebugModal()">
+    <div class="card" style="width:100%;max-width:700px;max-height:88vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:16px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-size:14px;font-weight:700">🐛 Raw ESPN Cricinfo Response (debug)</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseEspnDebugModal()">✕</button>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px">
+        <div style="font-size:11px;color:var(--dim);flex:1">Long-press the text below to select all, then copy and share it so the field names can be fixed.</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px;font-size:11px;white-space:nowrap" onclick="d11CopyDebugText('d11-espn-debug-text', this)">📋 Copy</button>
+      </div>
+      <textarea id="d11-espn-debug-text" readonly style="width:100%;height:400px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px" onclick="this.select()">${pretty}</textarea>
+    </div>
+  </div>`;
+}
 function d11CloseSquadDebugModal() { _d11SquadDebugData = null; render(); }
 
 // ── Fetch Squad from ESPN Cricinfo (get_match_details) ───────────────────
@@ -10829,32 +11130,55 @@ async function d11FetchSquadFromEspn(matchId) {
   showNotif('📥 Fetching squad from ESPN Cricinfo…');
   try {
     const data = await _espnCricinfoFetch('get_match_details', { match_id: m.espnMatchId, series_id: m.espnSeriesId || '' }, { feature: 'Fetch Squad', matchId });
-    _d11SquadDebugData = { espnRaw: data, espnMatchId: m.espnMatchId };
+    _d11EspnDebugData = { espnRaw: data, espnMatchId: m.espnMatchId };
 
-    // matchPlayers can plausibly be: a flat array of {name, team, role,...},
-    // an object keyed by team name/id each holding an array, or an array of
-    // {team, players:[...]} groups. Try each in turn.
-    const mp = data?.matchPlayers ?? data?.match?.matchPlayers ?? [];
-    let flatPlayers = [];
-    if (Array.isArray(mp)) {
-      if (mp.length && Array.isArray(mp[0]?.players)) {
-        // [{team:{...}, players:[...]}, ...]
-        mp.forEach(group => {
-          const teamNameL = (group.team?.name || group.teamName || '').toLowerCase();
-          (group.players || []).forEach(p => flatPlayers.push({ ...p, _teamNameL: teamNameL }));
-        });
-      } else {
-        // flat array — each player carries its own team reference
-        mp.forEach(p => flatPlayers.push({ ...p, _teamNameL: (p.team?.name || p.teamName || '').toLowerCase() }));
+    // Confirmed live-tested shape (via Parse.bot's own docs playground):
+    // - data.teams[] = [{ team: {id, objectId, name, abbreviation, ...},
+    //     sidePlayers: 11, sideBatsmen: 11, sideFielders: 11,
+    //     captain: {id, objectId, name, ...} }, ...]
+    //   (sidePlayers/sideBatsmen/sideFielders are just COUNTS, not arrays)
+    // - Individual squad entries look like:
+    //     { playerRoleType: "P", player: { id, objectId, name, longName,
+    //       countryTeamId, playingRoles: [...], ... } }
+    //   countryTeamId is how a player links to a side — match it against
+    //   teams[].team.id (NOT team.objectId — confirmed countryTeamId values
+    //   correspond to the short numeric team.id, e.g. countryTeamId:1 for
+    //   England whose team.id is also a small integer, not the larger
+    //   team.objectId).
+    // The exact key that HOLDS the array of {playerRoleType, player} squad
+    // entries wasn't confirmed (docs screenshots showed the entry shape,
+    // scrolled past the parent key) — so scan the whole response
+    // recursively for any array of objects matching that shape, rather than
+    // hardcoding one specific path that might be wrong for some matches.
+    const teamsArr = Array.isArray(data?.teams) ? data.teams : [];
+    const teamIdToSide = {}; // team.id -> 'A' | 'B'
+    teamsArr.forEach((t, i) => {
+      const tid = t?.team?.id;
+      if (tid == null) return;
+      // Match by name first (most reliable), fall back to array position.
+      const tname = (t.team?.name || t.team?.longName || '').toLowerCase();
+      if (_d11TeamNameMatches(tname, m.teamA)) teamIdToSide[tid] = 'A';
+      else if (_d11TeamNameMatches(tname, m.teamB)) teamIdToSide[tid] = 'B';
+      else teamIdToSide[tid] = i === 0 ? 'A' : 'B';
+    });
+
+    const squadEntries = [];
+    const seenObjects = new Set();
+    (function scan(node) {
+      if (!node || typeof node !== 'object' || seenObjects.has(node)) return;
+      if (typeof node === 'object') seenObjects.add(node);
+      if (Array.isArray(node)) {
+        node.forEach(scan);
+        return;
       }
-    } else if (mp && typeof mp === 'object') {
-      // { "TeamName": [...], ... }
-      Object.entries(mp).forEach(([teamKey, arr]) => {
-        if (Array.isArray(arr)) arr.forEach(p => flatPlayers.push({ ...p, _teamNameL: teamKey.toLowerCase() }));
-      });
-    }
+      if (node.player && typeof node.player === 'object' && node.player.name) {
+        squadEntries.push(node);
+        return; // don't descend further into a matched entry
+      }
+      Object.values(node).forEach(scan);
+    })(data);
 
-    if (flatPlayers.length === 0) {
+    if (squadEntries.length === 0) {
       showNotif('📭 ESPN Cricinfo hasn\'t published this squad yet (or the response shape was unexpected — check 🐛 View Raw Squad Data). Try again closer to match time, or add players manually for now.', 'error');
       render();
       return;
@@ -10862,15 +11186,16 @@ async function d11FetchSquadFromEspn(matchId) {
 
     const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
     let addedCount = 0;
-    flatPlayers.forEach(p => {
-      const name = (p.name || p.fullName || p.player?.name || '').trim();
+    squadEntries.forEach(entry => {
+      const p = entry.player;
+      const name = (p.longName || p.name || '').trim();
       if (!name || existingNamesLower.has(name.toLowerCase())) return;
-      const roleTextL = (p.role || p.playingRole || '').toLowerCase();
-      if (roleTextL.includes('coach') || roleTextL.includes('physio') || roleTextL.includes('manager') || roleTextL.includes('trainer') || roleTextL.includes('support staff')) return;
-      const side = _d11TeamNameMatches(p._teamNameL || '', m.teamA) ? 'A'
-                 : _d11TeamNameMatches(p._teamNameL || '', m.teamB) ? 'B'
-                 : (flatPlayers.indexOf(p) < flatPlayers.length / 2 ? 'A' : 'B'); // last-resort guess if team name didn't match either side
-      const role = _d11MapCricbuzzRole(p.role || p.playingRole, p.isKeeper || p.keeper);
+      const side = teamIdToSide[p.countryTeamId] || (squadEntries.indexOf(entry) < squadEntries.length / 2 ? 'A' : 'B');
+      // playingRoles is an array like ["batsman"], ["bowler"], ["allrounder"],
+      // ["wicketkeeper"] — take the first entry as the role text.
+      const roleText = Array.isArray(p.playingRoles) ? (p.playingRoles[0] || '') : (p.playingRoles || '');
+      const isKeeper = /keeper/i.test(roleText) || (Array.isArray(p.playingRoles) && p.playingRoles.some(r => /keeper/i.test(r)));
+      const role = _d11MapCricbuzzRole(roleText, isKeeper);
       const player = newDream11Player(name, role, side);
       d11m.players.push(player);
       d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
@@ -10977,10 +11302,16 @@ function renderD11SquadDebugModal() {
         <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseSquadDebugModal()">✕</button>
       </div>
       <div style="font-size:11px;color:var(--dim);margin-bottom:10px">Long-press the text below to select all, then copy and share it. Team1 ID: ${_d11SquadDebugData.team1Id} · Team2 ID: ${_d11SquadDebugData.team2Id}</div>
-      <div style="font-size:11px;font-weight:700;color:#60a5fa;margin-bottom:4px">TEAM 1:</div>
-      <textarea readonly style="width:100%;height:180px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px;margin-bottom:12px" onclick="this.select()">${pretty(_d11SquadDebugData.team1)}</textarea>
-      <div style="font-size:11px;font-weight:700;color:#60a5fa;margin-bottom:4px">TEAM 2:</div>
-      <textarea readonly style="width:100%;height:180px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px" onclick="this.select()">${pretty(_d11SquadDebugData.team2)}</textarea>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <div style="font-size:11px;font-weight:700;color:#60a5fa">TEAM 1:</div>
+        <button class="btn-secondary" style="width:auto;padding:5px 10px;font-size:10.5px" onclick="d11CopyDebugText('d11-squad-debug-team1', this)">📋 Copy</button>
+      </div>
+      <textarea id="d11-squad-debug-team1" readonly style="width:100%;height:180px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px;margin-bottom:12px" onclick="this.select()">${pretty(_d11SquadDebugData.team1)}</textarea>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <div style="font-size:11px;font-weight:700;color:#60a5fa">TEAM 2:</div>
+        <button class="btn-secondary" style="width:auto;padding:5px 10px;font-size:10.5px" onclick="d11CopyDebugText('d11-squad-debug-team2', this)">📋 Copy</button>
+      </div>
+      <textarea id="d11-squad-debug-team2" readonly style="width:100%;height:180px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px" onclick="this.select()">${pretty(_d11SquadDebugData.team2)}</textarea>
     </div>
   </div>`;
 }
@@ -10999,8 +11330,11 @@ function renderD11SyncDebugModal() {
         <div style="font-size:14px;font-weight:700">🐛 Raw Cricbuzz Sync Response (debug)</div>
         <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseSyncDebugModal()">✕</button>
       </div>
-      <div style="font-size:11px;color:var(--dim);margin-bottom:10px">Long-press the text below to select all, then copy and share it so the field names can be fixed. Fetched: ${new Date(_d11SyncDebugData.fetchedAt).toLocaleTimeString()}</div>
-      <textarea readonly style="width:100%;height:400px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px" onclick="this.select()">${pretty(_d11SyncDebugData.raw)}</textarea>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px">
+        <div style="font-size:11px;color:var(--dim);flex:1">Long-press the text below to select all, then copy and share it so the field names can be fixed. Fetched: ${new Date(_d11SyncDebugData.fetchedAt).toLocaleTimeString()}</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px;font-size:11px;white-space:nowrap" onclick="d11CopyDebugText('d11-sync-debug-text', this)">📋 Copy</button>
+      </div>
+      <textarea id="d11-sync-debug-text" readonly style="width:100%;height:400px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px" onclick="this.select()">${pretty(_d11SyncDebugData.raw)}</textarea>
     </div>
   </div>`;
 }
@@ -11016,8 +11350,11 @@ function renderD11ScheduleDebugModal() {
         <div style="font-size:14px;font-weight:700">🐛 Raw Cricbuzz Schedule Response (debug)</div>
         <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseScheduleDebugModal()">✕</button>
       </div>
-      <div style="font-size:11px;color:var(--dim);margin-bottom:10px">Look for team1/team2's ID field here (teamId vs id vs something else) — this is why squad auto-fetch isn't finding a team ID after import. Fetched: ${new Date(_d11ScheduleDebugData.fetchedAt).toLocaleTimeString()}</div>
-      <textarea readonly style="width:100%;height:400px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px" onclick="this.select()">${pretty(_d11ScheduleDebugData.raw)}</textarea>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px">
+        <div style="font-size:11px;color:var(--dim);flex:1">Look for team1/team2's ID field here (teamId vs id vs something else) — this is why squad auto-fetch isn't finding a team ID after import. Fetched: ${new Date(_d11ScheduleDebugData.fetchedAt).toLocaleTimeString()}</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px;font-size:11px;white-space:nowrap" onclick="d11CopyDebugText('d11-schedule-debug-text', this)">📋 Copy</button>
+      </div>
+      <textarea id="d11-schedule-debug-text" readonly style="width:100%;height:400px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px" onclick="this.select()">${pretty(_d11ScheduleDebugData.raw)}</textarea>
     </div>
   </div>`;
 }
@@ -11559,8 +11896,23 @@ async function d11SyncLiveMatch(matchId, showToast) {
     // ── Match finished: apply final result ──
     // "ismatchcomplete" is the reliable top-level flag on the hscard
     // endpoint; fall back to status-text sniffing for other shapes.
+    // Status-text sniffing alone was seen finishing matches on its own
+    // (with no admin action) whenever Cricbuzz returned a stale/glitchy
+    // status string mid-match — so a text-only signal must show up on TWO
+    // separate syncs in a row before it's trusted. A true "ismatchcomplete"
+    // flag from the API still finishes immediately, since that field is
+    // explicit and not being sniffed from free text.
     const statusL = statusText.toLowerCase();
-    const isFinished = isComplete === true || statusL.includes('won by') || statusL.includes('drawn') || statusL.includes('tied') || statusL.includes('no result');
+    const looksFinished = statusL.includes('won by') || statusL.includes('drawn') || statusL.includes('tied') || statusL.includes('no result');
+    let isFinished = false;
+    if (isComplete === true) {
+      isFinished = true;
+    } else if (looksFinished) {
+      if (_d11PendingFinish[matchId]) { isFinished = true; delete _d11PendingFinish[matchId]; }
+      else { _d11PendingFinish[matchId] = true; }
+    } else {
+      delete _d11PendingFinish[matchId]; // status no longer looks finished — clear any pending flag
+    }
     if (isFinished) {
       m.resultText = statusText || m.resultText;
       m.status = 'completed';
@@ -11688,7 +12040,17 @@ async function d11SyncLiveMatchEspn(matchId, showToast) {
     await d11RefreshLiveTeamPoints(matchId);
 
     const statusL = statusText.toLowerCase();
-    const isFinished = isComplete === true || statusL.includes('won by') || statusL.includes('drawn') || statusL.includes('tied') || statusL.includes('no result');
+    const looksFinished = statusL.includes('won by') || statusL.includes('drawn') || statusL.includes('tied') || statusL.includes('no result');
+    let isFinished = false;
+    if (isComplete === true) {
+      isFinished = true;
+    } else if (looksFinished) {
+      const pendingKey = matchId + '_espn';
+      if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; }
+      else { _d11PendingFinish[pendingKey] = true; }
+    } else {
+      delete _d11PendingFinish[matchId + '_espn'];
+    }
     if (isFinished) {
       m.resultText = statusText || m.resultText;
       m.status = 'completed';
@@ -11759,10 +12121,22 @@ async function d11CheckPlayingXIAnnouncedEspn(matchId, silent) {
 function _d11FindPlayerByName(d11m, name) {
   if (!name) return null;
   const nameL = name.toLowerCase().trim();
-  return (d11m.players || []).find(p => {
-    const pL = p.name.toLowerCase();
-    return pL === nameL || pL.includes(nameL) || nameL.includes(pL);
-  }) || null;
+  const players = d11m.players || [];
+  // 1) Exact match first — always preferred, avoids any ambiguity.
+  let exact = players.find(p => p.name.toLowerCase().trim() === nameL);
+  if (exact) return exact;
+  // 2) Fallback to partial/contains match, but ONLY if exactly one player
+  // qualifies. The old version returned the FIRST partial match even when
+  // multiple players could match (e.g. "Khan" matching both "Imran Khan"
+  // and "Zaman Khan"), which silently applied one player's live stats to
+  // the wrong player — this was the root cause of players who never played
+  // getting points, and confirmed Playing XI players getting overwritten
+  // with someone else's numbers ("double points").
+  const partial = players.filter(p => {
+    const pL = p.name.toLowerCase().trim();
+    return pL.includes(nameL) || nameL.includes(pL);
+  });
+  return partial.length === 1 ? partial[0] : null;
 }
 
 // Pulls fielding credit (catch/stumping/run-out) out of a live-sync batsman
@@ -16260,7 +16634,7 @@ function _d11RenderEspnSyncRow(m) {
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromEspn('${m.id}')">📥 Fetch Squad</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11CheckPlayingXIAnnouncedEspn('${m.id}')">🏏 Check Playing XI</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11ActiveMatchId='${m.id}';d11AdminTab='pool';tab='dream11Pool';d11StartPasteSquad();window.scrollTo(0,0)">✍️ Paste Playing XI</button>
-    ${_d11SquadDebugData ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11OpenSquadDebugModal()">🐛 View Raw Squad Data</button>` : ''}
+    ${_d11EspnDebugData ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11OpenEspnDebugModal()">🐛 View Raw ESPN Data</button>` : ''}
     ${_d11SyncDebugData && _d11SyncDebugData.matchId === m.id ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.3);color:#fca5a5" onclick="d11OpenSyncDebugModal()">🐛 View Raw Sync Data</button>` : ''}
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(220,38,38,0.12);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11UnlinkEspnMatch('${m.id}')">✕ Unlink</button>
   </div>`;
@@ -16384,6 +16758,85 @@ function renderD11CricbuzzHub() {
   `;
 }
 
+function renderD11EspnCricinfoHub() {
+  const linked = Object.values(matches).filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && m.espnMatchId);
+  const unlinkedEligible = Object.values(matches)
+    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.espnMatchId && !m.cricketDataMatchId && !dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
+
+  function renderCard(m) {
+    const d11m = dream11Matches[m.id];
+    const playerCount = d11m ? d11m.players.length : 0;
+    const teamCount = Object.values(dream11Teams).filter(t => t.matchId === m.id).length;
+    const xiCount = d11m ? d11m.players.filter(p => p.isPlayingXI).length : 0;
+    const dLocked = isD11Locked(m.id);
+    const deadlineStr = m.deadline ? pkDateTime(m.deadline) : 'Not set';
+    return `
+    <div class="card mb14">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div class="match-teams" style="gap:8px">
+          <span class="team-name" style="font-size:14px">${m.teamA||'TBD'}</span>
+          <span class="vs-badge" style="font-size:10px;padding:2px 8px">VS</span>
+          <span class="team-name" style="font-size:14px">${m.teamB||'TBD'}</span>
+        </div>
+        ${d11m?.scored ? `<span class="match-status status-completed">SCORED</span>` : dLocked ? `<span class="match-status status-live">LOCKED</span>` : `<span class="match-status status-upcoming">OPEN</span>`}
+      </div>
+      <div style="margin-bottom:8px">
+        ${d11m?.published ? `<span class="match-status" style="background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.35)">🟢 PUBLISHED — visible to users</span>` : `<span class="match-status" style="background:rgba(234,179,8,0.15);color:#facc15;border:1px solid rgba(234,179,8,0.35)">🔒 NOT PUBLISHED — hidden from users</span>`}
+      </div>
+      <div style="font-size:11.5px;color:var(--dim);margin-bottom:6px">👥 ${playerCount} players · 🏏 ${xiCount} XI confirmed · 📋 ${teamCount} teams</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:var(--input-bg);border-radius:8px;padding:8px 10px">
+        <span style="font-size:11px;color:var(--orange);flex:1">⏰ Deadline: ${deadlineStr}${dLocked && !d11m?.locked ? ' (auto-locked)' : ''}</span>
+        <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11EditDeadline('${m.id}')">✏️ Change</button>
+      </div>
+      ${_d11RenderEspnSyncRow(m)}
+      <button class="btn-primary btn-block" style="font-size:12px;padding:10px;margin-bottom:8px;background:${d11m?.published ? 'linear-gradient(135deg,#dc2626,#b91c1c)' : 'linear-gradient(135deg,#16a34a,#15803d)'}" onclick="d11TogglePublish('${m.id}')">${d11m?.published ? '🚫 Unpublish (hide from users)' : '🚀 Publish (show to users)'}</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn-secondary" style="flex:1;font-size:12px;padding:10px" onclick="openDream11Match('${m.id}')">⚙️ Manage Pool</button>
+        ${teamCount > 0 ? `<button class="btn-secondary" style="flex:1;font-size:12px;padding:10px" onclick="openDream11Leaderboard('${m.id}')">🏅 Leaderboard</button>` : ''}
+        <button class="btn-secondary" style="font-size:12px;padding:10px;background:rgba(220,38,38,0.12);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11DeleteMatch('${m.id}')">🗑️</button>
+      </div>
+    </div>`;
+  }
+
+  const notScored = linked.filter(m => !dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
+  const scoredList = linked.filter(m => dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(b.deadline||0) - new Date(a.deadline||0));
+
+  return `
+  ${renderD11Hero('Live sync via ESPN Cricinfo — free tier: 100 credits/month')}
+  <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="tab='dream11';render();window.scrollTo(0,0)">← Back to Dream11</button>
+  <div class="section-title">🏏 ESPN Cricinfo Matches</div>
+  <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#dc2626,#991b1b)" onclick="d11OpenEspnImportPanel()">🏏 Import from ESPN Cricinfo (Upcoming)</button>
+  <button class="btn-secondary btn-block mb14" style="background:rgba(220,38,38,0.1);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11AdminCreateMatchForEspn()">➕ Create New Match & Link Manually</button>
+  <div class="empty-state" style="padding:6px 2px;font-size:11.5px;text-align:left;line-height:1.6;margin-bottom:14px">
+    Or link a match you already created (manually or via Cricbuzz, if not covered there) using the list below.
+  </div>
+  ${unlinkedEligible.length > 0 ? `
+    <div class="section-title" style="font-size:13px">Link a match</div>
+    ${unlinkedEligible.slice(0, 10).map(m => `
+      <div class="card mb10" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <div>
+          <div style="font-weight:700;font-size:13px">${m.teamA||'TBD'} vs ${m.teamB||'TBD'}</div>
+          <div style="font-size:10.5px;color:var(--dim)">${m.deadline ? pkDateTime(m.deadline) : 'No deadline set'}</div>
+        </div>
+        <button class="btn-secondary" style="font-size:11px;padding:7px 12px;white-space:nowrap;background:linear-gradient(135deg,#dc2626,#991b1b);color:#fff;border:none" onclick="d11OpenEspnLinkPicker('${m.id}')">🔗 Link</button>
+      </div>
+    `).join('')}
+  ` : ''}
+  <div class="section-title" style="font-size:13px;margin-top:${unlinkedEligible.length > 0 ? '18px' : '0'}">Linked matches</div>
+  ${notScored.length === 0 ? `<div class="empty-state"><div class="empty-icon">🏏</div>No ESPN Cricinfo-linked matches yet.<br/>Pick a match above to link one.</div>` : notScored.map(renderCard).join('')}
+  ${scoredList.length > 0 ? `
+    <button class="btn-secondary btn-block mb14" style="font-size:12px;padding:10px" onclick="d11AdminShowCompleted=!d11AdminShowCompleted;render()">
+      ${d11AdminShowCompleted ? '▲' : '▼'} ✅ Completed / Scored Matches (${scoredList.length})
+    </button>
+    ${d11AdminShowCompleted ? scoredList.map(renderCard).join('') : ''}
+  ` : ''}
+  `;
+}
+
+
 function renderDream11Hub() {
   try {
   const eligible = Object.values(matches).filter(m => m.sport === 'cricket' || dream11Matches[m.id]);
@@ -16437,6 +16890,7 @@ function renderDream11Hub() {
     <div class="section-title">🎮 Dream11 — Manage Contests</div>
     <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#7c3aed,#4f46e5)" onclick="d11AdminCreateMatch()">➕ Create New Dream11 Match (Manual)</button>
     <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#2563eb,#1d4ed8)" onclick="goD11CricbuzzHub()">📡 Cricbuzz Matches (Auto-Import)</button>
+    <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#dc2626,#991b1b)" onclick="goD11EspnCricinfoHub()">🏏 ESPN Cricinfo Matches</button>
     <button class="btn-secondary btn-block mb14" style="background:rgba(168,85,247,0.1);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="goD11Tournaments()">🏆 Tournaments (multi-match contests)</button>
     <button class="btn-secondary btn-block mb14" style="background:rgba(249,115,22,0.1);border-color:rgba(249,115,22,0.3);color:#fb923c" onclick="goUtHub()">👑 User Tournaments (owner-run contests)</button>
     ${(() => {
@@ -18531,29 +18985,6 @@ function renderDream11ViewTeam() {
 // (users, wallet, balances, deletions, etc).
 // ═══════════════════════════════════════════════════════════
 function renderSubAdminXIPanel() {
-  // Mid-flow: paste box or scan-review is open — just show that, full width,
-  // exactly like the owner's scoring screen does, with its own back button.
-  if (d11PasteText !== null) {
-    return `
-    <div class="section-title">🛡️ 2nd Admin Panel</div>
-    <button class="btn-secondary" style="font-size:12px;padding:8px 14px;margin-bottom:14px" onclick="d11CancelPasteSquad();subAdminXIMatchPicker=null;render()">← Back</button>
-    ${renderD11SubAdminPasteXIBox()}
-    `;
-  }
-  if (d11ScanReview) {
-    return `
-    <div class="section-title">🛡️ 2nd Admin Panel</div>
-    <button class="btn-secondary" style="font-size:12px;padding:8px 14px;margin-bottom:14px" onclick="d11ReviewCancel();subAdminXIMatchPicker=null;render()">← Back</button>
-    ${renderD11ScanReview()}
-    `;
-  }
-  if (d11ColPasteOpen) {
-    return `
-    <div class="section-title">🛡️ 2nd Admin Panel</div>
-    <button class="btn-secondary" style="font-size:12px;padding:8px 14px;margin-bottom:14px" onclick="d11CloseColPaste();subAdminXIMatchPicker=null;render()">← Back</button>
-    ${renderD11SubAdminColPasteBox()}
-    `;
-  }
   // Picking which match to act on
   if (subAdminXIMatchPicker) {
     const list = Object.values(matches)
@@ -18562,19 +18993,22 @@ function renderSubAdminXIPanel() {
     return `
     <div class="section-title">🛡️ 2nd Admin Panel</div>
     <button class="btn-secondary" style="font-size:12px;padding:8px 14px;margin-bottom:14px" onclick="subAdminXIMatchPicker=null;render()">← Back</button>
-    <div class="section-title" style="font-size:14px">${subAdminXIMatchPicker==='xi' ? '✍️ Select Match — Paste Playing XI' : '📋 Select Match — Full Match Summary Paste'}</div>
+    <div class="section-title" style="font-size:14px">${subAdminXIMatchPicker==='xi' ? '🏏 Select Match — Check Playing XI' : '🔄 Select Match — Sync Now'}</div>
     ${list.length===0 ? `<div class="empty-state">No upcoming or live matches right now.</div>` : list.map(m => {
       const d11m = dream11Matches[m.id];
       const xiCount = (d11m.players||[]).filter(p=>p.isPlayingXI).length;
       const isLive = m.deadline && new Date(m.deadline).getTime() <= Date.now();
+      const linked = !!(m.cricketDataMatchId || m.espnMatchId);
+      const action = subAdminXIMatchPicker==='xi'
+        ? (m.cricketDataMatchId ? `d11CheckPlayingXIAnnounced('${m.id}')` : m.espnMatchId ? `d11CheckPlayingXIAnnouncedEspn('${m.id}')` : '')
+        : (m.cricketDataMatchId ? `d11SyncLiveMatch('${m.id}', true)` : m.espnMatchId ? `d11SyncLiveMatchEspn('${m.id}', true)` : '');
       return `
-      <div class="card mb10" style="cursor:pointer" onclick="${subAdminXIMatchPicker==='xi'
-        ? `d11ActiveMatchId='${m.id}';d11StartPasteSquad();`
-        : `d11ActiveMatchId='${m.id}';d11OpenColPaste();`}">
+      <div class="card mb10" style="${linked ? 'cursor:pointer' : 'opacity:0.55'}" ${linked ? `onclick="${action}"` : ''}>
         <div style="display:flex;justify-content:space-between;align-items:center">
           <div>
             <div style="font-weight:700;font-size:13.5px">${m.teamA||'?'} vs ${m.teamB||'?'} ${isLive ? '<span style="color:#ef4444;font-size:10px;font-weight:800">🔴 LIVE</span>' : ''}</div>
             <div style="font-size:10.5px;color:var(--dim);margin-top:2px">${m.deadline ? new Date(m.deadline).toLocaleString('en-PK',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : ''}${m.matchSeqNo ? ` · MATCH ID NO: ${formatMatchSeqNo(m.matchSeqNo)}` : ''}</div>
+            ${!linked ? `<div style="font-size:10.5px;color:#f87171;margin-top:2px">⚠️ Not linked to Cricbuzz/ESPN yet — ask Main Admin to link this match first</div>` : ''}
           </div>
           <div style="text-align:right;font-size:10.5px;color:var(--dim)">
             ${xiCount>0 ? `<span style="color:#4ade80;font-weight:700">🏏 ${xiCount} XI confirmed</span>` : `<span style="color:var(--gold)">Pending</span>`}
@@ -18588,10 +19022,10 @@ function renderSubAdminXIPanel() {
   return `
   <div class="section-title">🛡️ 2nd Admin Panel</div>
   <div class="empty-state" style="padding:6px 2px;font-size:11.5px;text-align:left;line-height:1.6;margin-bottom:14px">
-    You have access to Playing XI confirmation and match scoring only.
+    You have access to Playing XI check and live score sync only.
   </div>
-  <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#22c55e,#16a34a);padding:16px" onclick="subAdminXIMatchPicker='xi';render()">✍️ Paste Playing XI</button>
-  <button class="btn-primary btn-block" style="background:linear-gradient(135deg,#ec4899,#db2777);padding:16px" onclick="subAdminXIMatchPicker='scoring';render()">📋 Another Scoring Method — Full Match Summary Paste</button>
+  <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#eab308,#ca8a04)" onclick="subAdminXIMatchPicker='xi';render()">🏏 Check Playing XI</button>
+  <button class="btn-primary btn-block" style="background:linear-gradient(135deg,#2563eb,#1d4ed8)" onclick="subAdminXIMatchPicker='sync';render()">🔄 Sync Now</button>
   `;
 }
 
@@ -19081,6 +19515,9 @@ function renderAdminD11MatchesList() {
   </div>
   <div style="margin-bottom:14px">
     <button class="btn-secondary btn-block" style="background:rgba(37,99,235,0.1);border-color:rgba(37,99,235,0.3);color:#60a5fa" onclick="goD11CricbuzzHub()">📡 Cricbuzz Matches (Auto-Import)</button>
+  </div>
+  <div style="margin-bottom:14px">
+    <button class="btn-secondary btn-block" style="background:rgba(220,38,38,0.1);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="goD11EspnCricinfoHub()">🏏 ESPN Cricinfo Matches</button>
   </div>
   ${unNumberedCount > 0 ? `
   <div style="margin-bottom:14px">
@@ -24360,7 +24797,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.1.1";
+const APP_VERSION = "4.3.4";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
