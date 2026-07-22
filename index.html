@@ -15790,11 +15790,14 @@ function d11SetViceCaptain(playerId) {
   render();
 }
 function d11OpenTeamPreview() {
-  const d11m = dream11Matches[d11TeamDraft.matchId];
-  const errors = dream11ValidateTeam(d11TeamDraft.picks, d11m).concat(dream11ValidateBackups(d11TeamDraft.backups));
-  if (!d11TeamDraft.captain) errors.push('Please select a Captain');
-  if (!d11TeamDraft.viceCaptain) errors.push('Please select a Vice-Captain');
-  if (errors.length) { showNotif(errors[0], 'error'); return; }
+  // Preview is allowed at any point — even with just 1 player picked and
+  // no captain/VC set yet — so the user can check their progress anytime.
+  // Full-team validation (11 picks, captain, VC) still happens in
+  // d11SubmitTeam itself before anything is actually saved.
+  if (!d11TeamDraft.picks || d11TeamDraft.picks.length === 0) {
+    showNotif('Select at least one player to preview', 'error');
+    return;
+  }
   if (isD11Locked(d11TeamDraft.matchId)) { showNotif('This contest is now locked — deadline has passed', 'error'); return; }
   d11TeamPreviewOpen = true;
   render();
@@ -15837,6 +15840,7 @@ function renderD11TeamPreviewModal() {
   };
 
   const backupNames = (d11TeamDraft.backups||[]).map(bid => d11m.players.find(x => x.id === bid)).filter(Boolean);
+  const isComplete = d11TeamDraft.picks.length === D11_TEAM_SIZE && !!d11TeamDraft.captain && !!d11TeamDraft.viceCaptain;
 
   return `<div style="position:fixed;inset:0;z-index:2000;background:rgba(5,10,20,0.9);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseTeamPreview()">
     <div class="card" style="width:100%;max-width:600px;max-height:90vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:16px;margin:0" onclick="event.stopPropagation()">
@@ -15844,6 +15848,8 @@ function renderD11TeamPreviewModal() {
         <div style="font-size:15px;font-weight:700">👁️ Preview Your Team</div>
         <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseTeamPreview()">✕</button>
       </div>
+
+      ${!isComplete ? `<div style="background:rgba(234,179,8,0.1);border:1px solid rgba(234,179,8,0.3);border-radius:8px;padding:8px 10px;font-size:11.5px;color:#facc15;margin-bottom:12px">⚠️ Team not finished yet — ${d11TeamDraft.picks.length}/${D11_TEAM_SIZE} players picked${(!d11TeamDraft.captain||!d11TeamDraft.viceCaptain)?', Captain/Vice-Captain not set':''}. Keep selecting before you can submit.</div>` : ''}
 
       <div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-bottom:14px">
         <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
@@ -15860,7 +15866,7 @@ function renderD11TeamPreviewModal() {
       <div style="background:linear-gradient(180deg,#1d6b3a,#155a2f);border-radius:16px;padding:16px 6px;margin-bottom:14px;position:relative;overflow:hidden">
         <div style="position:absolute;top:50%;left:50%;width:160%;height:55%;border:1.5px solid rgba(255,255,255,0.15);border-radius:50%;transform:translate(-50%,-50%)"></div>
         <div style="position:absolute;top:8px;left:10px;z-index:1;font-size:9px;color:rgba(255,255,255,0.85);line-height:1.3">${u?.name||'Unknown Player'}${u?.idNumber?`<br/><span style="font-family:monospace;font-size:8px;color:rgba(255,255,255,0.55)">ID: ${u.idNumber}</span>`:''}</div>
-        ${roleOrder.map(r => byRole[r].length ? `
+        ${picked.length === 0 ? `<div style="position:relative;text-align:center;padding:30px 10px;color:rgba(255,255,255,0.7);font-size:12px">No players picked yet</div>` : roleOrder.map(r => byRole[r].length ? `
         <div style="position:relative;margin-bottom:16px">
           <div style="text-align:center;font-size:10px;font-weight:800;letter-spacing:0.5px;color:rgba(255,255,255,0.85);margin-bottom:10px">${roleLabels[r]}</div>
           <div style="display:flex;justify-content:center;gap:8px;flex-wrap:wrap">
@@ -15875,11 +15881,13 @@ function renderD11TeamPreviewModal() {
         <div style="font-size:12px;color:var(--dim)">${backupNames.map(p=>p.name).join(', ')}</div>
       </div>` : ''}
 
-      <div style="font-size:11px;color:var(--dim);text-align:center;margin-bottom:12px">Check your Captain (C) and Vice-Captain (VC) carefully — once submitted, these can't be changed after the deadline.</div>
+      ${isComplete ? `<div style="font-size:11px;color:var(--dim);text-align:center;margin-bottom:12px">Check your Captain (C) and Vice-Captain (VC) carefully — once submitted, these can't be changed after the deadline.</div>` : ''}
 
       <div style="display:flex;gap:8px">
-        <button class="btn-secondary" style="flex:1;font-size:13px;padding:12px" onclick="d11CloseTeamPreview()">← Edit Team</button>
-        <button class="btn-primary" style="flex:1;font-size:13px;padding:12px" onclick="d11CloseTeamPreview();d11SubmitTeam()">✅ Confirm &amp; Submit</button>
+        <button class="btn-secondary" style="flex:1;font-size:13px;padding:12px" onclick="d11CloseTeamPreview()">← ${isComplete ? 'Edit Team' : 'Continue Selecting'}</button>
+        ${isComplete
+          ? `<button class="btn-primary" style="flex:1;font-size:13px;padding:12px" onclick="d11CloseTeamPreview();d11SubmitTeam()">✅ Confirm &amp; Submit</button>`
+          : `<button class="btn-secondary" style="flex:1;font-size:13px;padding:12px" disabled>Finish team to submit</button>`}
       </div>
     </div>
   </div>`;
@@ -21338,11 +21346,7 @@ function renderDream11BuildTeam() {
     </div>
     ${dLocked
       ? `<button class="btn-secondary" style="padding:12px 22px" disabled>🔒 Locked</button>`
-      : d11TeamDraft.picks.length !== D11_TEAM_SIZE
-        ? `<button class="btn-secondary" style="padding:12px 22px" disabled>Select ${D11_TEAM_SIZE} players</button>`
-        : !d11TeamDraft.captain || !d11TeamDraft.viceCaptain
-          ? `<button class="btn-secondary" style="padding:12px 22px" disabled>Pick C &amp; VC</button>`
-          : `<button class="btn-primary" style="padding:12px 22px" onclick="d11OpenTeamPreview()">👁️ Preview</button>`}
+      : `<button class="btn-primary" style="padding:12px 22px" onclick="d11OpenTeamPreview()">👁️ Preview</button>`}
   </div>
   `;
 }
@@ -27521,7 +27525,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.9.0";
+const APP_VERSION = "4.9.1";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
