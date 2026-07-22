@@ -12309,7 +12309,7 @@ async function d11CheckPlayingXIAnnouncedCll(matchId, silent) {
   }
   notify('🔍 Checking Cricket Live Line for Playing XI…');
   try {
-    const raw = await _cllFetch(`match/${m.cllMatchId}/playingEleven`, { feature: silent ? 'Auto Playing XI Check' : 'Check Playing XI', matchId });
+    const raw = await _cllFetch(`match/${m.cllMatchId}/playingXI`, { feature: silent ? 'Auto Playing XI Check' : 'Check Playing XI', matchId });
     _d11CllDebugData = { cllRaw: raw, cllMatchId: m.cllMatchId };
     const data = raw?.data || {};
     const namesInXI = new Set();
@@ -27525,7 +27525,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.9.1";
+const APP_VERSION = "4.9.2";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
