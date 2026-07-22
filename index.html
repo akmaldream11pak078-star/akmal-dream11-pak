@@ -7297,6 +7297,21 @@ function dream11TeamComposition(picks, d11m) {
   return { counts, sideCounts };
 }
 
+// A player who has actual recorded match activity (batted, bowled, or
+// fielded) genuinely took part — this covers Impact Player substitutes who
+// were never on the officially announced Playing XI list but did come on
+// and bat/bowl/field. These players must never be un-confirmed just
+// because their name is missing from an announced-XI feed, otherwise the
+// backup-replacement logic wrongly swaps them out for a bench player even
+// though they actually played (see Ben McDermott Impact Player case).
+function _d11PlayerHasActivity(p) {
+  const s = (p && p.stats) || {};
+  return Number(s.ballsFaced || 0) > 0 || Number(s.oversBowled || 0) > 0 ||
+         Number(s.catches || 0) > 0 || Number(s.stumpings || 0) > 0 ||
+         Number(s.runOuts || 0) > 0 || Number(s.wickets || 0) > 0 ||
+         Number(s.runsScored || 0) > 0;
+}
+
 // ── Backup player auto-replace ──────────────────────────────────
 // Runs whenever admin confirms/changes Playing XI status for a match.
 // For every submitted team in that match: any ORIGINAL pick who is not in
@@ -7345,6 +7360,41 @@ function d11ApplyBackupReplacements(matchId) {
         delete team.replacements[originalId];
         usedBackupIds.delete(backupId);
         changed = true;
+        return;
+      }
+
+      if (!currentlyInXI && alreadyReplaced) {
+        // Already swapped once — but Playing XI can get re-checked/re-set
+        // multiple times before the match starts (admin clears and
+        // re-confirms, or a later auto-check overwrites an earlier one).
+        // If the backup CURRENTLY standing in is no longer in the latest
+        // confirmed XI either, cascade to the next unused backup instead
+        // of silently leaving a non-playing sub in the lineup.
+        const currentBackupId = team.replacements[originalId];
+        const currentBackup = (d11m.players||[]).find(x => x.id === currentBackupId);
+        if (currentBackup && currentBackup.isPlayingXI) return; // still valid, nothing to do
+
+        const nextBackupId = team.backups.find(bId => {
+          if (bId === currentBackupId) return false;
+          if (usedBackupIds.has(bId)) return false;
+          if (team.picks.includes(bId)) return false;
+          const bp = (d11m.players||[]).find(x => x.id === bId);
+          return bp && bp.isPlayingXI;
+        });
+        const slotIdx = team.picks.indexOf(currentBackupId);
+        if (nextBackupId) {
+          if (slotIdx >= 0) team.picks[slotIdx] = nextBackupId;
+          team.replacements[originalId] = nextBackupId;
+          if (team.captain === currentBackupId) team.captain = nextBackupId;
+          if (team.viceCaptain === currentBackupId) team.viceCaptain = nextBackupId;
+          usedBackupIds.delete(currentBackupId);
+          usedBackupIds.add(nextBackupId);
+          changed = true;
+        }
+        // If no other backup is available either, leave the current
+        // (non-playing) substitute in place — same "no swap possible"
+        // behaviour as the original-pick case below, rather than reverting
+        // to the original player who is also confirmed not playing.
         return;
       }
 
@@ -12104,10 +12154,6 @@ async function d11CheckPlayingXIAnnouncedCb2(matchId, silent) {
   const m = matches[matchId];
   const d11m = dream11Matches[matchId];
   if (!m || !d11m || !m.cb2MatchId) return;
-  if ((d11m.players || []).some(p => p.isPlayingXI)) {
-    notify('Playing XI already confirmed for this match.');
-    return;
-  }
   notify('🔍 Checking Cricbuzz No 2 for Playing XI…');
   try {
     const raw = await _cb2Fetch(`/mcenter/v1/${m.cb2MatchId}/teams`, null, { feature: silent ? 'Auto Playing XI Check' : 'Check Playing XI', matchId });
@@ -12123,16 +12169,19 @@ async function d11CheckPlayingXIAnnouncedCb2(matchId, silent) {
       notify('Playing XI not announced yet on Cricbuzz No 2 — try again closer to match time.', 'error');
       return;
     }
-    let confirmedCount = 0;
+    let confirmedCount = 0, unconfirmedCount = 0;
     (d11m.players || []).forEach(p => {
-      if (namesInXI.has(p.name.toLowerCase().trim()) && !p.isPlayingXI) { p.isPlayingXI = true; confirmedCount++; }
+      const inLatestXI = namesInXI.has(p.name.toLowerCase().trim());
+      if (inLatestXI && !p.isPlayingXI) { p.isPlayingXI = true; confirmedCount++; }
+      else if (!inLatestXI && p.isPlayingXI && !_d11PlayerHasActivity(p)) { p.isPlayingXI = false; unconfirmedCount++; }
     });
-    if (confirmedCount > 0) {
+    if (confirmedCount > 0 || unconfirmedCount > 0) {
       await _saveDream11MatchToFirestore(matchId, d11m);
-      notify(`🏏 Playing XI confirmed — ${confirmedCount} players confirmed ✅`);
+      d11ApplyBackupReplacements(matchId);
+      notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
       render();
     } else {
-      notify('No new players matched — squad names may not match your pool exactly, or Playing XI was already confirmed.', 'error');
+      notify('No changes — latest Playing XI matches what was already confirmed.', 'error');
     }
   } catch (e) {
     console.error('Cricbuzz No 2 Playing XI check failed:', e);
@@ -12191,12 +12240,14 @@ async function d11SyncLiveMatchCb2(matchId, showToast) {
       const p = _d11FindPlayerByName(d11m, row.name);
       if (!p) return;
       p.stats = { ...(p.stats||{}), catches: row.catches, stumpings: row.stumpings, runOuts: row.runOuts, isPlayingXI: true };
+      p.isPlayingXI = true;
     });
 
     (d11m.players || []).forEach(p => { if (p.stats) p.points = calcDream11PlayerPoints(p.stats, matchId); });
     recalcDream11MatchPoints(d11m);
 
     _d11Cb2LastSyncedAt[matchId] = Date.now();
+    d11ApplyBackupReplacements(matchId);
     await _saveMatchToFirestore(matchId, m);
     await _saveDream11MatchToFirestore(matchId, d11m);
     await d11RefreshLiveTeamPoints(matchId);
@@ -12303,10 +12354,6 @@ async function d11CheckPlayingXIAnnouncedCll(matchId, silent) {
   const m = matches[matchId];
   const d11m = dream11Matches[matchId];
   if (!m || !d11m || !m.cllMatchId) return;
-  if ((d11m.players || []).some(p => p.isPlayingXI)) {
-    notify('Playing XI already confirmed for this match.');
-    return;
-  }
   notify('🔍 Checking Cricket Live Line for Playing XI…');
   try {
     const raw = await _cllFetch(`match/${m.cllMatchId}/playingXI`, { feature: silent ? 'Auto Playing XI Check' : 'Check Playing XI', matchId });
@@ -12320,16 +12367,19 @@ async function d11CheckPlayingXIAnnouncedCll(matchId, silent) {
       notify('Playing XI not announced yet on Cricket Live Line — try again closer to match time.', 'error');
       return;
     }
-    let confirmedCount = 0;
+    let confirmedCount = 0, unconfirmedCount = 0;
     (d11m.players || []).forEach(p => {
-      if (namesInXI.has(p.name.toLowerCase().trim()) && !p.isPlayingXI) { p.isPlayingXI = true; confirmedCount++; }
+      const inLatestXI = namesInXI.has(p.name.toLowerCase().trim());
+      if (inLatestXI && !p.isPlayingXI) { p.isPlayingXI = true; confirmedCount++; }
+      else if (!inLatestXI && p.isPlayingXI && !_d11PlayerHasActivity(p)) { p.isPlayingXI = false; unconfirmedCount++; }
     });
-    if (confirmedCount > 0) {
+    if (confirmedCount > 0 || unconfirmedCount > 0) {
       await _saveDream11MatchToFirestore(matchId, d11m);
-      notify(`🏏 Playing XI confirmed — ${confirmedCount} players confirmed ✅`);
+      d11ApplyBackupReplacements(matchId);
+      notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
       render();
     } else {
-      notify('No new players matched — squad names may not match your pool exactly, or Playing XI was already confirmed.', 'error');
+      notify('No changes — latest Playing XI matches what was already confirmed.', 'error');
     }
   } catch (e) {
     console.error('Cricket Live Line Playing XI check failed:', e);
@@ -12404,6 +12454,7 @@ async function d11SyncLiveMatchCll(matchId, showToast) {
         runOuts: row.runOuts,
         isPlayingXI: true
       };
+      p.isPlayingXI = true;
       fieldersApplied++;
     });
 
@@ -12411,6 +12462,7 @@ async function d11SyncLiveMatchCll(matchId, showToast) {
     recalcDream11MatchPoints(d11m);
 
     _d11LiveSyncLastSyncedAt[matchId] = Date.now();
+    d11ApplyBackupReplacements(matchId);
     await _saveMatchToFirestore(matchId, m);
     await _saveDream11MatchToFirestore(matchId, d11m);
     await d11RefreshLiveTeamPoints(matchId);
@@ -12542,10 +12594,6 @@ async function d11CheckPlayingXIAnnouncedLl2(matchId, silent) {
   const m = matches[matchId];
   const d11m = dream11Matches[matchId];
   if (!m || !d11m || !m.ll2MatchId) return;
-  if ((d11m.players || []).some(p => p.isPlayingXI)) {
-    notify('Playing XI already confirmed for this match.');
-    return;
-  }
   notify('🔍 Checking Live Line 2 for Playing XI…');
   try {
     const raw = await _ll2Fetch('match-playing-11', { match_id: m.ll2MatchId }, { feature: silent ? 'Auto Playing XI Check' : 'Check Playing XI', matchId });
@@ -12559,16 +12607,19 @@ async function d11CheckPlayingXIAnnouncedLl2(matchId, silent) {
       notify('Playing XI not announced yet on Live Line 2 — try again closer to match time.', 'error');
       return;
     }
-    let confirmedCount = 0;
+    let confirmedCount = 0, unconfirmedCount = 0;
     (d11m.players || []).forEach(p => {
-      if (namesInXI.has(p.name.toLowerCase().trim()) && !p.isPlayingXI) { p.isPlayingXI = true; confirmedCount++; }
+      const inLatestXI = namesInXI.has(p.name.toLowerCase().trim());
+      if (inLatestXI && !p.isPlayingXI) { p.isPlayingXI = true; confirmedCount++; }
+      else if (!inLatestXI && p.isPlayingXI && !_d11PlayerHasActivity(p)) { p.isPlayingXI = false; unconfirmedCount++; }
     });
-    if (confirmedCount > 0) {
+    if (confirmedCount > 0 || unconfirmedCount > 0) {
       await _saveDream11MatchToFirestore(matchId, d11m);
-      notify(`🏏 Playing XI confirmed — ${confirmedCount} players confirmed ✅`);
+      d11ApplyBackupReplacements(matchId);
+      notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
       render();
     } else {
-      notify('No new players matched — squad names may not match your pool exactly, or Playing XI was already confirmed.', 'error');
+      notify('No changes — latest Playing XI matches what was already confirmed.', 'error');
     }
   } catch (e) {
     console.error('Live Line 2 Playing XI check failed:', e);
@@ -12642,6 +12693,7 @@ async function d11SyncLiveMatchLl2(matchId, showToast) {
         runOuts: row.runOuts,
         isPlayingXI: true
       };
+      p.isPlayingXI = true;
       fieldersApplied++;
     });
 
@@ -12649,6 +12701,7 @@ async function d11SyncLiveMatchLl2(matchId, showToast) {
     recalcDream11MatchPoints(d11m);
 
     _d11Ll2LastSyncedAt[matchId] = Date.now();
+    d11ApplyBackupReplacements(matchId);
     await _saveMatchToFirestore(matchId, m);
     await _saveDream11MatchToFirestore(matchId, d11m);
     await d11RefreshLiveTeamPoints(matchId);
@@ -13933,12 +13986,6 @@ async function d11CheckPlayingXIAnnounced(matchId, silent) {
   const m = matches[matchId];
   const d11m = dream11Matches[matchId];
   if (!m || !d11m || !m.cricketDataMatchId || !m.cricbuzzTeam1Id || !m.cricbuzzTeam2Id) return;
-  // Already confirmed (either by this poll earlier, or admin did it
-  // manually) — nothing left to check.
-  if ((d11m.players || []).some(p => p.isPlayingXI)) {
-    notify('Playing XI already confirmed for this match.');
-    return;
-  }
   notify('🔍 Checking Cricbuzz for Playing XI…');
   try {
     // Sequential with a gap — see note above in d11FetchSquadFromCricbuzz
@@ -13989,6 +14036,7 @@ async function d11CheckPlayingXIAnnounced(matchId, silent) {
             });
             if (confirmedFromLive > 0) {
               await _saveDream11MatchToFirestore(matchId, d11m);
+              d11ApplyBackupReplacements(matchId);
               notify(`🏏 Playing XI confirmed from live scorecard — ${confirmedFromLive} players confirmed ✅`);
               render();
               return;
@@ -14003,13 +14051,15 @@ async function d11CheckPlayingXIAnnounced(matchId, silent) {
     }
 
     const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
-    let confirmedCount = 0, addedCount = 0;
+    let confirmedCount = 0, addedCount = 0, unconfirmedCount = 0;
+    const namesInLatestXI = new Set();
 
     [{ list: xi1, bench: team1Data?.players?.bench || [], side: 'A' }, { list: xi2, bench: team2Data?.players?.bench || [], side: 'B' }].forEach(({ list, bench, side }) => {
       list.forEach(p => {
         const name = (p.fullName || p.name || '').trim();
         if (!name) return;
         const nameLower = name.toLowerCase();
+        namesInLatestXI.add(nameLower);
         let player = (d11m.players || []).find(pl => pl.name.toLowerCase().trim() === nameLower);
         if (player) {
           if (!player.isPlayingXI) { player.isPlayingXI = true; confirmedCount++; }
@@ -14038,9 +14088,21 @@ async function d11CheckPlayingXIAnnounced(matchId, silent) {
       });
     });
 
-    if (confirmedCount > 0) {
+    // Anyone previously confirmed who is no longer in the freshly-fetched XI
+    // (lineup was corrected, or a name dropped off the announced list) gets
+    // un-confirmed so the backup swap logic re-evaluates them against the
+    // latest data instead of leaving a stale confirmation in place.
+    (d11m.players || []).forEach(p => {
+      if (p.isPlayingXI && !namesInLatestXI.has(p.name.toLowerCase().trim()) && !_d11PlayerHasActivity(p)) {
+        p.isPlayingXI = false;
+        unconfirmedCount++;
+      }
+    });
+
+    if (confirmedCount > 0 || unconfirmedCount > 0) {
       await _saveDream11MatchToFirestore(matchId, d11m);
-      notify(`🏏 Playing XI confirmed! ${confirmedCount} players confirmed ✅${addedCount ? ` (${addedCount} new players added to pool)` : ''}`);
+      d11ApplyBackupReplacements(matchId);
+      notify(`🏏 Playing XI updated! ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅${addedCount ? ` (${addedCount} new players added to pool)` : ''}`);
       render();
     }
   } catch (e) {
@@ -14157,6 +14219,7 @@ async function d11SyncLiveMatch(matchId, showToast) {
         runOuts: row.runOuts,
         isPlayingXI: true
       };
+      p.isPlayingXI = true;
       fieldersApplied++;
     });
 
@@ -14166,6 +14229,7 @@ async function d11SyncLiveMatch(matchId, showToast) {
     recalcDream11MatchPoints(d11m);
 
     _d11LiveSyncLastSyncedAt[matchId] = Date.now();
+    d11ApplyBackupReplacements(matchId);
     _saveMatchToFirestore(matchId, m);
     _saveDream11MatchToFirestore(matchId, d11m);
     d11RefreshLiveTeamPoints(matchId);
@@ -14303,6 +14367,7 @@ async function d11SyncLiveMatchEspn(matchId, showToast) {
         runOuts: row.runOuts,
         isPlayingXI: true
       };
+      p.isPlayingXI = true;
       fieldersApplied++;
     });
 
@@ -14312,6 +14377,7 @@ async function d11SyncLiveMatchEspn(matchId, showToast) {
     recalcDream11MatchPoints(d11m);
 
     _d11LiveSyncLastSyncedAt[matchId] = Date.now();
+    d11ApplyBackupReplacements(matchId);
     await _saveMatchToFirestore(matchId, m);
     await _saveDream11MatchToFirestore(matchId, d11m);
     await d11RefreshLiveTeamPoints(matchId);
@@ -14470,6 +14536,12 @@ function _d11ApplyLiveBattingRow(d11m, b) {
     isOut,
     isPlayingXI: true
   };
+  // Also set the top-level flag — the UI's ✅/"XI confirmed" badges and the
+  // Playing-XI counters throughout the app read p.isPlayingXI directly, not
+  // p.stats.isPlayingXI. Without this, a player who clearly batted (proven
+  // by real ball-by-ball data) could show correct stats but still be
+  // missing the XI badge, since only the nested stats copy was being set.
+  p.isPlayingXI = true;
   return true;
 }
 function _d11ApplyLiveBowlingRow(d11m, bl) {
@@ -14486,6 +14558,9 @@ function _d11ApplyLiveBowlingRow(d11m, bl) {
     oversBowled, runsGiven: Number(bl.runs ?? bl.runsConceded)||0,
     isPlayingXI: true
   };
+  // Same fix as batting above — keep the top-level flag in sync so the UI
+  // badge/count reflects it immediately.
+  p.isPlayingXI = true;
   return true;
 }
 
@@ -21598,14 +21673,23 @@ function renderDream11ViewTeam() {
           const p = d11m?.players.find(x => x.id === bid);
           if (!p) return '';
           const isUsed = t.replacements && Object.values(t.replacements).includes(bid);
+          // Look up who this backup is currently covering for, so the bench
+          // card can show "for <name>" instead of a bare "In lineup" badge.
+          let replacedName = '';
+          if (isUsed && t.replacements) {
+            const originalId = Object.keys(t.replacements).find(oid => t.replacements[oid] === bid);
+            const originalPlayer = originalId ? (d11m?.players || []).find(x => x.id === originalId) : null;
+            if (originalPlayer) replacedName = originalPlayer.name;
+          }
           return `
           <div style="display:flex;flex-direction:column;align-items:center;width:84px;opacity:${isUsed?'1':'0.55'}">
             <div style="position:relative">
               ${p.photo ? `<img src="${p.photo}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;border:2px dashed rgba(255,255,255,0.5)" />` : `<div style="width:48px;height:48px;border-radius:50%;background:rgba(255,255,255,0.08);border:2px dashed rgba(255,255,255,0.4);display:flex;align-items:center;justify-content:center;font-size:18px">👤</div>`}
-              <div style="position:absolute;top:-4px;right:-4px;width:17px;height:17px;border-radius:50%;background:${isUsed?'#2563eb':'rgba(255,255,255,0.3)'};color:#fff;font-size:9px;font-weight:800;display:flex;align-items:center;justify-content:center;border:1px solid rgba(0,0,0,0.3)" title="${isUsed?'In lineup now':'On the bench'}">🔁</div>
+              <div style="position:absolute;top:-4px;right:-4px;width:17px;height:17px;border-radius:50%;background:${isUsed?'#2563eb':'rgba(255,255,255,0.3)'};color:#fff;font-size:9px;font-weight:800;display:flex;align-items:center;justify-content:center;border:1px solid rgba(0,0,0,0.3)" title="${isUsed && replacedName ? 'In lineup — replacing ' + replacedName : isUsed ? 'In lineup now' : 'On the bench'}">🔁</div>
             </div>
             <div style="margin-top:5px;background:rgba(0,0,0,0.4);padding:2px 8px;border-radius:6px;font-size:10.5px;font-weight:700;color:rgba(255,255,255,0.85);white-space:nowrap;max-width:84px;overflow:hidden;text-overflow:ellipsis">${p.name}</div>
             <div style="margin-top:2px;font-size:9.5px;font-weight:700;color:${isUsed?'#60a5fa':'rgba(255,255,255,0.5)'}">${isUsed ? 'In lineup' : 'Standby'}</div>
+            ${isUsed && replacedName ? `<div style="font-size:8.5px;font-weight:600;color:rgba(255,255,255,0.5);white-space:nowrap;max-width:84px;overflow:hidden;text-overflow:ellipsis">for ${replacedName}</div>` : ''}
           </div>`;
         }).join('')}
       </div>
@@ -21620,12 +21704,21 @@ function renderDream11ViewTeam() {
     const p = d11m?.players.find(x => x.id === bid);
     if (!p) return '';
     const isUsed = t.replacements && Object.values(t.replacements).includes(bid);
+    // Find which original main pick this backup is currently standing in
+    // for, so the admin/user can see *who* they replaced instead of just
+    // an unlabeled "In lineup" badge.
+    let replacedName = '';
+    if (isUsed && t.replacements) {
+      const originalId = Object.keys(t.replacements).find(oid => t.replacements[oid] === bid);
+      const originalPlayer = originalId ? (d11m?.players || []).find(x => x.id === originalId) : null;
+      if (originalPlayer) replacedName = originalPlayer.name;
+    }
     return `
     <div class="d11-player-row ${isUsed?'picked':''}">
       <div class="d11-player-left">
         ${p.photo ? `<img src="${p.photo}" style="width:30px;height:30px;border-radius:50%;object-fit:cover;flex-shrink:0" />` : ''}
         <span class="d11-role-chip d11-role-${p.role}">${p.role}</span>
-        <div class="d11-player-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80;font-size:11px">✅</span>' : ''}</div>
+        <div class="d11-player-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80;font-size:11px">✅</span>' : ''}${isUsed && replacedName ? `<div style="font-size:9.5px;font-weight:600;color:var(--dim);margin-top:1px">replacing ${replacedName}</div>` : ''}</div>
       </div>
       <div style="font-size:11px;font-weight:700;color:${isUsed?'#60a5fa':'var(--dim)'}">${isUsed ? '🔁 In lineup' : 'Standby'}</div>
     </div>`;
