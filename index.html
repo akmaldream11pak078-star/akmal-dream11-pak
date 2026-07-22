@@ -1377,6 +1377,7 @@ let d11ViewTournamentId = null; // which tournament's detail screen is showing
 let d11AddMatchesOpen = false; // true while creator is adding more matches to an already-created tournament
 let d11AddMatchesSelected = []; // matchIds ticked in the "add more matches" panel
 let d11TeamDraft = null; // user's in-progress team selection { matchId, picks:[], captain, viceCaptain }
+let d11TeamPreviewOpen = false; // shows the pitch-view preview modal before the final Submit Team confirmation
 // Team-selection modal shown when a user with 2+ teams for a match joins a
 // contest — lets them pick WHICH team (Team 1/2/3) to enter into THIS
 // specific contest. { matchId, onConfirm(teamId) } or null when closed.
@@ -4874,6 +4875,7 @@ function _renderInner() {
     ${d11Cb2ImportPanelOpen ? renderD11Cb2ImportPanelModal() : ''}
     ${d11Cb2LinkPickerMatchId ? renderD11Cb2LinkPickerModal() : ''}
     ${_d11Cb2DebugData ? renderD11Cb2DebugModal() : ''}
+    ${d11TeamPreviewOpen ? renderD11TeamPreviewModal() : ''}
     ${d11Ll2ImportPanelOpen ? renderD11Ll2ImportPanelModal() : ''}
     ${d11Ll2LinkPickerMatchId ? renderD11Ll2LinkPickerModal() : ''}
     ${_d11Ll2DebugData ? renderD11Ll2DebugModal() : ''}
@@ -15787,6 +15789,102 @@ function d11SetViceCaptain(playerId) {
   if (d11TeamDraft.captain === playerId) d11TeamDraft.captain = null;
   render();
 }
+function d11OpenTeamPreview() {
+  const d11m = dream11Matches[d11TeamDraft.matchId];
+  const errors = dream11ValidateTeam(d11TeamDraft.picks, d11m).concat(dream11ValidateBackups(d11TeamDraft.backups));
+  if (!d11TeamDraft.captain) errors.push('Please select a Captain');
+  if (!d11TeamDraft.viceCaptain) errors.push('Please select a Vice-Captain');
+  if (errors.length) { showNotif(errors[0], 'error'); return; }
+  if (isD11Locked(d11TeamDraft.matchId)) { showNotif('This contest is now locked — deadline has passed', 'error'); return; }
+  d11TeamPreviewOpen = true;
+  render();
+}
+function d11CloseTeamPreview() {
+  d11TeamPreviewOpen = false;
+  render();
+}
+// Pitch-view preview of the in-progress draft, shown before the final
+// Submit Team confirmation — same layout/name-badge style as
+// renderDream11ViewTeam's submitted-team pitch, but reads straight from
+// d11TeamDraft since nothing has been saved yet.
+function renderD11TeamPreviewModal() {
+  if (!d11TeamPreviewOpen || !d11TeamDraft) return '';
+  const m = matches[d11TeamDraft.matchId];
+  const d11m = dream11Matches[d11TeamDraft.matchId];
+  if (!m || !d11m) return '';
+  const u = currentUser ? users[currentUser.email] : null;
+
+  const squadA = d11GetTeamSquad(m.teamA);
+  const squadB = d11GetTeamSquad(m.teamB);
+  const flagA = squadA?.flag, flagB = squadB?.flag;
+
+  const picked = d11TeamDraft.picks.map(pid => d11m.players.find(x => x.id === pid)).filter(Boolean);
+  const roleOrder = ['WK','BAT','AR','BOWL'];
+  const roleLabels = { WK: 'WICKET-KEEPERS', BAT: 'BATTERS', AR: 'ALL-ROUNDERS', BOWL: 'BOWLERS' };
+  const byRole = {};
+  roleOrder.forEach(r => byRole[r] = picked.filter(p => p.role === r));
+
+  const fieldPlayerCard = (p) => {
+    const isC = d11TeamDraft.captain === p.id, isVC = d11TeamDraft.viceCaptain === p.id;
+    return `
+    <div style="display:flex;flex-direction:column;align-items:center;width:76px">
+      <div style="position:relative">
+        ${p.photo ? `<img src="${p.photo}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;border:2px solid rgba(255,255,255,0.5)" />` : `<div style="width:48px;height:48px;border-radius:50%;background:rgba(255,255,255,0.12);border:2px solid rgba(255,255,255,0.4);display:flex;align-items:center;justify-content:center;font-size:20px">👤</div>`}
+        ${isC ? `<div style="position:absolute;top:-4px;right:-4px;width:17px;height:17px;border-radius:50%;background:var(--gold);color:#000;font-size:9px;font-weight:800;display:flex;align-items:center;justify-content:center;border:1px solid rgba(0,0,0,0.3)">C</div>` : isVC ? `<div style="position:absolute;top:-4px;right:-4px;width:17px;height:17px;border-radius:50%;background:#60a5fa;color:#000;font-size:8px;font-weight:800;display:flex;align-items:center;justify-content:center;border:1px solid rgba(0,0,0,0.3)">VC</div>` : ''}
+      </div>
+      <div style="margin-top:4px;background:rgba(0,0,0,0.55);padding:2px 7px;border-radius:6px;font-size:10px;font-weight:700;color:#fff;white-space:nowrap;max-width:76px;overflow:hidden;text-overflow:ellipsis">${p.name}</div>
+    </div>`;
+  };
+
+  const backupNames = (d11TeamDraft.backups||[]).map(bid => d11m.players.find(x => x.id === bid)).filter(Boolean);
+
+  return `<div style="position:fixed;inset:0;z-index:2000;background:rgba(5,10,20,0.9);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseTeamPreview()">
+    <div class="card" style="width:100%;max-width:600px;max-height:90vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:16px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-size:15px;font-weight:700">👁️ Preview Your Team</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseTeamPreview()">✕</button>
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-bottom:14px">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+          ${flagA ? `<img src="${flagA}" style="width:26px;height:26px;border-radius:7px;object-fit:cover;border:1px solid var(--border)" />` : ''}
+          <span class="team-name" style="font-size:12px">${m.teamA||'TBD'}</span>
+        </div>
+        <span class="vs-badge" style="font-size:9px;padding:2px 7px">VS</span>
+        <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+          ${flagB ? `<img src="${flagB}" style="width:26px;height:26px;border-radius:7px;object-fit:cover;border:1px solid var(--border)" />` : ''}
+          <span class="team-name" style="font-size:12px">${m.teamB||'TBD'}</span>
+        </div>
+      </div>
+
+      <div style="background:linear-gradient(180deg,#1d6b3a,#155a2f);border-radius:16px;padding:16px 6px;margin-bottom:14px;position:relative;overflow:hidden">
+        <div style="position:absolute;top:50%;left:50%;width:160%;height:55%;border:1.5px solid rgba(255,255,255,0.15);border-radius:50%;transform:translate(-50%,-50%)"></div>
+        <div style="position:absolute;top:8px;left:10px;z-index:1;font-size:9px;color:rgba(255,255,255,0.85);line-height:1.3">${u?.name||'Unknown Player'}${u?.idNumber?`<br/><span style="font-family:monospace;font-size:8px;color:rgba(255,255,255,0.55)">ID: ${u.idNumber}</span>`:''}</div>
+        ${roleOrder.map(r => byRole[r].length ? `
+        <div style="position:relative;margin-bottom:16px">
+          <div style="text-align:center;font-size:10px;font-weight:800;letter-spacing:0.5px;color:rgba(255,255,255,0.85);margin-bottom:10px">${roleLabels[r]}</div>
+          <div style="display:flex;justify-content:center;gap:8px;flex-wrap:wrap">
+            ${byRole[r].map(fieldPlayerCard).join('')}
+          </div>
+        </div>` : '').join('')}
+      </div>
+
+      ${backupNames.length ? `
+      <div class="card mb14" style="padding:10px 12px">
+        <div style="font-size:11px;font-weight:700;color:#60a5fa;margin-bottom:6px">🔁 Backups (${backupNames.length})</div>
+        <div style="font-size:12px;color:var(--dim)">${backupNames.map(p=>p.name).join(', ')}</div>
+      </div>` : ''}
+
+      <div style="font-size:11px;color:var(--dim);text-align:center;margin-bottom:12px">Check your Captain (C) and Vice-Captain (VC) carefully — once submitted, these can't be changed after the deadline.</div>
+
+      <div style="display:flex;gap:8px">
+        <button class="btn-secondary" style="flex:1;font-size:13px;padding:12px" onclick="d11CloseTeamPreview()">← Edit Team</button>
+        <button class="btn-primary" style="flex:1;font-size:13px;padding:12px" onclick="d11CloseTeamPreview();d11SubmitTeam()">✅ Confirm &amp; Submit</button>
+      </div>
+    </div>
+  </div>`;
+}
+
 async function d11SubmitTeam() {
   const d11m = dream11Matches[d11TeamDraft.matchId];
   const errors = dream11ValidateTeam(d11TeamDraft.picks, d11m).concat(dream11ValidateBackups(d11TeamDraft.backups));
@@ -21244,7 +21342,7 @@ function renderDream11BuildTeam() {
         ? `<button class="btn-secondary" style="padding:12px 22px" disabled>Select ${D11_TEAM_SIZE} players</button>`
         : !d11TeamDraft.captain || !d11TeamDraft.viceCaptain
           ? `<button class="btn-secondary" style="padding:12px 22px" disabled>Pick C &amp; VC</button>`
-          : `<button class="btn-primary" style="padding:12px 22px" onclick="d11SubmitTeam()">✅ Submit Team</button>`}
+          : `<button class="btn-primary" style="padding:12px 22px" onclick="d11OpenTeamPreview()">👁️ Preview</button>`}
   </div>
   `;
 }
@@ -21459,8 +21557,7 @@ function renderDream11ViewTeam() {
   </div>
 
   <div class="card mb14">
-    <div style="font-size:12px;color:var(--dim);text-align:center">${u?.name||'Unknown Player'}'s Team${u?.idNumber?` <span style="font-family:monospace">(ID: ${u.idNumber})</span>`:''}</div>
-    <div style="display:flex;align-items:center;justify-content:center;gap:14px;margin:8px 0 4px">
+    <div style="display:flex;align-items:center;justify-content:center;gap:14px;margin:0 0 4px">
       <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
         ${flagA ? `<img src="${flagA}" style="width:30px;height:30px;border-radius:8px;object-fit:cover;border:1px solid var(--border)" />` : ''}
         <span class="team-name" style="font-size:13px">${m?.teamA||'TBD'}</span>
@@ -21481,6 +21578,7 @@ function renderDream11ViewTeam() {
 
   <div style="background:linear-gradient(180deg,#1d6b3a,#155a2f);border-radius:16px;padding:18px 8px;margin-bottom:18px;position:relative;overflow:hidden">
     <div style="position:absolute;top:50%;left:50%;width:160%;height:55%;border:1.5px solid rgba(255,255,255,0.15);border-radius:50%;transform:translate(-50%,-50%)"></div>
+    <div style="position:absolute;top:10px;left:12px;z-index:1;font-size:10px;color:rgba(255,255,255,0.85);line-height:1.3">${u?.name||'Unknown Player'}${u?.idNumber?`<br/><span style="font-family:monospace;font-size:9px;color:rgba(255,255,255,0.55)">ID: ${u.idNumber}</span>`:''}</div>
     ${roleOrder.map(r => byRole[r].length ? `
     <div style="position:relative;margin-bottom:18px">
       <div style="text-align:center;font-size:11px;font-weight:800;letter-spacing:0.5px;color:rgba(255,255,255,0.85);margin-bottom:12px">${roleLabels[r]}</div>
@@ -27057,8 +27155,7 @@ function renderUtViewTeam() {
   <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="utBackFromBuildOrBoard()">← Back</button>
 
   <div class="card mb14">
-    <div style="font-size:12px;color:var(--dim);text-align:center">${u?.name||'Unknown Player'}'s Team${u?.idNumber?` <span style="font-family:monospace">(ID: ${u.idNumber})</span>`:''}</div>
-    <div style="display:flex;align-items:center;justify-content:center;gap:14px;margin:8px 0 4px">
+    <div style="display:flex;align-items:center;justify-content:center;gap:14px;margin:0 0 4px">
       <span class="team-name" style="font-size:13px">${m?.teamA||'TBD'}</span>
       <span class="vs-badge" style="font-size:9px;padding:2px 7px">VS</span>
       <span class="team-name" style="font-size:13px">${m?.teamB||'TBD'}</span>
@@ -27071,6 +27168,7 @@ function renderUtViewTeam() {
 
   <div style="background:linear-gradient(180deg,#1d6b3a,#155a2f);border-radius:16px;padding:18px 8px;margin-bottom:18px;position:relative;overflow:hidden">
     <div style="position:absolute;top:50%;left:50%;width:160%;height:55%;border:1.5px solid rgba(255,255,255,0.15);border-radius:50%;transform:translate(-50%,-50%)"></div>
+    <div style="position:absolute;top:10px;left:12px;z-index:1;font-size:10px;color:rgba(255,255,255,0.85);line-height:1.3">${u?.name||'Unknown Player'}${u?.idNumber?`<br/><span style="font-family:monospace;font-size:9px;color:rgba(255,255,255,0.55)">ID: ${u.idNumber}</span>`:''}</div>
     ${roleOrder.map(r => byRole[r].length ? `
     <div style="position:relative;margin-bottom:18px">
       <div style="text-align:center;font-size:11px;font-weight:800;letter-spacing:0.5px;color:rgba(255,255,255,0.85);margin-bottom:12px">${roleLabels[r]}</div>
@@ -27423,7 +27521,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.8.0";
+const APP_VERSION = "4.9.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
