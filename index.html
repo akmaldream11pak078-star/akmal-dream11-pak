@@ -15632,10 +15632,33 @@ async function d11RunAllRefunds(matchId) {
     }
   }
 
+  // H2H contests for this match — refund any contest that still has a
+  // paid-in participant sitting in it (open-with-1-player, full-but-not-
+  // yet-completed, or full-but-orphaned because a player record went
+  // missing). Skip 'completed' contests since those already paid out a
+  // winner or issued a draw refund, and skip already-cancelled contests
+  // with nobody left in them.
+  const h2hForMatch = Object.values(d11h2hContests).filter(c => c.matchId === matchId);
+  for (const c of h2hForMatch) {
+    if (c.status === 'completed') continue;
+    const emailsToRefund = [];
+    if (c.player1?.email) emailsToRefund.push(c.player1.email);
+    if (c.player2?.email) emailsToRefund.push(c.player2.email);
+    if (!emailsToRefund.length) continue;
+    await refundList(emailsToRefund, D11_H2H_ENTRY_FEE, `H2H Contest`);
+    c.player1 = null;
+    c.player2 = null;
+    c.status = 'cancelled';
+    c.updatedAt = Date.now();
+    await _saveD11H2HToFirestore(c.id, c);
+    d11h2hContests[c.id] = c;
+  }
+
   try {
     localStorage.setItem('pp_users_cache', JSON.stringify(users));
     localStorage.setItem('pp_dream11_matches_cache', JSON.stringify(dream11Matches));
     localStorage.setItem('pp_dream11_custom_contests_cache', JSON.stringify(d11CustomContests));
+    localStorage.setItem('pp_dream11_h2h_cache', JSON.stringify(d11h2hContests));
   } catch(e){}
 
   render();
@@ -16983,7 +17006,18 @@ async function finalizeD11H2HContests(matchId) {
   for (const contest of contested) {
     const p1 = users[contest.player1?.email];
     const p2 = users[contest.player2?.email];
-    if (!p1 || !p2) continue;
+    if (!p1 || !p2) {
+      // One side's user record is missing/orphaned — can't determine a
+      // winner. Refund whichever side we still have data for instead of
+      // silently leaving the contest stuck in 'full' forever with entry
+      // fees never returned.
+      contest.status = 'cancelled';
+      d11h2hContests[contest.id] = contest;
+      await _saveD11H2HToFirestore(contest.id, contest);
+      if (p1) await _adminWalletRefund(contest.player1.email, D11_H2H_ENTRY_FEE, matchId, 'D11 H2H refund — opponent record missing', 'h2h_refund');
+      if (p2) await _adminWalletRefund(contest.player2.email, D11_H2H_ENTRY_FEE, matchId, 'D11 H2H refund — opponent record missing', 'h2h_refund');
+      continue;
+    }
 
     const p1Team = contest.player1.teamId ? dream11Teams[contest.player1.teamId] : d11GetUserTeam(matchId, contest.player1.email);
     const p2Team = contest.player2.teamId ? dream11Teams[contest.player2.teamId] : d11GetUserTeam(matchId, contest.player2.email);
@@ -22971,6 +23005,55 @@ function renderAdminParticipants() {
 // since refunding after payout would create a balance mismatch —
 // those are only flagged for the admin to review manually.
 // ════════════════════════════════════════════════════════════
+// Scans for H2H contests that are stuck holding paid-in entry fees with
+// no resolution — either because "↩️ Refund All" used to skip H2H
+// entirely (old bug), or a player's user record went missing before
+// finalize could run. Any contest that is NOT 'completed' but still has
+// a player1/player2 sitting in it counts as a missed refund.
+function scanD11StuckH2H() {
+  const issues = []; // { id, matchId, label, emails: [...], refundEach }
+  Object.values(d11h2hContests).forEach(c => {
+    if (c.status === 'completed') return;
+    const emails = [];
+    if (c.player1?.email) emails.push(c.player1.email);
+    if (c.player2?.email) emails.push(c.player2.email);
+    if (!emails.length) return;
+    const m = matches[c.matchId];
+    const label = m ? `${m.teamA||'Team A'} vs ${m.teamB||'Team B'}` : `Match ${c.matchId}`;
+    issues.push({ id: c.id, matchId: c.matchId, label, emails, refundEach: D11_H2H_ENTRY_FEE, status: c.status });
+  });
+  return issues;
+}
+
+// Executes the fix: refunds every email found stuck in each contest,
+// then clears and cancels the contest so it can't double-pay later.
+async function runD11StuckH2HFix() {
+  const issues = scanD11StuckH2H();
+  let fixedCount = 0, totalRefunded = 0;
+  for (const issue of issues) {
+    const c = d11h2hContests[issue.id];
+    if (!c || c.status === 'completed') continue;
+    for (const email of issue.emails) {
+      await _adminWalletRefund(email, D11_H2H_ENTRY_FEE, issue.matchId, 'Missed H2H refund — recovered by admin cleanup', 'h2h_refund');
+      totalRefunded += D11_H2H_ENTRY_FEE;
+    }
+    c.player1 = null;
+    c.player2 = null;
+    c.status = 'cancelled';
+    c.updatedAt = Date.now();
+    await _saveD11H2HToFirestore(c.id, c);
+    d11h2hContests[c.id] = c;
+    fixedCount++;
+  }
+  try {
+    localStorage.setItem('pp_users_cache', JSON.stringify(users));
+    localStorage.setItem('pp_dream11_h2h_cache', JSON.stringify(d11h2hContests));
+  } catch(e){}
+  render();
+  showNotif(`✅ ${fixedCount} stuck H2H contest(s) fixed — Rs ${totalRefunded} refunded 💰`);
+}
+
+// ════════════════════════════════════════════════════════════
 function scanD11Duplicates() {
   const report = {
     mega: [],     // { matchId, label, email, extraCount, refundAmount, alreadyDistributed }
@@ -23170,6 +23253,8 @@ async function runCompleteReset() {
 
 function renderAdminDuplicateCleanup() {
   const report = scanD11Duplicates();
+  const stuckH2H = scanD11StuckH2H();
+  const stuckH2HTotal = stuckH2H.reduce((s,r) => s + r.emails.length * r.refundEach, 0);
   const totalIssues = report.mega.length + report.free.length + report.h2h.length + report.custom.length;
   const totalRefund = report.mega.reduce((s,r) => s + r.refundAmount, 0)
     + report.h2h.reduce((s,r) => s + (r.contestIds.length - 1) * D11_H2H_ENTRY_FEE, 0)
@@ -23182,6 +23267,22 @@ function renderAdminDuplicateCleanup() {
     ${_completeResetInProgress
       ? `<div style="margin-top:12px;font-size:13px;color:var(--gold);font-weight:700">⏳ ${_completeResetProgress || 'Working…'}</div>`
       : `<button class="btn-primary btn-block" style="margin-top:12px;background:linear-gradient(135deg,#dc2626,#991b1b)" onclick="runCompleteReset()">🔥 Complete Reset — Delete Everything Except Balances</button>`}
+  </div>
+
+  <div class="card mb18" style="background:rgba(220,38,38,0.08);border-color:rgba(220,38,38,0.4)">
+    <div style="font-weight:700;font-size:15px;color:#f87171">💸 Missed H2H Refunds</div>
+    <div style="font-size:11.5px;color:var(--dim);margin-top:4px">H2H contests where a player's entry fee was never refunded — either because "↩️ Refund All" used to skip H2H contests entirely, or a player's account record went missing before the match could be finalized.</div>
+    ${stuckH2H.length === 0
+      ? `<div style="margin-top:12px;font-size:13px;color:#4ade80;font-weight:700">✅ No stuck H2H refunds found!</div>`
+      : `
+      <div style="margin-top:12px;font-size:13px;color:var(--gold);font-weight:700">⚠️ ${stuckH2H.length} contest${stuckH2H.length===1?'':'s'} stuck • Estimated refund: Rs ${stuckH2HTotal}</div>
+      <button class="btn-primary mb14" style="margin-top:10px;background:linear-gradient(135deg,#dc2626,#991b1b)" onclick="if(confirm('Refund all stuck H2H entries now? This cannot be undone.')) runD11StuckH2HFix();">🔧 Fix All & Refund Now</button>
+      ${stuckH2H.map(r => `
+      <div style="padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:12px">
+        <div><b>${r.label}</b> <span style="color:var(--dim)">(${r.status})</span></div>
+        <div style="color:var(--dim)">${r.emails.join(', ')} — refund Rs ${r.emails.length * r.refundEach}</div>
+      </div>`).join('')}
+      `}
   </div>
 
   <div class="card mb18" style="background:rgba(168,85,247,0.08);border-color:rgba(168,85,247,0.3)">
@@ -27990,7 +28091,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.9.14";
+const APP_VERSION = "4.9.16";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
