@@ -3882,9 +3882,13 @@ function getGlobalLeaderboard() {
   // u.points only ever gets credited from the Prediction module (finalizeScoring).
   // Dream11 match scoring finalizes into team.totalPoints, never into u.points,
   // so combine both here for an accurate global ranking.
+  // Only Team 1 (teamSlot 1, or unset which defaults to 1) counts toward
+  // global points — a user who creates extra teams (Team 2, Team 3...) in
+  // the same match should not get their points added multiple times here.
   const d11PointsByEmail = {};
   Object.values(dream11Teams||{}).forEach(t => {
     if (!t || !t.userEmail) return;
+    if ((t.teamSlot||1) !== 1) return;
     d11PointsByEmail[t.userEmail] = (d11PointsByEmail[t.userEmail]||0) + (t.totalPoints||0);
   });
 
@@ -3916,12 +3920,15 @@ function getGlobalLeaderboard() {
 function getTopWinnersLeaderboard() {
   return Object.entries(users)
     .filter(([e,u]) => !u.isAdmin)
-    .map(([e,u]) => ({
-      email: e,
-      name: u.name,
-      idNumber: u.idNumber || '',
-      totalWon: userTotalContestWinnings(u) - userTotalContestSpent(u)
-    }))
+    .map(([e]) => {
+      const bd = getUserAdminContestBreakdown(e);
+      return {
+        email: e,
+        name: users[e].name,
+        idNumber: users[e].idNumber || '',
+        totalWon: bd.grandTotalPrize - bd.grandTotalEntry
+      };
+    })
     .filter(p => p.totalWon > 0)
     .sort((a,b) => b.totalWon - a.totalWon);
 }
@@ -5851,18 +5858,18 @@ function renderGlobalLeaderboard() {
 // would be misleading. ──
 function renderTopWinnersScreen() {
   return `
-  <div class="section-title">💰 Top Players — Most Won</div>
+  <div class="section-title">📈 Top Players — Net Profit</div>
   ${(() => {
     const winners = getTopWinnersLeaderboard();
-    if (winners.length === 0) return `<div class="empty-state">Abhi tak kisi ne net winnings nahi banayi.</div>`;
+    if (winners.length === 0) return `<div class="empty-state">Abhi tak kisi ne net profit nahi banaya.</div>`;
     const myWinRank = winners.findIndex(x => x.email === currentUser.email) + 1;
     const myWinEntry = winners.find(x => x.email === currentUser.email);
     return `
     ${myWinEntry ? `
     <div class="card mb14" style="text-align:center;background:linear-gradient(135deg,rgba(34,197,94,0.1),rgba(16,185,129,0.06));border-color:rgba(34,197,94,0.25)">
-      <div style="font-size:12px;color:var(--dim);font-weight:600">YOUR WINNINGS RANK</div>
+      <div style="font-size:12px;color:var(--dim);font-weight:600">YOUR NET PROFIT RANK</div>
       <div class="display" style="font-size:32px;color:#4ade80;margin-top:4px">#${myWinRank||'-'}</div>
-      <div style="font-size:12px;color:var(--dim);margin-top:2px">Rs ${myWinEntry.totalWon.toFixed(2)} net won</div>
+      <div style="font-size:12px;color:var(--dim);margin-top:2px">Rs ${myWinEntry.totalWon.toFixed(2)} net profit</div>
     </div>` : ''}
     ${winners.slice(0,50).map((p,i) => {
       const dp = users[p.email]?.dpBase64;
@@ -24570,31 +24577,32 @@ function renderAdminUserDetail(email) {
       : `<button class="btn-primary btn-block" style="background:linear-gradient(135deg,#22c55e,#16a34a)" onclick="adminToggleSubAdminXI('${email}')">🛡️ Make 2nd Admin</button>`}
   </div>
 
-  <div class="card mb14">
-    <div class="section-title" style="margin-bottom:10px">💰 Financial Summary</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-      <div class="profit-row" style="flex-direction:column;align-items:flex-start;gap:2px">
-        <span style="color:var(--dim);font-size:11px">Total Deposit</span>
-        <span style="font-weight:800;color:#4ade80;font-size:16px">Rs ${(u.totalDeposit||0).toFixed(2)}</span>
-      </div>
-      <div class="profit-row" style="flex-direction:column;align-items:flex-start;gap:2px">
-        <span style="color:var(--dim);font-size:11px">Total Withdrawn</span>
-        <span style="font-weight:800;color:#f87171;font-size:16px">Rs ${(u.totalWithdrawn||0).toFixed(2)}</span>
-      </div>
-      <div class="profit-row" style="flex-direction:column;align-items:flex-start;gap:2px">
-        <span style="color:var(--dim);font-size:11px">Total Winnings (Contests)</span>
-        <span style="font-weight:800;color:#fbbf24;font-size:16px">Rs ${totalWinnings.toFixed(2)}</span>
-      </div>
-      <div class="profit-row" style="flex-direction:column;align-items:flex-start;gap:2px">
-        <span style="color:var(--dim);font-size:11px">Total Refunds (↩️ no-win return)</span>
-        <span style="font-weight:800;color:#60a5fa;font-size:16px">Rs ${totalRefunds.toFixed(2)}</span>
-      </div>
-      <div class="profit-row" style="flex-direction:column;align-items:flex-start;gap:2px;grid-column:1/-1">
-        <span style="color:var(--dim);font-size:11px">Current Balance</span>
-        <span style="font-weight:800;color:var(--gold);font-size:16px">Rs ${(u.balance||0).toFixed(2)}</span>
+  ${(() => {
+    const bdForSummary = getUserAdminContestBreakdown(email);
+    const stats = [
+      { label: 'Total Deposit',    value: u.totalDeposit||0,          color: '#4ade80', icon: '⬆️' },
+      { label: 'Total Withdraw',   value: u.totalWithdrawn||0,        color: '#f87171', icon: '⬇️' },
+      { label: 'Current Balance',  value: u.balance||0,               color: 'var(--gold)', icon: '💼', full: true },
+      { label: 'Contest Spent',    value: bdForSummary.grandTotalEntry,  color: '#f87171', icon: '🎯' },
+      { label: 'Total Won',        value: bdForSummary.grandTotalPrize,  color: '#4ade80', icon: '🏆' },
+      { label: 'Net Profit',       value: bdForSummary.grandTotalPrize - bdForSummary.grandTotalEntry, color: (bdForSummary.grandTotalPrize - bdForSummary.grandTotalEntry)>=0?'#4ade80':'#f87171', icon: (bdForSummary.grandTotalPrize - bdForSummary.grandTotalEntry)>=0?'📈':'📉', signed: true, full: true },
+    ];
+    return `
+    <div class="card mb14">
+      <div class="section-title" style="margin-bottom:12px">📊 Player Stats</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        ${stats.map(s => `
+        <div style="background:var(--input-bg);border-radius:12px;padding:12px;${s.full?'grid-column:1/-1':''}">
+          <div style="display:flex;align-items:center;gap:6px;color:var(--dim);font-size:11px;margin-bottom:6px">
+            <span>${s.icon}</span><span>${s.label}</span>
+          </div>
+          <div style="font-weight:800;font-size:17px;color:${s.color}">${s.signed && s.value>=0 ? '+' : ''}Rs ${s.value.toFixed(2)}</div>
+        </div>
+        `).join('')}
       </div>
     </div>
-  </div>
+    `;
+  })()}
 
   <div class="card mb14">
     <div class="section-title" style="margin-bottom:10px">📊 Activity</div>
@@ -24612,12 +24620,7 @@ function renderAdminUserDetail(email) {
     const statusColor = (s) => s==='won'||s==='settled' ? '#4ade80' : s==='lost' ? '#f87171' : s==='cancelled/refunded' ? 'var(--dim)' : '#fbbf24';
     return `
     <div class="card mb14">
-      <div class="section-title" style="margin-bottom:6px">🏏 Match-by-Match Contest Breakdown</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-size:11px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--card-b)">
-        <div><span style="color:var(--dim)">Total Spent</span><br/><b style="color:#f87171;font-size:14px">Rs ${bd.grandTotalEntry.toFixed(2)}</b></div>
-        <div><span style="color:var(--dim)">Total Won</span><br/><b style="color:#4ade80;font-size:14px">Rs ${bd.grandTotalPrize.toFixed(2)}</b></div>
-        <div><span style="color:var(--dim)">Net Profit</span><br/><b style="color:${bd.grandNet>=0?'#4ade80':'#f87171'};font-size:14px">${bd.grandNet>=0?'+':''}Rs ${bd.grandNet.toFixed(2)}</b></div>
-      </div>
+      <div class="section-title" style="margin-bottom:10px">🏏 Match-by-Match Data</div>
       ${bd.matches.map(mb => `
       <div style="background:var(--input-bg);border-radius:10px;padding:10px 12px;margin-bottom:8px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
@@ -28006,7 +28009,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.9.12";
+const APP_VERSION = "4.9.13";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
