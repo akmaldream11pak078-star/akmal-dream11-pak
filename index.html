@@ -10694,14 +10694,30 @@ async function _ll2Fetch(endpoint, body, callCtx) {
   const isPost = !!body;
   let res;
   try {
+    // Live Line 2's POST endpoints (Match Squads, Match Info, Match Live
+    // Line, Match Scorecard, Match Playing XI, etc.) are documented on
+    // RapidAPI as expecting FORM_DATA, not a JSON body — confirmed directly
+    // in the RapidAPI console: the exact same match_id that 404'd here
+    // returned 200 OK with full squad data there, using a form body. We
+    // were sending `Content-Type: application/json` with a JSON-stringified
+    // body, which this API silently treats as "not found" instead of a
+    // parse error. Send it URL-encoded (form-urlencoded) instead, which
+    // RapidAPI's own "Code Snippets" tab generates for this API family.
+    const headers = {
+      'x-rapidapi-host': LL2_RAPIDAPI_HOST,
+      'x-rapidapi-key': LL2_RAPIDAPI_KEY
+    };
+    let fetchBody;
+    if (isPost) {
+      headers['Content-Type'] = 'application/x-www-form-urlencoded';
+      fetchBody = new URLSearchParams(
+        Object.entries(body).map(([k, v]) => [k, String(v)])
+      ).toString();
+    }
     res = await fetch(url, {
       method: isPost ? 'POST' : 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-rapidapi-host': LL2_RAPIDAPI_HOST,
-        'x-rapidapi-key': LL2_RAPIDAPI_KEY
-      },
-      ...(isPost ? { body: JSON.stringify(body) } : {})
+      headers,
+      ...(isPost ? { body: fetchBody } : {})
     });
   } catch (e) {
     throw new Error('Could not reach Live Line 2 API — check your internet connection and try again.');
@@ -12574,7 +12590,7 @@ async function d11FetchSquadFromLl2(matchId) {
   }
   showNotif('📥 Fetching squad from Live Line 2…');
   try {
-    const raw = await _ll2Fetch('match-squads', { match_id: m.ll2MatchId }, { feature: 'Fetch Squad', matchId });
+    const raw = await _ll2Fetch('squadsByMatchId', { match_id: m.ll2MatchId }, { feature: 'Fetch Squad', matchId });
     _d11Ll2DebugData = { ll2Raw: raw, ll2MatchId: m.ll2MatchId };
     const data = raw?.data || {};
     const teamA = data.team_a || {};
@@ -12630,7 +12646,7 @@ async function d11CheckPlayingXIAnnouncedLl2(matchId, silent) {
   if (!m || !d11m || !m.ll2MatchId) return;
   notify('🔍 Checking Live Line 2 for Playing XI…');
   try {
-    const raw = await _ll2Fetch('match-playing-11', { match_id: m.ll2MatchId }, { feature: silent ? 'Auto Playing XI Check' : 'Check Playing XI', matchId });
+    const raw = await _ll2Fetch('playingXiByMatchId', { match_id: m.ll2MatchId }, { feature: silent ? 'Auto Playing XI Check' : 'Check Playing XI', matchId });
     _d11Ll2DebugData = { ll2Raw: raw, ll2MatchId: m.ll2MatchId };
     const data = raw?.data || {};
     const namesInXI = new Set();
@@ -12666,7 +12682,7 @@ async function d11SyncLiveMatchLl2(matchId, showToast) {
   const d11m = dream11Matches[matchId];
   if (!m || !d11m || !m.ll2MatchId) return;
   try {
-    const raw = await _ll2Fetch('match-scorecard', { match_id: m.ll2MatchId }, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
+    const raw = await _ll2Fetch('scorecardByMatchId', { match_id: m.ll2MatchId }, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
     _d11SyncDebugData = { matchId, fetchedAt: Date.now(), raw, source: 'Live Line 2' };
 
     const data = raw?.data || {};
@@ -12743,7 +12759,7 @@ async function d11SyncLiveMatchLl2(matchId, showToast) {
     let isFinished = false;
     if (innings.length >= 2) {
       try {
-        const infoRaw = await _ll2Fetch('match-info', { match_id: m.ll2MatchId }, { feature: 'Finish Check', matchId });
+        const infoRaw = await _ll2Fetch('liveMatch', { match_id: m.ll2MatchId }, { feature: 'Finish Check', matchId });
         const infoStatus = (Array.isArray(infoRaw?.data) ? infoRaw.data[0] : infoRaw?.data)?.match_status || '';
         const looksFinished = /completed/i.test(infoStatus);
         if (looksFinished) {
@@ -27861,7 +27877,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.9.3";
+const APP_VERSION = "4.9.6";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
