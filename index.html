@@ -11580,7 +11580,7 @@ function _d11ParseCllIstToUtcMs(dateStr, timeStr) {
   return asIfUtcMs - IST_OFFSET_MS;
 }
 
-
+async function d11ImportMatchFromCll(mt) {
   if (!mt || !mt.match_id) return;
   const teamA = (mt.team_a || 'TBD').trim();
   const teamB = (mt.team_b || 'TBD').trim();
@@ -29072,7 +29072,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.9.17";
+const APP_VERSION = "4.9.18";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
