@@ -11557,13 +11557,36 @@ async function d11FetchCllImportList() {
 // One-tap import: creates the Dream11 match (unpublished), auto-fills team
 // names/deadline/format directly from Cricket Live Line's own match data,
 // then fetches the squad right away. Mirrors d11ImportMatchFromEspn exactly.
-async function d11ImportMatchFromCll(mt) {
+// The Cricket Live Line family of providers (CLL/CLL2/CLL3, all on the same
+// cricket-live-line1.p.rapidapi.com host) return date_wise/match_time as a
+// plain wall-clock string like "21 Jul 2026" + "04:30 PM" with NO timezone
+// marker — but that clock time is actually India Standard Time (UTC+5:30),
+// not UTC and not the device's local zone. `new Date(dateStr + ' ' +
+// timeStr)` parses it as if it were already the DEVICE's local time, so on
+// a Pakistan device (UTC+5:00) every imported match landed 30 minutes later
+// than it should (IST is 30 min ahead of PKT) — e.g. an actual 4:00 PM PKT
+// match got stored/shown as 4:30 PM. This helper parses the string as IST
+// explicitly and returns the correct absolute UTC timestamp, so it then
+// displays correctly in PKT (or any other timezone) automatically.
+function _d11ParseCllIstToUtcMs(dateStr, timeStr) {
+  if (!dateStr) return NaN;
+  // Parse "21 Jul 2026" + "04:30 PM" as if it were UTC (Date.parse treats a
+  // string with no zone info as local, so we instead build it manually to
+  // avoid depending on the device's own timezone at all), then subtract the
+  // fixed +05:30 IST offset to get true UTC.
+  const asIfUtcMs = Date.parse(`${dateStr} ${timeStr} UTC`);
+  if (isNaN(asIfUtcMs)) return NaN;
+  const IST_OFFSET_MS = 5.5 * 3600 * 1000;
+  return asIfUtcMs - IST_OFFSET_MS;
+}
+
+
   if (!mt || !mt.match_id) return;
   const teamA = (mt.team_a || 'TBD').trim();
   const teamB = (mt.team_b || 'TBD').trim();
   const dateStr = (mt.date_wise||'').split(',')[0].trim(); // "21 Jul 2026"
   const timeStr = mt.match_time || '';
-  const startMs = (() => { const ms = new Date(`${dateStr} ${timeStr}`).getTime(); return isNaN(ms) ? Date.now() : ms; })();
+  const startMs = (() => { const ms = _d11ParseCllIstToUtcMs(dateStr, timeStr); return isNaN(ms) ? Date.now() : ms; })();
   const formatMap = { TEST: 'Test', ODI: 'ODI', T20: 'T20', T10: 'T10' };
   const format = formatMap[(mt.match_type||'').toUpperCase()] || 'T20';
 
@@ -11850,7 +11873,7 @@ async function d11ImportMatchFromLl2(mt) {
   const teamB = (mt.team_b || 'TBD').trim();
   const dateStr = (mt.date_wise||'').split(',')[0].trim();
   const timeStr = mt.match_time || '';
-  const startMs = (() => { const ms = new Date(`${dateStr} ${timeStr}`).getTime(); return isNaN(ms) ? Date.now() : ms; })();
+  const startMs = (() => { const ms = _d11ParseCllIstToUtcMs(dateStr, timeStr); return isNaN(ms) ? Date.now() : ms; })();
   const formatMap = { TEST: 'Test', ODI: 'ODI', T20: 'T20', T10: 'T10' };
   const format = formatMap[(mt.match_type||'').toUpperCase()] || 'T20';
 
@@ -13111,7 +13134,7 @@ async function d11ImportMatchFromLl3(mt) {
   const teamB = (mt.team_b || 'TBD').trim();
   const dateStr = (mt.date_wise||'').split(',')[0].trim();
   const timeStr = mt.match_time || '';
-  const startMs = (() => { const ms = new Date(`${dateStr} ${timeStr}`).getTime(); return isNaN(ms) ? Date.now() : ms; })();
+  const startMs = (() => { const ms = _d11ParseCllIstToUtcMs(dateStr, timeStr); return isNaN(ms) ? Date.now() : ms; })();
   const formatMap = { TEST: 'Test', ODI: 'ODI', T20: 'T20', T10: 'T10' };
   const format = formatMap[(mt.match_type||'').toUpperCase()] || 'T20';
 
@@ -14581,9 +14604,9 @@ function d11LinkLiveMatch(matchId, cricbuzzMatchId, team1Id, team2Id, seriesId) 
   render();
   // Auto-fetch the squad right away so the admin doesn't need a separate
   // manual "📥 Fetch Squad" tap for every match — linking and squad-pull are
-  // now one step. Sync Now / Fetch Final Result remain manual/admin-triggered
-  // (Fetch Final Result also has its own deadline-based auto-scheduler, see
-  // d11AutoFetchFinalResult). Always attempted now — even when team1Id/
+  // now one step. Sync Now / Fetch Final Result remain fully manual,
+  // admin-triggered actions (no background auto-scheduler for either).
+  // Always attempted now — even when team1Id/
   // team2Id weren't passed in (e.g. schedule-based import didn't have
   // them), d11FetchSquadFromCricbuzz has its own one-call fallback to
   // derive them, so gating the call itself here would skip that recovery.
@@ -14815,90 +14838,16 @@ async function d11AutoCheckPlayingXI() {
   }
 }
 
-// ── Auto Fetch Final Result (post-deadline scheduler) ──────────────────────
-// Runs off the same 3-min background refresh loop as d11AutoCheckPlayingXI —
-// works even if the admin's own app is closed, as long as ANY signed-in
-// user has the app open somewhere (that tab's background loop does the
-// check on everyone's behalf). For every linked, not-yet-scored match, once
-// enough time has passed after the deadline for the match to plausibly have
-// finished (T20 → 5.5 hours, ODI/other → 12 hours), it silently calls the
-// same sync used by "🏁 Fetch Final Result" to pull the scorecard — ONCE.
-// If Cricbuzz confirms the match is finished, player points get applied and
-// d11m.scored is set — same as the manual button — but this does NOT run
-// payouts/prize distribution. The admin still needs to tap "Finalize
-// Scoring" / "Run All Payouts" themselves before any money moves.
-// If this one attempt doesn't find a finished result (match ran long, rain
-// delay, etc.), it does NOT keep retrying on its own — that would mean
-// polling Cricbuzz indefinitely for a match that might never resolve
-// cleanly. Instead d11m.autoFinalResultTried is set so we never try again
-// automatically, and the admin just taps "🏁 Fetch Final Result" manually
-// once the match has actually finished.
-async function d11AutoFetchFinalResult() {
-  const now = Date.now();
-  for (const m of Object.values(matches)) {
-    const d11m = dream11Matches[m.id];
-    if (!d11m) continue;
-    // A match can be linked via any ONE of 6 providers — Cricbuzz
-    // (cricketDataMatchId), Cricket Live Line (cllMatchId), LiveLine2
-    // (ll2MatchId), LiveLine3 (ll3MatchId), CB2 (cb2MatchId), or ESPN
-    // (espnMatchId). This used to only check cricketDataMatchId, so any
-    // match linked through the other providers was silently skipped
-    // forever — its winner/result never got picked up automatically, no
-    // matter how long after the deadline, and the admin had to notice and
-    // fetch it manually every time.
-    let syncFn = null;
-    if (m.cricketDataMatchId) syncFn = d11SyncLiveMatch;
-    else if (m.cllMatchId) syncFn = d11SyncLiveMatchCll;
-    else if (m.ll2MatchId) syncFn = d11SyncLiveMatchLl2;
-    else if (m.ll3MatchId) syncFn = d11SyncLiveMatchLl3;
-    else if (m.cb2MatchId) syncFn = d11SyncLiveMatchCb2;
-    else if (m.espnMatchId) syncFn = d11SyncLiveMatchEspn;
-    if (!syncFn) continue; // not linked to any provider yet
-    if (d11m.scored) continue;
-    if (d11m.autoFinalResultTried) continue; // one-shot — already attempted, admin takes over from here
-    if (!m.deadline) continue;
-    const deadlineMs = new Date(m.deadline).getTime();
-    if (isNaN(deadlineMs)) continue;
-    const waitHours = (m.format === 'T20') ? 5.5 : 12; // ODI/Test/other → 12h
-    const readyAt = deadlineMs + waitHours * 3600 * 1000;
-    if (now < readyAt) continue;
-    // Safety upper-bound: if the result window has been open for a LONG
-    // time (72h+) without anyone's tab ever having been open to fire this,
-    // don't fire it now either. Without this, every old/stale linked match
-    // sitting around unscored fires its one-shot check simultaneously the
-    // moment any tab opens — which is exactly what spiked the Cricbuzz call
-    // count even though no new match was linked. Past this point the admin
-    // is expected to fetch the result manually if/when needed.
-    if (now > readyAt + 72 * 3600 * 1000) {
-      d11m.autoFinalResultTried = true; // mark so we don't even re-check this condition every loop
-      await _saveDream11MatchToFirestore(m.id, d11m);
-      continue;
-    }
-    // Mark as tried FIRST (before the async call) so a second tab running
-    // this same loop a few seconds later doesn't double-fire while the
-    // first call is still in flight.
-    d11m.autoFinalResultTried = true;
-    d11m.autoFinalResultTriedAt = getDateTime();
-    await _saveDream11MatchToFirestore(m.id, d11m);
-    try {
-      await syncFn(m.id, /*showToast=*/false);
-      // One provider's single attempt might land mid-innings-break or hit a
-      // transient error and not detect "finished" — but the two-in-a-row
-      // _d11PendingFinish confirmation guard (see d11SyncLiveMatchCll etc.)
-      // means a single silent call here can only ever ARM that guard, never
-      // confirm it, since the loop only runs this match once. Immediately
-      // firing a second silent call lets a genuinely-finished match confirm
-      // and lock in the same auto-run instead of silently requiring a human
-      // to happen to tap Sync Now twice afterward.
-      if (!d11m.scored) {
-        await _d11Sleep(1500);
-        await syncFn(m.id, /*showToast=*/false);
-      }
-    } catch (e) {
-      console.warn('Auto final-result fetch failed for', m.id, e.message);
-    }
-  }
-}
+// ── Auto Fetch Final Result — REMOVED ───────────────────────────────────────
+// This background scheduler used to silently call the live-score API for
+// every linked, unscored match a few hours after its deadline, to auto-fill
+// the final result without an admin tapping the button. It was removed on
+// request to stop that silent API usage entirely — the final result is now
+// ALWAYS fetched manually by the admin tapping "🏁 Fetch Final Result" on
+// the match's linked-provider panel. Nothing else changed: Playing XI
+// auto-check (d11AutoCheckPlayingXI) still runs as before; only this
+// specific scheduler was taken out.
+
 
 async function d11CheckPlayingXIAnnounced(matchId, silent) {
   const notify = silent ? (()=>{}) : showNotif;
@@ -29023,7 +28972,9 @@ if ('serviceWorker' in navigator) {
       currentUser={...users[currentUser.email],email:currentUser.email};
     render();
     if (typeof d11AutoCheckPlayingXI === 'function') d11AutoCheckPlayingXI().catch(function(){});
-    if (typeof d11AutoFetchFinalResult === 'function') d11AutoFetchFinalResult().catch(function(){});
+    // d11AutoFetchFinalResult removed — final result is now always fetched
+    // manually by the admin via "🏁 Fetch Final Result", to stop this
+    // scheduler's silent API usage entirely.
   },5*60*1000);
 })();
 
@@ -29121,7 +29072,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.9.16";
+const APP_VERSION = "4.9.17";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
