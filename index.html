@@ -6058,10 +6058,15 @@ function renderProfile() {
       <label for="dp-upload-input" style="position:absolute;bottom:0;right:0;width:24px;height:24px;background:#f97316;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:13px;border:2px solid var(--bg)" title="Change DP">📷</label>
       <input id="dp-upload-input" type="file" accept="image/*" style="display:none" onchange="uploadUserDp(this)" />
     </div>
-    <div class="display" style="font-size:19px">${u.name}</div>
-    <div style="font-size:12px;color:var(--dim);margin-top:2px">${u.email}</div>
-    <div style="font-size:11.5px;color:var(--orange);margin-top:4px;font-family:monospace;letter-spacing:0.5px">🆔 ${u.idNumber || '—'}</div>
-    <div style="margin-top:10px"><span class="pill pill-points">🏅 Rank #${myRank||'-'}</span></div>
+    <div class="display" style="font-size:19px;display:flex;align-items:center;justify-content:center;gap:6px" id="profile-name-display">
+      <span id="profile-name-text">${u.name}</span>
+      <span onclick="profileNameEditToggle(true)" style="cursor:pointer;font-size:14px;opacity:0.75" title="Change name">✏️</span>
+    </div>
+    <div id="profile-name-edit-row" style="display:none;align-items:center;justify-content:center;gap:6px;margin-top:4px">
+      <input id="profile-name-input" class="input" value="${u.name}" maxlength="30" style="max-width:200px;text-align:center;font-size:14px;padding:7px 10px" onkeydown="if(event.key==='Enter')saveProfileName();if(event.key==='Escape')profileNameEditToggle(false)" />
+      <button class="btn-primary" style="width:auto;padding:8px 12px;font-size:12px" onclick="saveProfileName()">Save</button>
+      <button class="btn-secondary" style="width:auto;padding:8px 12px;font-size:12px" onclick="profileNameEditToggle(false)">Cancel</button>
+    </div>
   </div>
 
   <div class="card mb14" style="display:flex;align-items:center;justify-content:space-between">
@@ -6192,6 +6197,36 @@ function renderD11MatchHistoryList(history) {
 
 // ── User search → view another player's public profile ────────
 // ── Upload / change profile picture ──
+function profileNameEditToggle(show) {
+  const displayEl = document.getElementById('profile-name-display');
+  const editEl = document.getElementById('profile-name-edit-row');
+  if (!displayEl || !editEl) return;
+  displayEl.style.display = show ? 'none' : 'flex';
+  editEl.style.display = show ? 'flex' : 'none';
+  if (show) {
+    const input = document.getElementById('profile-name-input');
+    if (input) { input.focus(); input.select(); }
+  }
+}
+
+async function saveProfileName() {
+  const input = document.getElementById('profile-name-input');
+  if (!input) return;
+  const newName = input.value.trim();
+  if (!newName) return showNotif('Naam khali nahi ho sakta', 'error');
+  if (newName.length > 30) return showNotif('Naam 30 characters se zyada nahi ho sakta', 'error');
+  const u = users[currentUser.email];
+  if (!u) return;
+  const oldName = u.name;
+  if (newName === oldName) { profileNameEditToggle(false); return; }
+  u.name = newName;
+  currentUser.name = newName;
+  await _saveUserToFirestore(currentUser.email, u);
+  try { localStorage.setItem('pp_users_cache', JSON.stringify(users)); } catch(e){}
+  render();
+  showNotif('✅ Naam update ho gaya!');
+}
+
 async function uploadUserDp(input) {
   const file = input.files[0];
   if (!file) return;
@@ -6940,8 +6975,8 @@ const D11_SCORING = {
   Test: {
     label: 'Test',
     perRun: 1,
-    boundary4Bonus: 4,
-    boundary6Bonus: 6,
+    boundary4Bonus: 1,
+    boundary6Bonus: 2,
     runMilestones: [ { min:50, pts:4 }, { min:100, pts:8 } ],
     duckPenalty: -4,
     srBands: null,
@@ -30137,7 +30172,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.20.1";
+const APP_VERSION = "4.21.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
