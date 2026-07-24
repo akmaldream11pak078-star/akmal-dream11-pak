@@ -6834,6 +6834,7 @@ const D11_SCORING = {
     perRun: 1,
     boundary4Bonus: 4,
     boundary6Bonus: 6,
+    dotBallPoints: 1,
     runMilestones: [ { min:25, pts:4 }, { min:50, pts:8 }, { min:75, pts:12 }, { min:100, pts:16 } ],
     duckPenalty: -2,
     srMinRuns: 20,
@@ -6935,6 +6936,7 @@ const D11_SCORING = {
     perRun: 1,
     boundary4Bonus: 4,
     boundary6Bonus: 6,
+    dotBallPoints: 1,
     runMilestones: [ { min:30, pts:5 }, { min:50, pts:10 }, { min:100, pts:20 } ],
     duckPenalty: -2,
     srBands: null,
@@ -6996,6 +6998,7 @@ function renderD11PointsTable(fmt) {
     ${hdr('🎳 BOWLING')}
     ${row('Wicket (except run-out)', s.perWicket)}
     ${s.maidenOverBonus ? row('Maiden Over Bonus', s.maidenOverBonus) : ''}
+    ${s.dotBallPoints ? row('Dot Ball', s.dotBallPoints) : ''}
     ${row('LBW / Bowled Bonus', s.lbwBowledBonus)}
     ${wicketHaulRows}
     ${erRows}
@@ -7027,6 +7030,7 @@ function calcDream11PlayerPointsBreakdown(stats, matchId) {
   const sixes = Number(stats.sixes)||0;
   const wickets = Number(stats.wickets)||0;
   const maidens = Number(stats.maidens)||0;
+  const dotBalls = Number(stats.dotBalls)||0;
   const catches = Number(stats.catches)||0;
   const stumpings = Number(stats.stumpings)||0;
   const runOuts = Number(stats.runOuts)||0;
@@ -7069,6 +7073,7 @@ function calcDream11PlayerPointsBreakdown(stats, matchId) {
   rows.push({ label: 'Wickets', actual: wickets || '-', points: Math.round(wickets * s.perWicket) });
   rows.push({ label: 'LBW/Bowled Bonus', actual: (Number(stats.lbwBowled)||0) || '-', points: Math.round((Number(stats.lbwBowled)||0) * (s.lbwBowledBonus||0)) });
   rows.push({ label: 'Maiden Over', actual: maidens || '-', points: Math.round(maidens * (s.maidenOverBonus||0)) });
+  rows.push({ label: 'Dot Ball', actual: dotBalls || '-', points: Math.round(dotBalls * (s.dotBallPoints||0)) });
 
   // Wicket haul bonus — only highest tier counts
   let bestHaulPts = 0;
@@ -7161,6 +7166,7 @@ function calcDream11PlayerPoints(stats, matchId) {
   const sixes = Number(stats.sixes)||0;
   const wickets = Number(stats.wickets)||0;
   const maidens = Number(stats.maidens)||0;
+  const dotBalls = Number(stats.dotBalls)||0;
   const catches = Number(stats.catches)||0;
   const stumpings = Number(stats.stumpings)||0;
   const runOuts = Number(stats.runOuts)||0;
@@ -7204,9 +7210,11 @@ function calcDream11PlayerPoints(stats, matchId) {
   // LBW/Bowled dismissal bonus — admin enters count of wickets taken via LBW or Bowled
   const lbwBowled = Number(stats.lbwBowled)||0;
   pts += lbwBowled * (s.lbwBowledBonus || 0);
-  // Note: dot-ball bonus requires ball-by-ball data that this app does not
-  // currently track per player, so it is not applied here even though it
-  // is part of the official My11Circle system (see Points System info card).
+  // Dot-ball bonus — some live providers report a per-bowler dot_ball count
+  // (balls where no run was scored off the bat and no wicket fell) which we
+  // now capture into stats.dotBalls via _d11ApplyLiveBowlingRow; award it
+  // here at the configured per-format rate (My11Circle: +1 per dot ball).
+  pts += dotBalls * (s.dotBallPoints || 0);
 
   // Economy Rate (only if enough overs bowled)
   const overs = oversBowled;
@@ -12577,7 +12585,7 @@ async function d11SyncLiveMatchCll(matchId, showToast) {
         const mapped = {
           name: bl.name,
           overs: bl.over, wickets: bl.wicket, maidens: bl.maiden,
-          runs: bl.run,
+          runs: bl.run, dotBalls: bl.dot_ball,
         };
         if (_d11ApplyLiveBowlingRow(d11m, mapped)) bowlersApplied++;
       });
@@ -12826,7 +12834,7 @@ async function d11SyncLiveMatchLl2(matchId, showToast) {
         const mapped = {
           name: bl.name,
           overs: bl.over, wickets: bl.wicket, maidens: bl.maiden,
-          runs: bl.run,
+          runs: bl.run, dotBalls: bl.dot_ball,
         };
         if (_d11ApplyLiveBowlingRow(d11m, mapped)) bowlersApplied++;
       });
@@ -13494,7 +13502,7 @@ async function d11SyncLiveMatchLl3(matchId, showToast) {
         const mapped = {
           name: bl.name,
           overs: bl.over, wickets: bl.wicket, maidens: bl.maiden,
-          runs: bl.run,
+          runs: bl.run, dotBalls: bl.dot_ball,
         };
         if (_d11ApplyLiveBowlingRow(d11m, mapped)) bowlersApplied++;
       });
@@ -15421,9 +15429,21 @@ function _d11ApplyLiveBowlingRow(d11m, bl) {
   // shouldn't be marked Playing XI just because their name is on the squad
   // list Cricbuzz attaches to the innings.
   if (oversBowled === 0) return false;
+  // Dot balls: ONLY trust the explicit `dotBalls` field, which the Cricket
+  // Live Line / Cricket Live Line 2 / Cricket Live Line 3 sync functions map
+  // in themselves from their provider's `dot_ball` field before calling
+  // here. Deliberately do NOT read bl.dots / bl.dot_ball directly in this
+  // shared function — the Cricbuzz (Auto-Import) and Cricbuzz No 2 feeds
+  // also expose a `dots` field, but it has been confirmed to always report
+  // 0 regardless of the real count, so trusting it would silently record
+  // wrong (always-zero) dot-ball points for those two sources. Any call
+  // site that doesn't explicitly pass `dotBalls` (i.e. both Cricbuzz
+  // sources) simply won't affect the stored count at all.
+  const dotBalls = bl.dotBalls !== undefined ? (Number(bl.dotBalls)||0) : (p.stats?.dotBalls || 0);
   p.stats = { ...(p.stats||{}),
     wickets: Number(bl.wickets)||0, maidens: Number(bl.maidens)||0,
     oversBowled, runsGiven: Number(bl.runs ?? bl.runsConceded)||0,
+    dotBalls,
     isPlayingXI: true
   };
   // Same fix as batting above — keep the top-level flag in sync so the UI
@@ -18774,58 +18794,57 @@ function shareD11MatchWhatsApp(matchId) {
   const h2hWin = Math.round(h2hFee*2*0.9);
   const siteLink = typeof APP_URL!=='undefined'?APP_URL:'https://akmaldream11pak078-star.github.io/akmal-dream11-pak/';
   const msg =
-`🔥🏏 *Pak 🇵🇰Dream11* 🏏🔥
+`🏆 *Pak 🇵🇰Dream11* 🏆
 ━━━━━━━━━━━━━━━━━━━━━━
-⚡ *NAYA MATCH LIVE HO GAYA!* ⚡
+⚡ *NEW MATCH IS NOW LIVE* ⚡
 
 🆚 *${teamA}  VS  ${teamB}*
 🎯 Format: *${format}*
 ⏰ Deadline: *${deadline} PKT*
 
 ━━━━━━━━━━━━━━━━━━━━━━
-🏆 *CHAAR TARAH KE CONTESTS!*
+🏅 *FOUR CONTEST FORMATS*
 ━━━━━━━━━━━━━━━━━━━━━━
 
 🎯 *MEGA CONTEST* — Rs ${megaFee} Entry
-   💰 Jitne log join karein, utna bada Prize Pool!
-   🥇 Top 3 players mein prize distribute hoga
-   📊 ${megaCount} log abhi tak join kar chuke hain!
+   💰 Prize pool grows with every entry
+   🥇 Top 3 finishers share the rewards
+   📊 ${megaCount} players have joined so far
 
 🔸 *MINI MEGA CONTEST* — Rs ${miniMegaFee} Entry
-   💰 Mega jese hi rules, chhota entry fee!
-   🥇 Top players mein prize distribute hoga
-   📊 ${miniMegaCount} log abhi tak join kar chuke hain!
+   💰 Same format, smaller entry fee
+   🥇 Top finishers earn rewards
+   📊 ${miniMegaCount} players have joined so far
 
-🎁 *FREE CONTEST* — Bilkul FREE!
-   ✅ Koi entry fee nahi — sirf apni team banao
-   🏅 Admin winners ko reward deta hai
-   🎊 ${freeCount} log already join kar chuke hain!
+🎁 *FREE CONTEST* — No Entry Fee
+   ✅ Build your team, no cost to enter
+   🏅 Winners are rewarded by the admin
+   🎊 ${freeCount} players already in
 
-🥊 *H2H (Head to Head)* — Rs ${h2hFee} Entry
-   ⚔️ Sirf 1 dushman ke saath maidan!
-   💵 Jeeto aur Rs ${h2hWin} cash kamao!
-   🤝 Draw hone par full refund
+🥊 *HEAD TO HEAD* — Rs ${h2hFee} Entry
+   ⚔️ A direct one-on-one matchup
+   💵 Win and take Rs ${h2hWin}
+   🤝 A draw means a full refund
 
-🛠️ *APNA KHUD KA CONTEST BANAO!*
-   👑 Custom entry fee set karo
-   📨 Code dosto ko bhejo
-   🔑 Code se koi bhi join kar sakta hai!
+🛠️ *CREATE YOUR OWN CONTEST*
+   👑 Set your own entry fee
+   📨 Share the code with friends
+   🔑 Anyone with the code can join
 
 ━━━━━━━━━━━━━━━━━━━━━━
-🚀 *ABHI JOIN KARO — DEADLINE MAT CHHODNA!*
+🚀 *JOIN NOW — DON'T MISS THE DEADLINE*
 
 🌐 ${siteLink}
 
-📲 Signup ➜ Team banao ➜ Contest join karo ➜ *Paisa Kamao!* 💸
-_Pak 🇵🇰Dream11 — Pakistan ka #1 Fantasy Cricket Platform_ 🇵🇰🏆`;
+📲 Sign up ➜ Build your team ➜ Join a contest ➜ *Win Rewards* 🏆
+_Pak 🇵🇰Dream11 — Pakistan's #1 Fantasy Cricket Platform_ 🇵🇰`;
   window.open('https://wa.me/?text='+encodeURIComponent(msg),'_blank');
 }
 
 // ── Custom Contest Invite IMAGE — drawn client-side, shown when the
 // creator shares their newly-made "Create Your Own Dream11 Contest" on
-// WhatsApp. Shows creator name/ID, match details, entry fee, deadline, and
-// the join code, with the same "attitude" gradient styling used by the
-// contest-result share images (see d11GenerateContestResultImageBlob). ──
+// WhatsApp. Premium dark-navy + gold design — shows creator name/ID, match
+// details, entry fee, deadline, and the join code. ──
 async function d11GenerateCustomContestInviteImageBlob(ccId) {
   const cc = d11CustomContests[ccId];
   if (!cc) { showNotif('Contest not found', 'error'); return null; }
@@ -18840,50 +18859,54 @@ async function d11GenerateCustomContestInviteImageBlob(ccId) {
   const ctx = canvas.getContext('2d');
   ctx.scale(scale, scale);
 
-  // ── Colorful attitude gradient background ──
+  // ── Premium dark-navy gradient background ──
   const bgGrad = ctx.createLinearGradient(0, 0, W, H);
-  bgGrad.addColorStop(0, '#1e0a3c');
-  bgGrad.addColorStop(0.5, '#4c1d95');
-  bgGrad.addColorStop(1, '#0f172a');
+  bgGrad.addColorStop(0, '#0a0e1a');
+  bgGrad.addColorStop(0.5, '#0f1729');
+  bgGrad.addColorStop(1, '#0a0e1a');
   ctx.fillStyle = bgGrad;
   ctx.fillRect(0, 0, W, H);
 
-  // Header banner
+  // Subtle gold accent line at very top
+  ctx.fillStyle = '#d4af37';
+  ctx.fillRect(0, 0, W, 3);
+
+  // Header banner — deep navy with gold text (understated luxury, not loud)
   const headGrad = ctx.createLinearGradient(0, 0, W, 0);
-  headGrad.addColorStop(0, '#a855f7');
-  headGrad.addColorStop(0.5, '#7c3aed');
-  headGrad.addColorStop(1, '#4f46e5');
+  headGrad.addColorStop(0, '#111827');
+  headGrad.addColorStop(0.5, '#1a2236');
+  headGrad.addColorStop(1, '#111827');
   ctx.fillStyle = headGrad;
-  ctx.fillRect(0, 0, W, 130);
+  ctx.fillRect(0, 3, W, 127);
 
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#fff';
-  ctx.font = '900 32px Arial, sans-serif';
-  ctx.fillText('🛠️ MY DREAM11 CONTEST 🛠️', W/2, 52);
-  ctx.font = '800 20px Arial, sans-serif';
-  ctx.fillStyle = '#ede9fe';
-  ctx.fillText('Aake dikhao apna dum — join karo agar himmat hai! 😎', W/2, 84);
+  ctx.fillStyle = '#d4af37';
+  ctx.font = '900 30px Georgia, "Times New Roman", serif';
+  ctx.fillText('PAK 🇵🇰 DREAM11', W/2, 50);
+  ctx.font = '600 16px Arial, sans-serif';
+  ctx.fillStyle = '#94a3b8';
+  ctx.fillText('PRIVATE CONTEST INVITATION', W/2, 78);
   ctx.font = '700 15px Arial, sans-serif';
-  ctx.fillStyle = '#0f172a';
-  ctx.fillText(`${m?.teamA||'Team A'}  vs  ${m?.teamB||'Team B'}`, W/2, 112);
+  ctx.fillStyle = '#e2e8f0';
+  ctx.fillText(`${m?.teamA||'Team A'}  •  ${m?.teamB||'Team B'}`, W/2, 108);
 
   let y = 175;
 
   // Creator card
-  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  ctx.fillStyle = 'rgba(212,175,55,0.06)';
   _roundRect(ctx, PAD, y-32, W-PAD*2, 74, 14); ctx.fill();
-  ctx.strokeStyle = '#c084fc'; ctx.lineWidth = 1.5;
+  ctx.strokeStyle = 'rgba(212,175,55,0.4)'; ctx.lineWidth = 1;
   _roundRect(ctx, PAD, y-32, W-PAD*2, 74, 14); ctx.stroke();
 
   ctx.textAlign = 'left';
-  ctx.fillStyle = '#c4b5fd';
-  ctx.font = '700 12px Arial, sans-serif';
-  ctx.fillText('CONTEST CREATED BY', PAD+20, y-6);
-  ctx.fillStyle = '#fff';
+  ctx.fillStyle = '#d4af37';
+  ctx.font = '700 11px Arial, sans-serif';
+  ctx.fillText('HOSTED BY', PAD+20, y-6);
+  ctx.fillStyle = '#f8fafc';
   ctx.font = '800 20px Arial, sans-serif';
   ctx.fillText(creator?.name || 'Unknown', PAD+20, y+20);
   ctx.textAlign = 'right';
-  ctx.fillStyle = '#94a3b8';
+  ctx.fillStyle = '#64748b';
   ctx.font = '600 13px Arial, sans-serif';
   ctx.fillText(creator?.idNumber ? `ID: ${creator.idNumber}` : '', W-PAD-20, y+20);
 
@@ -18891,26 +18914,26 @@ async function d11GenerateCustomContestInviteImageBlob(ccId) {
 
   // Contest detail rows — icon, label, value
   const detailRows = [
-    ['💰', 'Entry Fee', cc.entryFee > 0 ? `Rs ${cc.entryFee}` : 'FREE'],
+    ['💰', 'Entry Fee', cc.entryFee > 0 ? `Rs ${cc.entryFee}` : 'Complimentary'],
     ['📋', 'Match Format', m?.format || 'T20'],
     ['⏰', 'Deadline', m?.deadline ? pkDateTime(m.deadline) : 'Not set'],
     ['👥', 'Max Players', `Up to ${D11_CUSTOM_CONTEST_MAX_PLAYERS}`],
-    ['🔑', 'Join Code', cc.code],
+    ['🔑', 'Access Code', cc.code],
   ];
   const rowH2 = 62;
   detailRows.forEach(([icon, label, value], i) => {
-    const rowBg = i % 2 === 0 ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)';
+    const rowBg = i % 2 === 0 ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.015)';
     ctx.fillStyle = rowBg;
     _roundRect(ctx, PAD, y, W-PAD*2, rowH2-8, 10); ctx.fill();
 
     ctx.textAlign = 'left';
-    ctx.font = '24px Arial, sans-serif';
+    ctx.font = '22px Arial, sans-serif';
     ctx.fillText(icon, PAD+16, y+38);
-    ctx.fillStyle = '#94a3b8';
-    ctx.font = '700 13px Arial, sans-serif';
+    ctx.fillStyle = '#64748b';
+    ctx.font = '700 12px Arial, sans-serif';
     ctx.fillText(label.toUpperCase(), PAD+58, y+24);
-    ctx.fillStyle = label === 'Join Code' ? '#fde68a' : '#fff';
-    ctx.font = label === 'Join Code' ? '900 24px Arial, sans-serif' : '800 20px Arial, sans-serif';
+    ctx.fillStyle = label === 'Access Code' ? '#d4af37' : '#f8fafc';
+    ctx.font = label === 'Access Code' ? '900 24px Arial, sans-serif' : '800 20px Arial, sans-serif';
     ctx.fillText(String(value), PAD+58, y+50);
 
     y += rowH2;
@@ -18919,10 +18942,10 @@ async function d11GenerateCustomContestInviteImageBlob(ccId) {
   // Footer
   y += 24;
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#e879f9';
-  ctx.font = '700 15px Arial, sans-serif';
-  ctx.fillText('Sasta entry, bada maza — miss mat karo! 🔥', W/2, y);
-  ctx.fillStyle = '#94a3b8';
+  ctx.fillStyle = '#d4af37';
+  ctx.font = '700 14px Arial, sans-serif';
+  ctx.fillText('An exclusive contest — limited seats available', W/2, y);
+  ctx.fillStyle = '#475569';
   ctx.font = '400 12px Arial, sans-serif';
   ctx.fillText('Pak 🇵🇰Dream11 — ' + (typeof APP_URL!=='undefined'?APP_URL:''), W/2, y+22);
 
@@ -18937,7 +18960,7 @@ async function shareD11CustomContestWhatsApp(ccId) {
     if (!blob) return;
 
     const fileName = `Dream11_Contest_Invite_${cc.code}.png`;
-    const shareText = `🛠️ My Dream11 Contest — Code: ${cc.code} 🏆`;
+    const shareText = `🏆 Dream11 Contest Invitation — Code: ${cc.code}`;
     const file = new File([blob], fileName, { type: 'image/png' });
 
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -18947,8 +18970,8 @@ async function shareD11CustomContestWhatsApp(ccId) {
     }
 
     // Fallback: download image + open WhatsApp with text so user can attach manually
-    const entryText = cc.entryFee > 0 ? `💰 Entry Fee: Rs ${cc.entryFee}` : '🆓 Free to Join';
-    const msg = `🏆 *Dream11 Contest Invite!*\n\nMaine apna Dream11 contest banaya hai — join karo!\n\n${entryText}\n\n🔑 Contest Code: *${cc.code}*\n\n🔗 Official Website:\n${APP_URL}\n\n_Website per signup/login karo, contest code daalo aur apni Dream11 team banao! Image attach hai — download ho chuki hai 🖼️_`;
+    const entryText = cc.entryFee > 0 ? `💰 Entry Fee: Rs ${cc.entryFee}` : '🆓 Complimentary Entry';
+    const msg = `🏆 *Dream11 — Private Contest Invitation*\n\nYou're invited to join an exclusive contest.\n\n${entryText}\n\n🔑 Access Code: *${cc.code}*\n\n🔗 Official Website:\n${APP_URL}\n\n_Sign up, enter the code above, and build your Dream11 team. Invitation image attached below 🖼️_`;
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = fileName;
@@ -19003,27 +19026,33 @@ async function d11GenerateResultImageBlob(matchId) {
   const ctx = canvas.getContext('2d');
   ctx.scale(scale, scale);
 
-  // Colors
-  const dark = '#0f172a', gold = '#fbbf24', green = '#22c55e', dim = '#64748b', blue = '#2563eb', lightBg = '#f8fafc', cardBg='#ffffff';
+  // Premium palette — dark navy canvas, gold accents
+  const dark = '#f8fafc', gold = '#d4af37', green = '#22c55e', dim = '#64748b', blue = '#60a5fa', navy = '#0a0e1a', cardBg='#111827';
 
   // Background
-  ctx.fillStyle = lightBg;
+  ctx.fillStyle = navy;
   ctx.fillRect(0, 0, W, H);
 
+  // Thin gold top accent
+  ctx.fillStyle = gold;
+  ctx.fillRect(0, 0, W, 3);
+
   // ── Header banner ──
-  ctx.fillStyle = dark;
-  ctx.fillRect(0, 0, W, 150);
-  ctx.fillStyle = gold;
-  ctx.fillRect(0, 146, W, 6);
+  const headGrad = ctx.createLinearGradient(0, 0, W, 0);
+  headGrad.addColorStop(0, '#111827');
+  headGrad.addColorStop(0.5, '#1a2236');
+  headGrad.addColorStop(1, '#111827');
+  ctx.fillStyle = headGrad;
+  ctx.fillRect(0, 3, W, 147);
   ctx.textAlign = 'left';
-  ctx.fillStyle = '#ffffff';
-  ctx.font = '800 34px Arial, sans-serif';
-  ctx.fillText('🏏 Pak 🇵🇰Dream11', PAD, 58);
   ctx.fillStyle = gold;
-  ctx.font = '700 20px Arial, sans-serif';
-  ctx.fillText('Match Result & Leaderboard', PAD, 92);
-  ctx.fillStyle = '#cbd5e1';
-  ctx.font = '400 15px Arial, sans-serif';
+  ctx.font = '900 30px Georgia, "Times New Roman", serif';
+  ctx.fillText('PAK 🇵🇰 DREAM11', PAD, 56);
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '600 18px Arial, sans-serif';
+  ctx.fillText('OFFICIAL MATCH RESULT & LEADERBOARD', PAD, 90);
+  ctx.fillStyle = '#64748b';
+  ctx.font = '400 14px Arial, sans-serif';
   ctx.fillText(`Generated: ${pkDateTime(Date.now())} PKT`, PAD, 120);
 
   y = 190;
@@ -19045,14 +19074,14 @@ async function d11GenerateResultImageBlob(matchId) {
     ctx.fillText(m.resultText, W/2, y);
     y += 22;
   }
-  ctx.strokeStyle = '#e2e8f0';
+  ctx.strokeStyle = 'rgba(255,255,255,0.1)';
   ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W-PAD, y); ctx.stroke();
   y += 34;
 
   // ── My Team Result ──
   if (myTeam) {
     ctx.textAlign = 'left';
-    ctx.fillStyle = '#f3f4f6';
+    ctx.fillStyle = 'rgba(212,175,55,0.06)';
     _roundRect(ctx, PAD, y-24, W-PAD*2, 44, 8); ctx.fill();
     ctx.fillStyle = dark;
     ctx.font = '700 19px Arial, sans-serif';
@@ -19073,7 +19102,7 @@ async function d11GenerateResultImageBlob(matchId) {
     ctx.fillText('MULT', PAD+660, y);
     ctx.fillText('FINAL', W-PAD-14, y);
     y += 8;
-    ctx.strokeStyle = '#e5e7eb';
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
     ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W-PAD, y); ctx.stroke();
     y += 22;
 
@@ -19098,7 +19127,7 @@ async function d11GenerateResultImageBlob(matchId) {
       y += 40;
     });
     y += 6;
-    ctx.strokeStyle = '#e2e8f0';
+    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
     ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W-PAD, y); ctx.stroke();
     y += 36;
   }
@@ -19117,18 +19146,18 @@ async function d11GenerateResultImageBlob(matchId) {
   ctx.textAlign = 'right';
   ctx.fillText('POINTS', W-PAD-14, y);
   y += 8;
-  ctx.strokeStyle = '#e5e7eb';
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
   ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W-PAD, y); ctx.stroke();
   y += 26;
 
   topN.forEach((t, i) => {
     const u = users[t.userEmail];
     const isMe = t.userEmail === currentUser.email;
-    if (i === 0) { ctx.fillStyle = '#fff7e0'; ctx.fillRect(PAD, y-22, W-PAD*2, 34); }
-    else if (isMe) { ctx.fillStyle = '#eff6ff'; ctx.fillRect(PAD, y-22, W-PAD*2, 34); }
+    if (i === 0) { ctx.fillStyle = 'rgba(212,175,55,0.1)'; ctx.fillRect(PAD, y-22, W-PAD*2, 34); }
+    else if (isMe) { ctx.fillStyle = 'rgba(96,165,250,0.1)'; ctx.fillRect(PAD, y-22, W-PAD*2, 34); }
 
     ctx.textAlign = 'left';
-    ctx.fillStyle = i===0?gold:i===1?'#94a3b8':i===2?'#d97706':dark;
+    ctx.fillStyle = i===0?gold:i===1?'#cbd5e1':i===2?'#d97706':dark;
     ctx.font = i<3 ? '800 17px Arial, sans-serif' : '600 16px Arial, sans-serif';
     ctx.fillText(`#${i+1}`, PAD+14, y);
     ctx.fillStyle = dark;
@@ -19161,8 +19190,8 @@ function _roundRect(ctx, x, y, w, h, r) {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  Per-Contest "Masti" Result Share — har contest (Mega, Mini Mega,
-//  H2H, Free, Custom) ka apna alag, full-attitude 🤪 colorful IMAGE
+//  Per-Contest Result Share — har contest (Mega, Mini Mega,
+//  H2H, Free, Custom) ka apna alag, premium-styled IMAGE
 //  result: sab participants (name + points), ranked. Usable by both
 //  the user (their own contests) and Admin (any contest, any user).
 // ══════════════════════════════════════════════════════════════
@@ -19173,21 +19202,27 @@ function _d11GetContestParticipantsRanked(matchId, contestType, contestRef) {
   if (!d11m) return null;
   let list = [];
   let label = 'Contest';
+  let entryFee = 0;
+  let pool = 0;
 
-  if (contestType === 'mega') { list = d11m.megaParticipants || []; label = 'Mega Contest 🎯'; }
-  else if (contestType === 'minimega') { list = d11m.miniMegaParticipants || []; label = 'Mini Mega Contest 🔸'; }
-  else if (contestType === 'free') { list = d11m.freeParticipants || []; label = 'Free Contest 🎁'; }
+  if (contestType === 'mega') { list = d11m.megaParticipants || []; label = 'Mega Contest 🎯'; entryFee = D11_MEGA_ENTRY_FEE; pool = d11m.megaPool || 0; }
+  else if (contestType === 'minimega') { list = d11m.miniMegaParticipants || []; label = 'Mini Mega Contest 🔸'; entryFee = D11_MINI_MEGA_ENTRY_FEE; pool = d11m.miniMegaPool || 0; }
+  else if (contestType === 'free') { list = d11m.freeParticipants || []; label = 'Free Contest 🎁'; entryFee = 0; pool = 0; }
   else if (contestType === 'h2h') {
     const c = Object.values(d11h2hContests).find(x => x.matchId === matchId && x.id === contestRef)
       || Object.values(d11h2hContests).find(x => x.matchId === matchId && (x.player1?.email===currentUser?.email || x.player2?.email===currentUser?.email));
     if (!c) return null;
     list = [c.player1?.email, c.player2?.email].filter(Boolean);
     label = 'H2H Contest 🥊';
+    entryFee = D11_H2H_ENTRY_FEE;
+    pool = c.pool || (entryFee * list.length);
   } else if (contestType === 'custom') {
     const c = d11CustomContests[contestRef];
     if (!c) return null;
     list = c.participants || [];
     label = `Custom Contest 🛠️ (${c.code||''})`;
+    entryFee = c.entryFee || 0;
+    pool = c.pool || 0;
   }
   if (!list.length) return null;
 
@@ -19215,61 +19250,29 @@ function _d11GetContestParticipantsRanked(matchId, contestType, contestRef) {
     return { email, name: u?.name || email, pts: team?.totalPoints || 0, prize };
   }).sort((a,b) => b.pts - a.pts);
 
-  return { label, ranked };
+  return { label, ranked, entryFee, pool };
 }
 
-// Masti/attitude captions, chosen by the TOP scorer's situation (used for the
-// image's headline — the whole contest gets one shared fun banner line).
-function _d11FunnyCaption(rank, total, pts, prize) {
-  const isTop3 = rank <= 3;
-  const isWinner = prize > 0;
-  const isLast = rank === total && total > 1;
-
-  const winnerLines = [
-    `👑 BAADSHAH ho gaya main! Rank #${rank}/${total} pe raj kar diya! 💸`,
-    `🔥 Paisay bhi mil gaye, izzat bhi! Rank #${rank} — kisi ki nahi sunta ab! 😎`,
-    `💰 Jeb bhi bhari, ghamand bhi! #${rank}/${total} pe Dream11 ka Sultan hu main! 👑🏏`,
-  ];
-  const top3Lines = [
-    `🏆 Top 3 mein aa gaya bhai! Rank #${rank}/${total} — baaki sab dekhte reh gaye! 😤`,
-    `🚀 Rank #${rank}! Meri team ne toh aag laga di aaj! 🔥🔥`,
-    `😏 #${rank}/${total}... itna hi kaafi tha tumhe hraane ke liye! 💪`,
-  ];
-  const midLines = [
-    `😅 Rank #${rank}/${total} — na jeet na haar, bas "chill mode" mein hu! 🍿`,
-    `🤔 #${rank}/${total} pe hu... agli baar captain change karunga shayad! 🤪`,
-    `📊 Rank #${rank} — average performance, lekin dil se full masti! 🎉`,
-  ];
-  const lastLines = [
-    `🤡 Rank #${rank}/${total}... last pe hu par confidence full hai! 😂`,
-    `💀 Team ne aaj chutti manai lag rahi hai... #${rank}/${total} 🤣`,
-    `😭 Last rank mila hai lekin attitude first rank wala hai! 🤪🔥`,
-  ];
-
-  const pool = isWinner ? winnerLines : isTop3 ? top3Lines : isLast ? lastLines : midLines;
-  return pool[Math.floor(Math.random()*pool.length)];
-}
-
-// One-liner masti tags stamped next to each row of the leaderboard image —
-// keeps it funny/attitude-loaded all the way down the list, not just at top.
+// Status labels stamped next to each row of the leaderboard image —
+// clean, professional wording that still highlights winners vs. the rest.
 function _d11RowTag(rank, total, prize) {
-  if (prize > 0) return ['👑 Malamaal!','💰 Full Paisa Vasool!','🤑 Jeet Gaya Ustad!'][rank % 3];
-  if (rank === 1) return '🔥 Sabse Aage!';
-  if (rank <= 3) return ['😎 Zabardast!','💪 Shabaash!'][rank % 2];
-  if (total > 1 && rank === total) return ['🤡 Aakhri Number!','😴 So gaya tha kya?'][rank % 2];
-  return ['🍿 Chalta Hai','😅 Agli Baar Pakka'][rank % 2];
+  if (prize > 0) return '🏆 Winner';
+  if (rank === 1) return '⭐ Leading';
+  if (rank <= 3) return 'Podium Finish';
+  if (total > 1 && rank === total) return 'Final Position';
+  return 'In the Standings';
 }
 
-// ── Builds the full-attitude, colorful contest-result IMAGE ──
+// ── Builds the premium, gold-accented contest-result IMAGE ──
 async function d11GenerateContestResultImageBlob(matchId, contestType, contestRef) {
   const m = matches[matchId];
   const data = _d11GetContestParticipantsRanked(matchId, contestType, contestRef);
   if (!m || !data) { showNotif('Contest data not found', 'error'); return null; }
-  const { label, ranked } = data;
+  const { label, ranked, entryFee, pool } = data;
 
   const W = 900, PAD = 34, scale = 2;
   const rowH = 56;
-  const listTop = 400;
+  const listTop = 452;
   const H = listTop + ranked.length * rowH + 90;
 
   const canvas = document.createElement('canvas');
@@ -19277,57 +19280,94 @@ async function d11GenerateContestResultImageBlob(matchId, contestType, contestRe
   const ctx = canvas.getContext('2d');
   ctx.scale(scale, scale);
 
-  // ── Colorful attitude gradient background ──
+  // ── Premium dark-navy gradient background ──
   const bgGrad = ctx.createLinearGradient(0, 0, W, H);
-  bgGrad.addColorStop(0, '#1e0a3c');
-  bgGrad.addColorStop(0.5, '#4c1d95');
-  bgGrad.addColorStop(1, '#0f172a');
+  bgGrad.addColorStop(0, '#0a0e1a');
+  bgGrad.addColorStop(0.5, '#0f1729');
+  bgGrad.addColorStop(1, '#0a0e1a');
   ctx.fillStyle = bgGrad;
   ctx.fillRect(0, 0, W, H);
 
-  // Header banner
+  // Thin gold top accent
+  ctx.fillStyle = '#d4af37';
+  ctx.fillRect(0, 0, W, 3);
+
+  // Header banner — deep navy with gold branding
   const headGrad = ctx.createLinearGradient(0, 0, W, 0);
-  headGrad.addColorStop(0, '#fbbf24');
-  headGrad.addColorStop(0.5, '#f97316');
-  headGrad.addColorStop(1, '#ef4444');
+  headGrad.addColorStop(0, '#111827');
+  headGrad.addColorStop(0.5, '#1a2236');
+  headGrad.addColorStop(1, '#111827');
   ctx.fillStyle = headGrad;
-  ctx.fillRect(0, 0, W, 130);
+  ctx.fillRect(0, 3, W, 155);
 
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#0f172a';
-  ctx.font = '900 32px Arial, sans-serif';
-  ctx.fillText('🏆 Pak 🇵🇰Dream11 🏆', W/2, 52);
-  ctx.font = '800 20px Arial, sans-serif';
-  ctx.fillText('Contest Result — Full Masti Edition 🤪', W/2, 84);
-  ctx.font = '700 15px Arial, sans-serif';
-  ctx.fillStyle = '#1f2937';
-  ctx.fillText(`${m.teamA||'Team A'}  vs  ${m.teamB||'Team B'}`, W/2, 112);
+  ctx.fillStyle = '#d4af37';
+  ctx.font = '900 30px Georgia, "Times New Roman", serif';
+  ctx.fillText('PAK 🇵🇰 DREAM11', W/2, 46);
+  ctx.font = '600 15px Arial, sans-serif';
+  ctx.fillStyle = '#94a3b8';
+  ctx.fillText('OFFICIAL CONTEST RESULT', W/2, 72);
+  ctx.font = '700 17px Arial, sans-serif';
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillText(`${m.teamA||'Team A'}  •  ${m.teamB||'Team B'}`, W/2, 100);
+  ctx.font = '500 13px Arial, sans-serif';
+  ctx.fillStyle = '#94a3b8';
+  const seriesLine = m.seriesName ? `${m.seriesName}  ·  ${m.format||'T20'}` : (m.format||'T20');
+  ctx.fillText(seriesLine, W/2, 122);
+  ctx.font = '500 13px Arial, sans-serif';
+  ctx.fillStyle = '#64748b';
+  ctx.fillText(m.deadline ? `${pkDateTime(m.deadline)} PKT` : '', W/2, 142);
 
-  let y = 165;
+  let y = 195;
 
   // Contest label pill
-  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  ctx.fillStyle = 'rgba(212,175,55,0.08)';
   _roundRect(ctx, W/2-160, y-26, 320, 40, 20); ctx.fill();
-  ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(212,175,55,0.5)'; ctx.lineWidth = 1.5;
   _roundRect(ctx, W/2-160, y-26, 320, 40, 20); ctx.stroke();
-  ctx.fillStyle = '#fde68a';
+  ctx.fillStyle = '#d4af37';
   ctx.font = '800 17px Arial, sans-serif';
   ctx.fillText(label, W/2, y);
-  y += 55;
+  y += 46;
 
-  // Random masti headline caption (based on the top scorer's vibe)
-  const topPrize = ranked[0]?.prize || 0;
-  const caption = _d11FunnyCaption(1, ranked.length, ranked[0]?.pts||0, topPrize);
-  ctx.fillStyle = '#f0abfc';
-  ctx.font = '700 18px Arial, sans-serif';
-  const wrapped = _d11WrapText(ctx, caption, W - PAD*2 - 40);
+  // Entry fee / total pool info strip
+  const entryFeeLabel = entryFee > 0 ? `Rs ${entryFee}` : 'Free';
+  const poolLabel = pool > 0 ? `Rs ${pool}` : '—';
+  const stripW = 380, stripH = 46, stripX = W/2 - stripW/2;
+  ctx.fillStyle = 'rgba(255,255,255,0.03)';
+  _roundRect(ctx, stripX, y-4, stripW, stripH, 10); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1;
+  _roundRect(ctx, stripX, y-4, stripW, stripH, 10); ctx.stroke();
+  // Divider between the two halves
+  ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+  ctx.beginPath(); ctx.moveTo(W/2, y-4); ctx.lineTo(W/2, y-4+stripH); ctx.stroke();
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#64748b';
+  ctx.font = '700 11px Arial, sans-serif';
+  ctx.fillText('ENTRY FEE', W/2 - stripW/4, y+10);
+  ctx.fillText('TOTAL PRIZE POOL', W/2 + stripW/4, y+10);
+  ctx.fillStyle = '#f8fafc';
+  ctx.font = '800 18px Arial, sans-serif';
+  ctx.fillText(entryFeeLabel, W/2 - stripW/4, y+30);
+  ctx.fillStyle = '#d4af37';
+  ctx.fillText(poolLabel, W/2 + stripW/4, y+30);
+  y += stripH + 24;
+
+  // Headline — top performer callout (premium tone, no captions needed)
+  const topName = ranked[0]?.name || 'Top Player';
+  const topPts = ranked[0]?.pts || 0;
+  ctx.fillStyle = '#f8fafc';
+  ctx.font = '700 19px Arial, sans-serif';
+  const headline = `🏆 ${topName} leads the table with ${topPts} points`;
+  const wrapped = _d11WrapText(ctx, headline, W - PAD*2 - 40);
   wrapped.forEach(line => { ctx.fillText(line, W/2, y); y += 26; });
-  y += 12;
+  y += 10;
 
   // Sub caption
-  ctx.fillStyle = '#94a3b8';
+  ctx.fillStyle = '#64748b';
   ctx.font = '400 14px Arial, sans-serif';
-  ctx.fillText(`👥 ${ranked.length} Players Joined · Live Leaderboard`, W/2, y);
+  ctx.fillText(`${ranked.length} Players Competed · Final Standings`, W/2, y);
 
   // ── Leaderboard header row ──
   y = listTop - 24;
@@ -19366,13 +19406,13 @@ async function d11GenerateContestResultImageBlob(matchId, contestType, contestRe
     ctx.fillStyle = '#f8fafc';
     ctx.font = '700 15px Arial, sans-serif';
     ctx.fillText(`${r.name}${isMe?' (You)':''}`, PAD+68, y+22);
-    ctx.fillStyle = '#c4b5fd';
+    ctx.fillStyle = r.prize>0 ? '#d4af37' : '#64748b';
     ctx.font = '600 12px Arial, sans-serif';
     ctx.fillText(_d11RowTag(rank, ranked.length, r.prize), PAD+68, y+40);
 
     // Points
     ctx.textAlign = 'right';
-    ctx.fillStyle = '#fde68a';
+    ctx.fillStyle = '#d4af37';
     ctx.font = '800 18px Arial, sans-serif';
     ctx.fillText(String(r.pts), W-PAD-190, y+28);
 
@@ -19387,10 +19427,10 @@ async function d11GenerateContestResultImageBlob(matchId, contestType, contestRe
   // Footer
   y += 20;
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#64748b';
-  ctx.font = '400 13px Arial, sans-serif';
-  ctx.fillText('Tum bhi try karo, agar himmat hai! 😜🏆', W/2, y);
-  ctx.fillStyle = '#94a3b8';
+  ctx.fillStyle = '#d4af37';
+  ctx.font = '600 13px Arial, sans-serif';
+  ctx.fillText('Join the next contest and claim your place at the top', W/2, y);
+  ctx.fillStyle = '#475569';
   ctx.font = '400 12px Arial, sans-serif';
   ctx.fillText('Pak 🇵🇰Dream11 — ' + (typeof APP_URL!=='undefined'?APP_URL:''), W/2, y+20);
 
@@ -19422,7 +19462,7 @@ async function d11ShareContestResult(matchId, contestType, contestRef, evt) {
 
     const teamA = m?.teamA||'Team A', teamB = m?.teamB||'Team B';
     const fileName = `Dream11_${(teamA+'_vs_'+teamB).replace(/\s+/g,'')}_${contestType}_Result.png`;
-    const shareText = `🏏 ${teamA} vs ${teamB} — Contest Result! 🤪🏆`;
+    const shareText = `🏏 ${teamA} vs ${teamB} — Contest Result 🏆`;
     const file = new File([blob], fileName, { type: 'image/png' });
 
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -22945,6 +22985,7 @@ function renderDream11ViewTeam() {
     const runs = Number(s.runs)||0; const balls = Number(s.ballsFaced)||0;
     const fours = Number(s.fours)||0; const sixes = Number(s.sixes)||0;
     const wkts = Number(s.wickets)||0; const maidens = Number(s.maidens)||0;
+    const dotBalls = Number(s.dotBalls)||0;
     const overs = Number(s.oversBowled)||0; const rg = Number(s.runsGiven)||0;
     const catches = Number(s.catches)||0; const stumpings = Number(s.stumpings)||0; const runOuts = Number(s.runOuts)||0;
     const isOut = s.isOut;
@@ -22957,7 +22998,7 @@ function renderDream11ViewTeam() {
       for (const band of sc2.srBands) { if (sr < band.max) { bPts += band.pts; break; } }
     }
     // Bowling pts
-    let wPts = wkts*sc2.perWicket + (sc2.wicketHaulBonus||[]).reduce((best,w)=>wkts>=w.min&&w.pts>best?w.pts:best,0) + maidens*(sc2.maidenOverBonus||0) + (Number(s.lbwBowled)||0)*(sc2.lbwBowledBonus||0);
+    let wPts = wkts*sc2.perWicket + (sc2.wicketHaulBonus||[]).reduce((best,w)=>wkts>=w.min&&w.pts>best?w.pts:best,0) + maidens*(sc2.maidenOverBonus||0) + dotBalls*(sc2.dotBallPoints||0) + (Number(s.lbwBowled)||0)*(sc2.lbwBowledBonus||0);
     if (sc2.erBands && overs>=sc2.erMinOvers) {
       const er=rg/overs;
       for (const band of sc2.erBands) { if (er < band.max) { wPts += band.pts; break; } }
@@ -24915,10 +24956,11 @@ function renderD11QuickScoreTable() {
           const s = p.stats || {};
           const pid = `qs-${matchId}-${p.id}`;
           const overs = Number(s.oversBowled)||0; const maidens = Number(s.maidens)||0;
+          const dotBalls = Number(s.dotBalls)||0;
           const rg = Number(s.runsGiven)||0; const wkts = Number(s.wickets)||0;
           const erD = calcERDisplay(s);
           const erLabel = overs>0 ? (rg/overs).toFixed(2) : '—';
-          const bowlPts = wkts*sc.perWicket + (sc.wicketHaulBonus||[]).reduce((best,w)=> wkts>=w.min&&w.pts>best?w.pts:best, 0) + maidens*(sc.maidenOverBonus||0) + (Number(s.lbwBowled)||0)*(sc.lbwBowledBonus||0) + erD.pts;
+          const bowlPts = wkts*sc.perWicket + (sc.wicketHaulBonus||[]).reduce((best,w)=> wkts>=w.min&&w.pts>best?w.pts:best, 0) + maidens*(sc.maidenOverBonus||0) + dotBalls*(sc.dotBallPoints||0) + (Number(s.lbwBowled)||0)*(sc.lbwBowledBonus||0) + erD.pts;
           const fieldPts = (Number(s.catches)||0)*sc.perCatch + ((sc.catch3Bonus&&(Number(s.catches)||0)>=3)?sc.catch3Bonus:0) + (Number(s.stumpings)||0)*sc.perStumping + (Number(s.runOuts)||0)*sc.perRunOutDirect;
           return `
           <div style="display:grid;grid-template-columns:1fr 38px 30px 38px 38px 54px 58px;padding:8px 12px;border-top:1px solid rgba(255,255,255,0.05);align-items:center">
@@ -26748,6 +26790,7 @@ function calcUtPlayerPoints(stats, matchId) {
   const sixes = Number(stats.sixes)||0;
   const wickets = Number(stats.wickets)||0;
   const maidens = Number(stats.maidens)||0;
+  const dotBalls = Number(stats.dotBalls)||0;
   const catches = Number(stats.catches)||0;
   const stumpings = Number(stats.stumpings)||0;
   const runOuts = Number(stats.runOuts)||0;
@@ -26782,6 +26825,7 @@ function calcUtPlayerPoints(stats, matchId) {
     pts += best;
   }
   pts += maidens * (s.maidenOverBonus || 0);
+  pts += dotBalls * (s.dotBallPoints || 0);
   const lbwBowled = Number(stats.lbwBowled)||0;
   pts += lbwBowled * (s.lbwBowledBonus || 0);
 
@@ -28087,9 +28131,10 @@ function renderUtQuickScoreTable() {
         </div>
         ${players.map(p => {
           const s=p.stats||{}; const overs=Number(s.oversBowled)||0; const maidens=Number(s.maidens)||0;
+          const dotBalls=Number(s.dotBalls)||0;
           const rg=Number(s.runsGiven)||0; const wkts=Number(s.wickets)||0;
           const erD=calcERDisplay(s); const erLabel=overs>0?(rg/overs).toFixed(2):'—';
-          const bowlPts=wkts*sc.perWicket+(sc.wicketHaulBonus||[]).reduce((best,w)=>wkts>=w.min&&w.pts>best?w.pts:best,0)+maidens*(sc.maidenOverBonus||0)+(Number(s.lbwBowled)||0)*(sc.lbwBowledBonus||0)+erD.pts;
+          const bowlPts=wkts*sc.perWicket+(sc.wicketHaulBonus||[]).reduce((best,w)=>wkts>=w.min&&w.pts>best?w.pts:best,0)+maidens*(sc.maidenOverBonus||0)+dotBalls*(sc.dotBallPoints||0)+(Number(s.lbwBowled)||0)*(sc.lbwBowledBonus||0)+erD.pts;
           const fPts=(Number(s.catches)||0)*sc.perCatch+((sc.catch3Bonus&&(Number(s.catches)||0)>=3)?sc.catch3Bonus:0)+(Number(s.stumpings)||0)*sc.perStumping+(Number(s.runOuts)||0)*sc.perRunOutDirect;
           const pid=`utqs-${mid}-${p.id}`;
           return `
@@ -29072,7 +29117,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.9.18";
+const APP_VERSION = "4.9.19";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
