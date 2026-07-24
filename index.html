@@ -5023,6 +5023,10 @@ function _renderInner() {
     ${d11Ll3LinkPickerMatchId ? renderD11Ll3LinkPickerModal() : ''}
     ${_d11Ll3DebugData ? renderD11Ll3DebugModal() : ''}
     ${d11Ll3PlayerRankingPanelOpen ? renderD11Ll3PlayerRankingModal() : ''}
+    ${d11Ll4ImportPanelOpen ? renderD11Ll4ImportPanelModal() : ''}
+    ${d11Ll4LinkPickerMatchId ? renderD11Ll4LinkPickerModal() : ''}
+    ${_d11Ll4DebugData ? renderD11Ll4DebugModal() : ''}
+    ${d11Ll4PlayerRankingPanelOpen ? renderD11Ll4PlayerRankingModal() : ''}
     ${_d11SquadDebugData ? renderD11SquadDebugModal() : ''}
     ${_d11EspnDebugData ? renderD11EspnDebugModal() : ''}
     ${d11PlayerInfoTarget ? renderD11PlayerInfoModal() : ''}
@@ -7808,12 +7812,14 @@ async function d11AdminSaveNewMatch() {
   const wantsCb2Link = !!draftMatch._linkToCb2AfterSave;
   const wantsLl2Link = !!draftMatch._linkToLl2AfterSave;
   const wantsLl3Link = !!draftMatch._linkToLl3AfterSave;
+  const wantsLl4Link = !!draftMatch._linkToLl4AfterSave;
   matches[mid] = { ...draftMatch, status: 'upcoming' };
   delete matches[mid]._linkToEspnAfterSave; // internal navigation flag only — never persisted
   delete matches[mid]._linkToCllAfterSave; // internal navigation flag only — never persisted
   delete matches[mid]._linkToCb2AfterSave; // internal navigation flag only — never persisted
   delete matches[mid]._linkToLl2AfterSave; // internal navigation flag only — never persisted
   delete matches[mid]._linkToLl3AfterSave; // internal navigation flag only — never persisted
+  delete matches[mid]._linkToLl4AfterSave; // internal navigation flag only — never persisted
   // Every match gets a permanent, sequential Match ID No (000100, 000101, ...)
   // at creation time — assigned before the first save so it's there from
   // the very first Firestore write, not patched in afterward.
@@ -7865,6 +7871,14 @@ async function d11AdminSaveNewMatch() {
     window.scrollTo(0,0);
     showNotif(`✅ Match created! Match ID No ${formatMatchSeqNo(matches[mid].matchSeqNo)} — now searching Cricket Live Line 3…`);
     d11OpenLl3LinkPicker(mid);
+    return;
+  }
+  if (wantsLl4Link) {
+    tab = 'dream11Ll4Hub';
+    render();
+    window.scrollTo(0,0);
+    showNotif(`✅ Match created! Match ID No ${formatMatchSeqNo(matches[mid].matchSeqNo)} — now searching Cricket Live Line 4…`);
+    d11OpenLl4LinkPicker(mid);
     return;
   }
   d11AdminTab = 'pool';
@@ -12467,9 +12481,10 @@ async function d11SyncLiveMatchCb2(matchId, showToast) {
 // player:[{name, play_role, player_id, image, is_international}]},
 // team_b: {...} } } — much simpler than ESPN's, no scanning needed.
 async function _d11CllFetchSeriesSquadFallback(matchId, m) {
+  let deriveErr = null, infoRaw = null;
   if (!m.cllSeriesId) {
     try {
-      const infoRaw = await _cllFetch(`match/${m.cllMatchId}/info`, { feature: 'Derive Series ID', matchId });
+      infoRaw = await _cllFetch(`match/${m.cllMatchId}/info`, { feature: 'Derive Series ID', matchId });
       const infoData = Array.isArray(infoRaw?.data) ? infoRaw.data[0] : infoRaw?.data;
       const sid = infoData?.series_id || infoData?.seriesId || infoData?.series?.id
         || infoData?.tournament_id || infoData?.tournamentId || null;
@@ -12478,10 +12493,14 @@ async function _d11CllFetchSeriesSquadFallback(matchId, m) {
         await _saveMatchToFirestore(matchId, m);
       }
     } catch (e) {
+      deriveErr = e.message;
       console.warn('Cricket Live Line series ID lookup failed:', e.message);
     }
   }
-  if (!m.cllSeriesId) return null;
+  if (!m.cllSeriesId) {
+    _d11CllDebugData = { cllMatchId: m.cllMatchId, seriesFallbackFailedAt: 'derive-series-id', infoRaw, deriveErr };
+    return null;
+  }
 
   showNotif('⏳ Match squad is empty on Cricket Live Line — trying the series squad instead…');
   const raw = await _cllFetch(`series/${m.cllSeriesId}/squads`, { feature: 'Fetch Squad (Series fallback)', matchId });
@@ -12495,7 +12514,10 @@ async function _d11CllFetchSeriesSquadFallback(matchId, m) {
   };
   const g1 = findTeam(m.teamA);
   const g2 = findTeam(m.teamB);
-  if (!g1 && !g2) return null;
+  if (!g1 && !g2) {
+    _d11CllDebugData = { cllMatchId: m.cllMatchId, cllSeriesId: m.cllSeriesId, seriesFallbackFailedAt: 'no-team-match', seriesRaw: raw, teamA: m.teamA, teamB: m.teamB, availableTeams: list.map(g => g.team?.name) };
+    return null;
+  }
   return {
     raw,
     teamA: { player: g1?.player || [], flag: g1?.team?.flag },
@@ -12528,7 +12550,7 @@ async function d11FetchSquadFromCll(matchId) {
     } catch (matchSquadErr) {
       const fallback = await _d11CllFetchSeriesSquadFallback(matchId, m);
       if (!fallback) {
-        _d11CllDebugData = { cllRaw: raw, cllMatchId: m.cllMatchId };
+        if (!_d11CllDebugData) _d11CllDebugData = { cllRaw: raw, cllMatchId: m.cllMatchId };
         showNotif('📭 Cricket Live Line hasn\'t published this squad yet (or the response shape was unexpected — check 🐛 View Raw Data). Try again closer to match time, or add players manually for now.', 'error');
         render();
         return;
@@ -12776,9 +12798,10 @@ function _d11RenderCllSyncRow(m) {
 
 // ── Cricket Live Line 2 — Squad Fetch, Playing XI Check, Live Sync ────────────
 async function _d11Ll2FetchSeriesSquadFallback(matchId, m) {
+  let deriveErr = null, infoRaw = null;
   if (!m.ll2SeriesId) {
     try {
-      const infoRaw = await _ll2Fetch(`match/${m.ll2MatchId}/info`, { feature: 'Derive Series ID', matchId });
+      infoRaw = await _ll2Fetch(`match/${m.ll2MatchId}/info`, { feature: 'Derive Series ID', matchId });
       const infoData = Array.isArray(infoRaw?.data) ? infoRaw.data[0] : infoRaw?.data;
       const sid = infoData?.series_id || infoData?.seriesId || infoData?.series?.id
         || infoData?.tournament_id || infoData?.tournamentId || null;
@@ -12787,10 +12810,14 @@ async function _d11Ll2FetchSeriesSquadFallback(matchId, m) {
         await _saveMatchToFirestore(matchId, m);
       }
     } catch (e) {
+      deriveErr = e.message;
       console.warn('Cricket Live Line 2 series ID lookup failed:', e.message);
     }
   }
-  if (!m.ll2SeriesId) return null;
+  if (!m.ll2SeriesId) {
+    _d11Ll2DebugData = { ll2MatchId: m.ll2MatchId, seriesFallbackFailedAt: 'derive-series-id', infoRaw, deriveErr };
+    return null;
+  }
 
   showNotif('⏳ Match squad is empty on Cricket Live Line 2 — trying the series squad instead…');
   const raw = await _ll2Fetch(`series/${m.ll2SeriesId}/squads`, { feature: 'Fetch Squad (Series fallback)', matchId });
@@ -12804,7 +12831,10 @@ async function _d11Ll2FetchSeriesSquadFallback(matchId, m) {
   };
   const g1 = findTeam(m.teamA);
   const g2 = findTeam(m.teamB);
-  if (!g1 && !g2) return null;
+  if (!g1 && !g2) {
+    _d11Ll2DebugData = { ll2MatchId: m.ll2MatchId, ll2SeriesId: m.ll2SeriesId, seriesFallbackFailedAt: 'no-team-match', seriesRaw: raw, teamA: m.teamA, teamB: m.teamB, availableTeams: list.map(g => g.team?.name) };
+    return null;
+  }
   return {
     raw,
     teamA: { player: g1?.player || [], flag: g1?.team?.flag },
@@ -12837,7 +12867,7 @@ async function d11FetchSquadFromLl2(matchId) {
     } catch (matchSquadErr) {
       const fallback = await _d11Ll2FetchSeriesSquadFallback(matchId, m);
       if (!fallback) {
-        _d11Ll2DebugData = { ll2Raw: raw, ll2MatchId: m.ll2MatchId };
+        if (!_d11Ll2DebugData) _d11Ll2DebugData = { ll2Raw: raw, ll2MatchId: m.ll2MatchId };
         showNotif('📭 Cricket Live Line 2 hasn\'t published this squad yet (or the response shape was unexpected — check 🐛 View Raw Data). Try again closer to match time, or add players manually for now.', 'error');
         render();
         return;
@@ -13502,9 +13532,10 @@ async function _d11Ll3FetchSeriesSquadFallback(matchId, m) {
   // match's own info endpoint, which (like Cricbuzz) should carry a series id
   // somewhere in its payload. We check every plausible key name since the
   // exact field hasn't been confirmed against a live response yet.
+  let deriveErr = null, infoRaw = null;
   if (!m.ll3SeriesId) {
     try {
-      const infoRaw = await _ll3Fetch(`match/${m.ll3MatchId}/info`, { feature: 'Derive Series ID', matchId });
+      infoRaw = await _ll3Fetch(`match/${m.ll3MatchId}/info`, { feature: 'Derive Series ID', matchId });
       const infoData = Array.isArray(infoRaw?.data) ? infoRaw.data[0] : infoRaw?.data;
       const sid = infoData?.series_id || infoData?.seriesId || infoData?.series?.id
         || infoData?.tournament_id || infoData?.tournamentId || null;
@@ -13513,10 +13544,14 @@ async function _d11Ll3FetchSeriesSquadFallback(matchId, m) {
         await _saveMatchToFirestore(matchId, m);
       }
     } catch (e) {
+      deriveErr = e.message;
       console.warn('Cricket Live Line 3 series ID lookup failed:', e.message);
     }
   }
-  if (!m.ll3SeriesId) return null;
+  if (!m.ll3SeriesId) {
+    _d11Ll3DebugData = { ll3MatchId: m.ll3MatchId, seriesFallbackFailedAt: 'derive-series-id', infoRaw, deriveErr };
+    return null;
+  }
 
   showNotif('⏳ Match squad is empty on Cricket Live Line 3 — trying the series squad instead…');
   const raw = await _ll3Fetch(`series/${m.ll3SeriesId}/squads`, { feature: 'Fetch Squad (Series fallback)', matchId });
@@ -13531,7 +13566,10 @@ async function _d11Ll3FetchSeriesSquadFallback(matchId, m) {
   };
   const g1 = findTeam(m.teamA);
   const g2 = findTeam(m.teamB);
-  if (!g1 && !g2) return null;
+  if (!g1 && !g2) {
+    _d11Ll3DebugData = { ll3MatchId: m.ll3MatchId, ll3SeriesId: m.ll3SeriesId, seriesFallbackFailedAt: 'no-team-match', seriesRaw: raw, teamA: m.teamA, teamB: m.teamB, availableTeams: list.map(g => g.team?.name) };
+    return null;
+  }
   return {
     raw,
     teamA: { player: g1?.player || [], flag: g1?.team?.flag },
@@ -13564,7 +13602,7 @@ async function d11FetchSquadFromLl3(matchId) {
     } catch (matchSquadErr) {
       const fallback = await _d11Ll3FetchSeriesSquadFallback(matchId, m);
       if (!fallback) {
-        _d11Ll3DebugData = { ll3Raw: raw, ll3MatchId: m.ll3MatchId };
+        if (!_d11Ll3DebugData) _d11Ll3DebugData = { ll3Raw: raw, ll3MatchId: m.ll3MatchId };
         showNotif('📭 Cricket Live Line 3 hasn\'t published this squad yet (or the response shape was unexpected — check 🐛 View Raw Data). Try again closer to match time, or add players manually for now.', 'error');
         render();
         return;
@@ -14278,9 +14316,10 @@ async function _d11Ll4FetchSeriesSquadFallback(matchId, m) {
   // match's own info endpoint, which (like Cricbuzz) should carry a series id
   // somewhere in its payload. We check every plausible key name since the
   // exact field hasn't been confirmed against a live response yet.
+  let deriveErr = null, infoRaw = null;
   if (!m.ll4SeriesId) {
     try {
-      const infoRaw = await _ll4Fetch(`match/${m.ll4MatchId}/info`, { feature: 'Derive Series ID', matchId });
+      infoRaw = await _ll4Fetch(`match/${m.ll4MatchId}/info`, { feature: 'Derive Series ID', matchId });
       const infoData = Array.isArray(infoRaw?.data) ? infoRaw.data[0] : infoRaw?.data;
       const sid = infoData?.series_id || infoData?.seriesId || infoData?.series?.id
         || infoData?.tournament_id || infoData?.tournamentId || null;
@@ -14289,10 +14328,14 @@ async function _d11Ll4FetchSeriesSquadFallback(matchId, m) {
         await _saveMatchToFirestore(matchId, m);
       }
     } catch (e) {
+      deriveErr = e.message;
       console.warn('Cricket Live Line 4 series ID lookup failed:', e.message);
     }
   }
-  if (!m.ll4SeriesId) return null;
+  if (!m.ll4SeriesId) {
+    _d11Ll4DebugData = { ll4MatchId: m.ll4MatchId, seriesFallbackFailedAt: 'derive-series-id', infoRaw, deriveErr };
+    return null;
+  }
 
   showNotif('⏳ Match squad is empty on Cricket Live Line 4 — trying the series squad instead…');
   const raw = await _ll4Fetch(`series/${m.ll4SeriesId}/squads`, { feature: 'Fetch Squad (Series fallback)', matchId });
@@ -14307,7 +14350,10 @@ async function _d11Ll4FetchSeriesSquadFallback(matchId, m) {
   };
   const g1 = findTeam(m.teamA);
   const g2 = findTeam(m.teamB);
-  if (!g1 && !g2) return null;
+  if (!g1 && !g2) {
+    _d11Ll4DebugData = { ll4MatchId: m.ll4MatchId, ll4SeriesId: m.ll4SeriesId, seriesFallbackFailedAt: 'no-team-match', seriesRaw: raw, teamA: m.teamA, teamB: m.teamB, availableTeams: list.map(g => g.team?.name) };
+    return null;
+  }
   return {
     raw,
     teamA: { player: g1?.player || [], flag: g1?.team?.flag },
@@ -14340,7 +14386,7 @@ async function d11FetchSquadFromLl4(matchId) {
     } catch (matchSquadErr) {
       const fallback = await _d11Ll4FetchSeriesSquadFallback(matchId, m);
       if (!fallback) {
-        _d11Ll4DebugData = { ll4Raw: raw, ll4MatchId: m.ll4MatchId };
+        if (!_d11Ll4DebugData) _d11Ll4DebugData = { ll4Raw: raw, ll4MatchId: m.ll4MatchId };
         showNotif('📭 Cricket Live Line 4 hasn\'t published this squad yet (or the response shape was unexpected — check 🐛 View Raw Data). Try again closer to match time, or add players manually for now.', 'error');
         render();
         return;
@@ -30091,7 +30137,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.10.0";
+const APP_VERSION = "4.20.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
