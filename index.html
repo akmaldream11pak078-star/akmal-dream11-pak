@@ -15897,56 +15897,6 @@ async function d11AutoCheckPlayingXI() {
   }
 }
 
-// ── Auto Sync (Cricket Live Line 2 only, post-deadline) ────────────────────
-// After a match's deadline passes, users should still see fresh live data
-// even if the admin doesn't tap "🔄 Sync Now" himself. This fires
-// d11SyncLiveMatchLl2 silently at 3 fixed points after the deadline —
-// +40 min, +100 min, +200 min — then stops (fixed 3 tries, not repeating
-// forever). Each window is tracked in d11m.autoLl2Sync = { m40, m100, m200 }
-// (saved to Firestore, so it never double-fires across tabs/devices).
-// Only applies to matches linked to Cricket Live Line 2 (m.ll2MatchId) —
-// every other provider is untouched, exactly as requested.
-async function d11AutoSyncLl2() {
-  const now = Date.now();
-  for (const m of Object.values(matches)) {
-    if (!m.ll2MatchId) continue; // not linked to Cricket Live Line 2
-    const d11m = dream11Matches[m.id];
-    if (!d11m || d11m.scored) continue; // already finished — nothing to refresh
-    if (!m.deadline) continue;
-    const deadlineMs = new Date(m.deadline).getTime();
-    if (isNaN(deadlineMs)) continue;
-    const minsPastDeadline = (now - deadlineMs) / 60000;
-    if (minsPastDeadline <= 0) continue; // deadline hasn't passed yet
-
-    const sync = d11m.autoLl2Sync || {};
-    let windowHit = null;
-    if (!sync.m40 && minsPastDeadline >= 40 && minsPastDeadline < 100) windowHit = 'm40';
-    else if (!sync.m100 && minsPastDeadline >= 100 && minsPastDeadline < 200) windowHit = 'm100';
-    else if (!sync.m200 && minsPastDeadline >= 200 && minsPastDeadline < 260) windowHit = 'm200';
-    if (!windowHit) continue;
-
-    // If the admin already synced this match recently on his own, skip this
-    // window — no point firing right after a manual sync.
-    const lastSynced = _d11Ll2LastSyncedAt[m.id] || 0;
-    if (now - lastSynced < 15 * 60 * 1000) {
-      d11m.autoLl2Sync = { ...sync, [windowHit]: true };
-      await _saveDream11MatchToFirestore(m.id, d11m);
-      continue;
-    }
-
-    // Mark the window used FIRST (before the async call) so a second tab
-    // running this same loop a few seconds later doesn't double-fire while
-    // the first call is still in flight.
-    d11m.autoLl2Sync = { ...sync, [windowHit]: true };
-    await _saveDream11MatchToFirestore(m.id, d11m);
-    try {
-      await d11SyncLiveMatchLl2(m.id, /*showToast=*/false);
-    } catch (e) {
-      console.warn('Auto Cricket Live Line 2 sync failed for', m.id, e.message);
-    }
-  }
-}
-
 // ── Auto Fetch Final Result — REMOVED ───────────────────────────────────────
 // This background scheduler used to silently call the live-score API for
 // every linked, unscored match a few hours after its deadline, to auto-fill
@@ -30122,7 +30072,6 @@ if ('serviceWorker' in navigator) {
       currentUser={...users[currentUser.email],email:currentUser.email};
     render();
     if (typeof d11AutoCheckPlayingXI === 'function') d11AutoCheckPlayingXI().catch(function(){});
-    if (typeof d11AutoSyncLl2 === 'function') d11AutoSyncLl2().catch(function(){});
     // d11AutoFetchFinalResult removed — final result is now always fetched
     // manually by the admin via "🏁 Fetch Final Result", to stop this
     // scheduler's silent API usage entirely.
@@ -30223,7 +30172,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.22.0";
+const APP_VERSION = "4.21.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
