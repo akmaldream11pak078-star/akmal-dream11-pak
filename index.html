@@ -1322,6 +1322,27 @@ let d11Ll2ImportResults = []; // filtered list of individual match objects from 
 let _d11Ll2DebugData = null; // { ll2Raw } — raw last response, own debug modal
 let d11Ll2LinkPickerMatchId = null;
 let _d11Ll2LastSyncedAt = {}; // { [matchId]: timestamp } — for the "Last synced" label in admin UI
+// ── Cricket Live Line 3 (live-line1 host, separate RapidAPI account/key) — SIXTH,
+// fully independent provider. Same host + endpoint shape as CLL/CLL2 (own
+// account & key on RapidAPI), wired in exactly the same way.
+const LL3_RAPIDAPI_HOST = "cricket-live-line1.p.rapidapi.com";
+const LL3_BASE = "https://cricket-live-line1.p.rapidapi.com";
+const LL3_RAPIDAPI_KEY = "a957688052msh0344d11d0be5533p1804f8jsnec67a9ab817f";
+let _d11Ll3SearchResults = []; // last Cricket Live Line 3 matches shown in the "Link Match" picker
+let _d11Ll3SearchLoading = false;
+let _d11Ll3SearchError = null;
+let d11Ll3ImportPanelOpen = false;
+let d11Ll3ImportLoading = false;
+let d11Ll3ImportError = null;
+let d11Ll3ImportResults = []; // filtered list of individual match objects from upcomingMatches
+let _d11Ll3DebugData = null; // { ll3Raw } — raw last response, own debug modal
+let d11Ll3LinkPickerMatchId = null;
+let _d11Ll3LastSyncedAt = {}; // { [matchId]: timestamp } — for the "Last synced" label in admin UI
+// Player Ranking (Cricket Live Line 3 only — new feature, no CLL/CLL2 equivalent)
+let _d11Ll3PlayerRankingData = null; // { category, raw, fetchedAt }
+let _d11Ll3PlayerRankingLoading = false;
+let _d11Ll3PlayerRankingError = null;
+let d11Ll3PlayerRankingPanelOpen = false;
 // TEMP DEBUG — holds the raw Cricbuzz team response so admin can view/copy
 // it on-screen (see renderD11SquadDebugModal). Remove once squad-shape
 // issue is confirmed/fixed.
@@ -1588,6 +1609,7 @@ function _ensureAdminDataLoaded() {
     typeof _loadCllApiLog === 'function' ? _loadCllApiLog() : Promise.resolve(),
     typeof _loadCb2ApiLog === 'function' ? _loadCb2ApiLog() : Promise.resolve(),
     typeof _loadLl2ApiLog === 'function' ? _loadLl2ApiLog() : Promise.resolve(),
+    typeof _loadLl3ApiLog === 'function' ? _loadLl3ApiLog() : Promise.resolve(),
   ]).then(() => render()).catch(() => {});
 }
 
@@ -4923,6 +4945,7 @@ function _renderInner() {
       ${tab==='dream11CllHub' ? renderD11CllHub() : ''}
       ${tab==='dream11Cb2Hub' ? renderD11Cb2Hub() : ''}
       ${tab==='dream11Ll2Hub' ? renderD11Ll2Hub() : ''}
+      ${tab==='dream11Ll3Hub' ? renderD11Ll3Hub() : ''}
       ${tab==='myMatches' ? renderD11MyMatchesPage() : ''}
       ${tab==='dream11Completed' ? renderDream11CompletedMatches() : ''}
       ${tab==='completedMatchDetail' ? renderCompletedMatchDetail() : ''}
@@ -4971,6 +4994,10 @@ function _renderInner() {
     ${d11Ll2ImportPanelOpen ? renderD11Ll2ImportPanelModal() : ''}
     ${d11Ll2LinkPickerMatchId ? renderD11Ll2LinkPickerModal() : ''}
     ${_d11Ll2DebugData ? renderD11Ll2DebugModal() : ''}
+    ${d11Ll3ImportPanelOpen ? renderD11Ll3ImportPanelModal() : ''}
+    ${d11Ll3LinkPickerMatchId ? renderD11Ll3LinkPickerModal() : ''}
+    ${_d11Ll3DebugData ? renderD11Ll3DebugModal() : ''}
+    ${d11Ll3PlayerRankingPanelOpen ? renderD11Ll3PlayerRankingModal() : ''}
     ${_d11SquadDebugData ? renderD11SquadDebugModal() : ''}
     ${_d11EspnDebugData ? renderD11EspnDebugModal() : ''}
     ${d11PlayerInfoTarget ? renderD11PlayerInfoModal() : ''}
@@ -7747,11 +7774,13 @@ async function d11AdminSaveNewMatch() {
   const wantsCllLink = !!draftMatch._linkToCllAfterSave;
   const wantsCb2Link = !!draftMatch._linkToCb2AfterSave;
   const wantsLl2Link = !!draftMatch._linkToLl2AfterSave;
+  const wantsLl3Link = !!draftMatch._linkToLl3AfterSave;
   matches[mid] = { ...draftMatch, status: 'upcoming' };
   delete matches[mid]._linkToEspnAfterSave; // internal navigation flag only — never persisted
   delete matches[mid]._linkToCllAfterSave; // internal navigation flag only — never persisted
   delete matches[mid]._linkToCb2AfterSave; // internal navigation flag only — never persisted
   delete matches[mid]._linkToLl2AfterSave; // internal navigation flag only — never persisted
+  delete matches[mid]._linkToLl3AfterSave; // internal navigation flag only — never persisted
   // Every match gets a permanent, sequential Match ID No (000100, 000101, ...)
   // at creation time — assigned before the first save so it's there from
   // the very first Firestore write, not patched in afterward.
@@ -7795,6 +7824,14 @@ async function d11AdminSaveNewMatch() {
     window.scrollTo(0,0);
     showNotif(`✅ Match created! Match ID No ${formatMatchSeqNo(matches[mid].matchSeqNo)} — now searching Cricket Live Line 2…`);
     d11OpenLl2LinkPicker(mid);
+    return;
+  }
+  if (wantsLl3Link) {
+    tab = 'dream11Ll3Hub';
+    render();
+    window.scrollTo(0,0);
+    showNotif(`✅ Match created! Match ID No ${formatMatchSeqNo(matches[mid].matchSeqNo)} — now searching Cricket Live Line 3…`);
+    d11OpenLl3LinkPicker(mid);
     return;
   }
   d11AdminTab = 'pool';
@@ -12605,7 +12642,7 @@ async function d11SyncLiveMatchCll(matchId, showToast) {
 }
 
 function _d11RenderCllSyncRow(m) {
-  if (m.cricketDataMatchId || m.espnMatchId || m.ll2MatchId) return ''; // already on another provider
+  if (m.cricketDataMatchId || m.espnMatchId || m.ll2MatchId || m.ll3MatchId) return ''; // already on another provider
   if (!m.cllMatchId) {
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(14,165,165,0.08);border:1px solid rgba(14,165,165,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
       <span style="font-size:11px;color:#2dd4d4;flex:1;min-width:140px">🎯 Cricket Live Line: not linked</span>
@@ -12840,7 +12877,7 @@ async function d11SyncLiveMatchLl2(matchId, showToast) {
 }
 
 function _d11RenderLl2SyncRow(m) {
-  if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId) return ''; // already on another provider
+  if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll3MatchId) return ''; // already on another provider
   if (!m.ll2MatchId) {
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
       <span style="font-size:11px;color:#fbbf24;flex:1;min-width:140px">⚡ Cricket Live Line 2: not linked</span>
@@ -12865,7 +12902,7 @@ function _d11RenderLl2SyncRow(m) {
 function renderD11Ll2Hub() {
   const linked = Object.values(matches).filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && m.ll2MatchId);
   const unlinkedEligible = Object.values(matches)
-    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.ll2MatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cllMatchId && !m.cb2MatchId && !dream11Matches[m.id]?.scored)
+    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.ll2MatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cllMatchId && !m.cb2MatchId && !m.ll3MatchId && !dream11Matches[m.id]?.scored)
     .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
 
   function renderCard(m) {
@@ -12951,10 +12988,727 @@ function d11AdminCreateMatchForLl2() {
 }
 
 
+function goD11Ll3Hub() {
+  tab = 'dream11Ll3Hub';
+  render();
+  window.scrollTo(0,0);
+}
+
+async function _ll3Fetch(endpoint, callCtx) {
+  if (!LL3_RAPIDAPI_KEY) {
+    throw new Error('No Cricket Live Line 3 API key configured — paste a RapidAPI key into LL3_RAPIDAPI_KEY in the code to restore these features.');
+  }
+  const url = `${LL3_BASE}/${endpoint}`;
+  let res;
+  try {
+    res = await fetch(url, { headers: {
+      'Content-Type': 'application/json',
+      'x-rapidapi-host': LL3_RAPIDAPI_HOST,
+      'x-rapidapi-key': LL3_RAPIDAPI_KEY
+    }});
+  } catch (e) {
+    throw new Error('Could not reach Cricket Live Line 3 API — check your internet connection and try again.');
+  }
+  if (res.status === 429) {
+    throw new Error('HTTP 429 — Cricket Live Line 3 API rate limit hit — wait a moment and try again.');
+  }
+  if (!res.ok) {
+    throw new Error(`Cricket Live Line 3 API returned HTTP ${res.status}`);
+  }
+  const text = await res.text();
+  if (!text) throw new Error('Cricket Live Line 3 API returned an empty response — likely a temporary hiccup, please try again.');
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`Cricket Live Line 3 API returned an unreadable response (${text.slice(0,60)}...) — please try again.`);
+  }
+  if (callCtx) _logLl3ApiCall(callCtx.feature || '', callCtx.matchId, endpoint).catch(()=>{});
+  return json;
+}
+
+async function _logLl3ApiCall(feature, matchId, path) {
+  const now = getDateTime();
+  const month = now.slice(0, 7);
+  const m = matchId ? matches[matchId] : null;
+  const entry = { at: now, month, feature, matchId: matchId || null, matchLabel: m ? `${m.teamA} vs ${m.teamB}` : null, path };
+  ll3ApiLog = [entry, ...ll3ApiLog].filter(e => e.month === month);
+  try {
+    await setDoc(doc(window._fbDb, 'pp_meta', 'll3_api_log'), { entries: ll3ApiLog });
+  } catch (e) { console.warn('Could not persist Cricket Live Line 3 API log:', e.message); }
+}
+
+async function _loadLl3ApiLog() {
+  try {
+    const snap = await getDoc(doc(window._fbDb, 'pp_meta', 'll3_api_log'));
+    if (snap.exists()) {
+      const month = getDateTime().slice(0, 7);
+      ll3ApiLog = (snap.data().entries || []).filter(e => e.month === month);
+    }
+  } catch (e) { console.warn('Could not load Cricket Live Line 3 API log:', e.message); }
+}
+
+async function d11FetchLl3ImportList() {
+  d11Ll3ImportLoading = true;
+  d11Ll3ImportError = null;
+  render();
+  try {
+    // upcomingMatches — same confirmed shape as Cricket Live Line's own
+    // endpoint: { status, msg, data: [ {match_id, team_a, team_b,
+    // team_a_id, team_b_id, series, series_type, match_type, date_wise,
+    // match_date, match_time, venue, match_status, matchs, ...}, ... ] }
+    const raw = await _ll3Fetch('upcomingMatches', { feature: 'Import List', matchId: null });
+    _d11Ll3DebugData = { ll3Raw: raw };
+    const allMatches = Array.isArray(raw?.data) ? raw.data : [];
+    if (allMatches.length === 0) {
+      throw new Error('Cricket Live Line 3 has no matches listed right now — try again later, or create the match manually and link it instead.');
+    }
+
+    const juniorWomenTags = ['women',' u19','u-19','u16','u-16','under-19','under 19',"women's",'girls'];
+    const seen = new Set();
+    d11Ll3ImportResults = allMatches.filter(mt => {
+      const teamAName = mt.team_a || '';
+      const teamBName = mt.team_b || '';
+      if (!teamAName || !teamBName) return false;
+      const label = `${teamAName} vs ${teamBName}`;
+      if (seen.has(label)) return false;
+
+      const seriesType = (mt.series_type || '').toLowerCase();
+      if (seriesType === 'domestic') return false;
+
+      const combinedText = `${teamAName} ${teamBName} ${mt.series||''}`.toLowerCase();
+      if (juniorWomenTags.some(t => combinedText.includes(t))) return false;
+
+      if ((mt.match_status||'').toLowerCase() === 'completed') return false;
+
+      seen.add(label);
+      return true;
+    }).sort((a,b) => {
+      const parseDt = (mt) => {
+        const d = (mt.date_wise||'').split(',')[0].trim();
+        const t = mt.match_time || '';
+        const ms = new Date(`${d} ${t}`).getTime();
+        return isNaN(ms) ? 0 : ms;
+      };
+      return parseDt(a) - parseDt(b);
+    });
+
+    if (d11Ll3ImportResults.length === 0) {
+      throw new Error(`Cricket Live Line 3 returned ${allMatches.length} match(es), but none were current international/league fixtures (all domestic, finished, or women's/junior, which are filtered). Try 🐛 View Raw Data to check, or create the match manually and link it instead.`);
+    }
+  } catch (e) {
+    console.error(e);
+    d11Ll3ImportError = 'Could not reach Cricket Live Line 3 API — ' + (e.message||'unknown error');
+  } finally {
+    d11Ll3ImportLoading = false;
+    render();
+  }
+}
+
+async function d11ImportMatchFromLl3(mt) {
+  if (!mt || !mt.match_id) return;
+  const teamA = (mt.team_a || 'TBD').trim();
+  const teamB = (mt.team_b || 'TBD').trim();
+  const dateStr = (mt.date_wise||'').split(',')[0].trim();
+  const timeStr = mt.match_time || '';
+  const startMs = (() => { const ms = new Date(`${dateStr} ${timeStr}`).getTime(); return isNaN(ms) ? Date.now() : ms; })();
+  const formatMap = { TEST: 'Test', ODI: 'ODI', T20: 'T20', T10: 'T10' };
+  const format = formatMap[(mt.match_type||'').toUpperCase()] || 'T20';
+
+  const mid = 'm_' + Date.now() + '_' + Math.random().toString(36).slice(2,8);
+  matches[mid] = {
+    id: mid,
+    sport: 'cricket',
+    format,
+    teamA, teamB,
+    seriesName: mt.series || '',
+    deadline: startMs,
+    status: 'upcoming',
+    questions: [],
+    matchSeqNo: await _nextMatchSeqNo(),
+    ll3MatchId: mt.match_id
+  };
+  await _saveMatchToFirestore(mid, matches[mid]);
+
+  dream11Matches[mid] = { players: [], scored: false, locked: false, published: false, megaPool: 0, freePool: 0 };
+  await _saveDream11MatchToFirestore(mid, dream11Matches[mid]);
+
+  d11Ll3ImportPanelOpen = false;
+  d11Ll3ImportResults = [];
+  showNotif(`✅ Created & linked "${teamA} vs ${teamB}" — fetching squad now...`);
+  d11ActiveMatchId = mid;
+  d11AdminTab = 'pool';
+  tab = 'dream11Pool';
+  render();
+  window.scrollTo(0,0);
+  d11FetchSquadFromLl3(mid).catch(e => console.warn('Auto squad fetch after Cricket Live Line 3 import failed:', e.message));
+}
+
+async function d11OpenLl3ImportPanel() {
+  d11Ll3ImportPanelOpen = true;
+  d11Ll3ImportResults = [];
+  d11Ll3ImportError = null;
+  render();
+  d11FetchLl3ImportList();
+}
+
+function d11CloseLl3ImportPanel() {
+  d11Ll3ImportPanelOpen = false;
+  d11Ll3ImportResults = [];
+  d11Ll3ImportError = null;
+  render();
+}
+
+function renderD11Ll3ImportPanelModal() {
+  if (!d11Ll3ImportPanelOpen) return '';
+  return `<div style="position:fixed;inset:0;z-index:2000;background:rgba(5,10,20,0.82);backdrop-filter:blur(4px);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseLl3ImportPanel()">
+    <div class="card" style="width:100%;max-width:600px;max-height:82vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:18px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="font-size:15px;font-weight:700">⚡ Import from Cricket Live Line 3</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseLl3ImportPanel()">✕</button>
+      </div>
+      <div style="font-size:11.5px;color:var(--dim);margin-bottom:14px">Upcoming fixtures from Cricket Live Line 3 — tap one to create + auto-link a Dream11 match in one step.</div>
+      ${_d11Ll3DebugData ? `<button class="btn-secondary btn-block" style="font-size:11px;padding:7px;margin-bottom:10px;background:rgba(239,68,68,0.1);border-color:rgba(239,68,68,0.3);color:#fca5a5" onclick="d11OpenLl3DebugModal()">🐛 View Raw Data</button>` : ''}
+      ${d11Ll3ImportLoading ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">🔄 Loading fixtures…</div>` : ''}
+      ${d11Ll3ImportError ? `<div style="background:rgba(220,38,38,0.1);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:10px;font-size:12px;color:#f87171;margin-bottom:10px">${d11Ll3ImportError}</div>` : ''}
+      ${!d11Ll3ImportLoading ? d11Ll3ImportResults.map(mt => {
+        const title = `${mt.team_a||'TBD'} vs ${mt.team_b||'TBD'}`;
+        const sub = [mt.matchs, mt.series].filter(Boolean).join(' · ');
+        const dateStr = [mt.date_wise, mt.match_time].filter(Boolean).join(', ');
+        const fmtBadge = mt.match_type ? `<span style="font-size:9.5px;font-weight:700;color:#f59e0b;background:#f59e0b1a;border-radius:5px;padding:2px 6px;white-space:nowrap;margin-left:6px">${mt.match_type}</span>` : '';
+        return `
+        <div style="background:var(--input-bg);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+          <div style="font-size:12.5px;font-weight:600;line-height:1.4;margin-bottom:2px">${title}${fmtBadge}</div>
+          <div style="font-size:10.5px;color:var(--dim);margin-bottom:2px">${sub}</div>
+          ${dateStr ? `<div style="font-size:10px;color:var(--dim2);margin-bottom:8px">⏰ ${dateStr}</div>` : `<div style="margin-bottom:8px"></div>`}
+          <button class="btn-secondary btn-block" style="font-size:11px;padding:8px;background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;border:none" onclick='d11ImportMatchFromLl3(${JSON.stringify(mt).replace(/'/g,"&apos;")})'>➕ Create & Link This Match</button>
+        </div>
+      `;
+      }).join('') : ''}
+      ${!d11Ll3ImportLoading && !d11Ll3ImportResults.length && !d11Ll3ImportError ? `<div style="text-align:center;padding:14px 4px 4px">
+        <div style="color:var(--dim);font-size:13px;margin-bottom:12px">No upcoming fixtures found</div>
+        <button class="btn-secondary btn-block" style="font-size:12px;padding:9px;background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;border:none" onclick="d11CloseLl3ImportPanel();d11AdminCreateMatchForLl3()">➕ Create Match Manually Instead</button>
+      </div>` : ''}
+      <button class="btn-secondary btn-block" style="margin-top:10px;font-size:12px" onclick="d11FetchLl3ImportList()">🔄 Refresh</button>
+    </div>
+  </div>`;
+}
+
+async function d11SearchLiveMatchLl3(matchId) {
+  const m = matches[matchId];
+  if (!m) return;
+  _d11Ll3SearchLoading = true;
+  _d11Ll3SearchError = null;
+  _d11Ll3SearchResults = [];
+  render();
+  try {
+    const [liveRaw, upcomingRaw] = await Promise.all([
+      _ll3Fetch('liveMatches', { feature: 'Link Match Search', matchId: null }).catch(()=>null),
+      _ll3Fetch('upcomingMatches', { feature: 'Link Match Search', matchId: null }).catch(()=>null)
+    ]);
+    const pool = [
+      ...(Array.isArray(liveRaw?.data) ? liveRaw.data : []),
+      ...(Array.isArray(upcomingRaw?.data) ? upcomingRaw.data : [])
+    ];
+    if (pool.length === 0) throw new Error('No live/upcoming matches returned from Cricket Live Line 3 right now');
+
+    const teamAWords = (m.teamA||'').toLowerCase().split(/\s+/).filter(w=>w.length>2);
+    const teamBWords = (m.teamB||'').toLowerCase().split(/\s+/).filter(w=>w.length>2);
+    const juniorWomenTags = ['women','u19','u-19','u16','u-16','under-19','under 19'];
+    const ourMatchIsJuniorWomen = juniorWomenTags.some(t => (m.teamA+' '+m.teamB).toLowerCase().includes(t));
+
+    const scored = pool.map(mt => {
+      const nameL = `${mt.team_a||''} ${mt.team_b||''} ${mt.series||''}`.toLowerCase();
+      const isJuniorWomen = juniorWomenTags.some(t => nameL.includes(t));
+      if (isJuniorWomen && !ourMatchIsJuniorWomen) return { mt, score: -1 };
+      const aHit = teamAWords.some(w => nameL.includes(w));
+      const bHit = teamBWords.some(w => nameL.includes(w));
+      if (!aHit || !bHit) return { mt, score: 0 };
+      let score = 0;
+      teamAWords.forEach(w => { if (nameL.includes(w)) score++; });
+      teamBWords.forEach(w => { if (nameL.includes(w)) score++; });
+      if ((mt.match_status||'').toLowerCase() === 'live') score += 0.5;
+      return { mt, score };
+    }).filter(x => x.score > 0).sort((a,b)=>b.score-a.score);
+
+    _d11Ll3SearchResults = scored.slice(0, 8).map(x => x.mt);
+    if (_d11Ll3SearchResults.length === 0) {
+      _d11Ll3SearchError = 'No exact match found on Cricket Live Line 3 for both team names together. Showing recent matches instead — pick manually, or use manual paste if not listed.';
+      _d11Ll3SearchResults = pool.slice(0, 15);
+    }
+  } catch (e) {
+    console.error(e);
+    _d11Ll3SearchError = 'Could not reach Cricket Live Line 3 API — ' + (e.message||'unknown error');
+  } finally {
+    _d11Ll3SearchLoading = false;
+    render();
+  }
+}
+
+function d11LinkLl3Match(matchId, ll3MatchId) {
+  const m = matches[matchId];
+  if (!m) return;
+  m.ll3MatchId = ll3MatchId;
+  _saveMatchToFirestore(matchId, m);
+  _d11Ll3SearchResults = [];
+  d11Ll3LinkPickerMatchId = null;
+  showNotif('🔗 Linked to Cricket Live Line 3! Fetching squad…');
+  render();
+  d11FetchSquadFromLl3(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 3 link failed:', e.message));
+}
+
+function d11UnlinkLl3Match(matchId) {
+  const m = matches[matchId];
+  if (!m) return;
+  delete m.ll3MatchId;
+  _saveMatchToFirestore(matchId, m);
+  showNotif('Unlinked from Cricket Live Line 3 — switched back to manual paste');
+  render();
+}
+
+function d11OpenLl3LinkPicker(matchId) {
+  d11Ll3LinkPickerMatchId = matchId;
+  _d11Ll3SearchResults = [];
+  _d11Ll3SearchError = null;
+  render();
+  d11SearchLiveMatchLl3(matchId);
+}
+
+function d11CloseLl3LinkPicker() {
+  d11Ll3LinkPickerMatchId = null;
+  _d11Ll3SearchResults = [];
+  render();
+}
+
+function renderD11Ll3LinkPickerModal() {
+  if (!d11Ll3LinkPickerMatchId) return '';
+  const m = matches[d11Ll3LinkPickerMatchId];
+  if (!m) return '';
+  return `<div style="position:fixed;inset:0;z-index:2000;background:rgba(5,10,20,0.82);backdrop-filter:blur(4px);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseLl3LinkPicker()">
+    <div class="card" style="width:100%;max-width:600px;max-height:82vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:18px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div style="font-size:15px;font-weight:700">🔗 Link Cricket Live Line 3 Match</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseLl3LinkPicker()">✕</button>
+      </div>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:12px">Searching Cricket Live Line 3 for: <b>${m.teamA} vs ${m.teamB}</b></div>
+      ${_d11Ll3SearchLoading ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">🔄 Searching…</div>` : ''}
+      ${_d11Ll3SearchError ? `<div style="background:rgba(220,38,38,0.1);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:10px;font-size:12px;color:#f87171;margin-bottom:10px">${_d11Ll3SearchError}</div>` : ''}
+      ${!_d11Ll3SearchLoading ? _d11Ll3SearchResults.map(mt => {
+        const title = `${mt.team_a||'TBD'} vs ${mt.team_b||'TBD'}`;
+        const sub = [mt.matchs, mt.series].filter(Boolean).join(' · ');
+        const status = mt.match_status || '';
+        return `
+        <div style="background:var(--input-bg);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+          <div style="font-size:12.5px;font-weight:600;line-height:1.4;margin-bottom:2px">${title}</div>
+          <div style="font-size:10.5px;color:var(--dim);margin-bottom:2px">${sub}</div>
+          ${status ? `<div style="font-size:10px;color:var(--dim2);margin-bottom:8px">${status}</div>` : `<div style="margin-bottom:8px"></div>`}
+          <button class="btn-secondary btn-block" style="font-size:11px;padding:8px;background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;border:none" onclick="d11LinkLl3Match('${d11Ll3LinkPickerMatchId}',${mt.match_id})">Link this match</button>
+        </div>
+      `;
+      }).join('') : ''}
+      ${!_d11Ll3SearchLoading && !_d11Ll3SearchResults.length && !_d11Ll3SearchError ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">No matches found</div>` : ''}
+      <button class="btn-secondary btn-block" style="margin-top:10px;font-size:12px" onclick="d11SearchLiveMatchLl3('${d11Ll3LinkPickerMatchId}')">🔄 Search Again</button>
+    </div>
+  </div>`;
+}
+
+function d11OpenLl3DebugModal() { render(); }
+
+function d11CloseLl3DebugModal() { _d11Ll3DebugData = null; render(); }
+
+function renderD11Ll3DebugModal() {
+  if (!_d11Ll3DebugData) return '';
+  const pretty = JSON.stringify(_d11Ll3DebugData, null, 2);
+  return `<div style="position:fixed;inset:0;z-index:2100;background:rgba(5,10,20,0.9);display:flex;align-items:center;justify-content:center;padding:16px" onclick="if(event.target===this) d11CloseLl3DebugModal()">
+    <div class="card" style="width:100%;max-width:640px;max-height:82vh;overflow-y:auto;padding:16px" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-size:14px;font-weight:700">🐛 Raw Cricket Live Line 3 Response (debug)</div>
+        <div style="display:flex;gap:8px">
+          <button class="btn-secondary" style="width:auto;padding:6px 12px;font-size:11px;white-space:nowrap" onclick="d11CopyDebugText('d11-ll3-debug-text', this)">📋 Copy</button>
+          <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseLl3DebugModal()">✕</button>
+        </div>
+      </div>
+      <textarea id="d11-ll3-debug-text" readonly style="width:100%;height:400px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px" onclick="this.select()">${pretty}</textarea>
+    </div>
+  </div>`;
+}
+
+async function d11FetchSquadFromLl3(matchId) {
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m) return;
+  if (!m.ll3MatchId) {
+    return showNotif('Link this match to Cricket Live Line 3 first (🔗 Link Cricket Live Line 3), then try again', 'error');
+  }
+  showNotif('📥 Fetching squad from Cricket Live Line 3…');
+  try {
+    const raw = await _ll3Fetch(`match/${m.ll3MatchId}/squads`, { feature: 'Fetch Squad', matchId });
+    _d11Ll3DebugData = { ll3Raw: raw, ll3MatchId: m.ll3MatchId };
+    const data = raw?.data || {};
+    const teamA = data.team_a || {};
+    const teamB = data.team_b || {};
+    if (!Array.isArray(teamA.player) && !Array.isArray(teamB.player)) {
+      showNotif('📭 Cricket Live Line 3 hasn\'t published this squad yet (or the response shape was unexpected — check 🐛 View Raw Data). Try again closer to match time, or add players manually for now.', 'error');
+      render();
+      return;
+    }
+    d11SyncTeamFlag(m.teamA, teamA.flag);
+    d11SyncTeamFlag(m.teamB, teamB.flag);
+
+    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    let addedCount = 0;
+    const addSide = (teamObj, side) => {
+      (teamObj.player || []).forEach(p => {
+        const name = (p.name || '').trim();
+        if (!name || existingNamesLower.has(name.toLowerCase())) return;
+        const roleText = p.play_role || '';
+        const isKeeper = /keeper/i.test(roleText);
+        const role = _d11MapCricbuzzRole(roleText, isKeeper);
+        const photo = (p.image || '').trim() || null;
+        const player = newDream11Player(name, role, side, { photo });
+        d11m.players.push(player);
+        d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
+        existingNamesLower.add(name.toLowerCase());
+        addedCount++;
+      });
+    };
+    addSide(teamA, 'A');
+    addSide(teamB, 'B');
+
+    if (addedCount === 0) {
+      showNotif('No new players to add — squad already matches what\'s in your pool.');
+      render();
+      return;
+    }
+
+    await _saveDream11MatchToFirestore(matchId, d11m);
+    showNotif(`✅ Added ${addedCount} players from Cricket Live Line 3 squad!`);
+    render();
+  } catch (e) {
+    console.error('Cricket Live Line 3 squad fetch failed:', e);
+    showNotif('Could not fetch squad from Cricket Live Line 3 — ' + (e.message||'unknown error'), 'error');
+    render();
+  }
+}
+
+async function d11CheckPlayingXIAnnouncedLl3(matchId, silent) {
+  const notify = silent ? (()=>{}) : showNotif;
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m || !m.ll3MatchId) return;
+  notify('🔍 Checking Cricket Live Line 3 for Playing XI…');
+  try {
+    const raw = await _ll3Fetch(`match/${m.ll3MatchId}/playingXI`, { feature: silent ? 'Auto Playing XI Check' : 'Check Playing XI', matchId });
+    _d11Ll3DebugData = { ll3Raw: raw, ll3MatchId: m.ll3MatchId };
+    const data = raw?.data || {};
+    const namesInXI = new Set();
+    [data.team_a, data.team_b].forEach(t => {
+      (t?.player || []).forEach(p => { const n = (p.name||'').trim(); if (n) namesInXI.add(n.toLowerCase()); });
+    });
+    if (namesInXI.size === 0) {
+      notify('Playing XI not announced yet on Cricket Live Line 3 — try again closer to match time.', 'error');
+      return;
+    }
+    let confirmedCount = 0, unconfirmedCount = 0;
+    (d11m.players || []).forEach(p => {
+      const inLatestXI = namesInXI.has(p.name.toLowerCase().trim());
+      if (inLatestXI && !p.isPlayingXI) { p.isPlayingXI = true; confirmedCount++; }
+      else if (!inLatestXI && p.isPlayingXI && !_d11PlayerHasActivity(p)) { p.isPlayingXI = false; unconfirmedCount++; }
+    });
+    if (confirmedCount > 0 || unconfirmedCount > 0) {
+      await _saveDream11MatchToFirestore(matchId, d11m);
+      d11ApplyBackupReplacements(matchId);
+      notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
+      render();
+    } else {
+      notify('No changes — latest Playing XI matches what was already confirmed.', 'error');
+    }
+  } catch (e) {
+    console.error('Cricket Live Line 3 Playing XI check failed:', e);
+    notify('Could not check Playing XI — ' + (e.message||'unknown error'), 'error');
+  }
+}
+
+async function d11SyncLiveMatchLl3(matchId, showToast) {
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m || !m.ll3MatchId) return;
+  try {
+    const raw = await _ll3Fetch(`match/${m.ll3MatchId}/scorecard`, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
+    _d11SyncDebugData = { matchId, fetchedAt: Date.now(), raw, source: 'Cricket Live Line 3' };
+
+    const data = raw?.data || {};
+    const scorecard = data.scorecard || {};
+    const innings = Object.values(scorecard);
+    if (innings.length === 0) {
+      if (showToast) showNotif('No scorecard data yet on Cricket Live Line 3 — try again once the match has started.', 'error');
+      return;
+    }
+
+    let battersApplied = 0, bowlersApplied = 0;
+    const fieldingRowsAll = [];
+
+    innings.forEach(inn => {
+      const team = inn.team || {};
+      const teamNameL = (team.name || team.short_name || '').toLowerCase();
+      if (team.score !== undefined) {
+        const scoreStr = `${team.score}/${team.wicket ?? 0} (${team.over ?? 0} Ov)`;
+        if (_d11TeamNameMatches(teamNameL, m.teamA)) m.scoreA = scoreStr;
+        else if (_d11TeamNameMatches(teamNameL, m.teamB)) m.scoreB = scoreStr;
+      }
+
+      (inn.batsman || []).forEach(b => {
+        const mapped = {
+          name: b.name,
+          runs: b.run, balls: b.ball,
+          outdec: b.out_by || (b.out_by === 'not out' ? 'not out' : ''),
+          fours: b.fours, sixes: b.sixes,
+        };
+        if (_d11ApplyLiveBattingRow(d11m, mapped)) battersApplied++;
+        _d11ExtractLiveFieldingCredit(mapped, fieldingRowsAll);
+      });
+      (inn.bolwer || inn.bowler || []).forEach(bl => {
+        const mapped = {
+          name: bl.name,
+          overs: bl.over, wickets: bl.wicket, maidens: bl.maiden,
+          runs: bl.run,
+        };
+        if (_d11ApplyLiveBowlingRow(d11m, mapped)) bowlersApplied++;
+      });
+    });
+
+    const mergedFieldingAll = {};
+    fieldingRowsAll.forEach(r => {
+      const key = r.name.toLowerCase();
+      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0 };
+      mergedFieldingAll[key].catches += r.catches;
+      mergedFieldingAll[key].stumpings += r.stumpings;
+      mergedFieldingAll[key].runOuts += r.runOuts;
+    });
+    let fieldersApplied = 0;
+    Object.values(mergedFieldingAll).forEach(row => {
+      const p = _d11FindPlayerByName(d11m, row.name);
+      if (!p) return;
+      p.stats = { ...(p.stats||{}),
+        catches: row.catches,
+        stumpings: row.stumpings,
+        runOuts: row.runOuts,
+        isPlayingXI: true
+      };
+      p.isPlayingXI = true;
+      fieldersApplied++;
+    });
+
+    (d11m.players || []).forEach(p => { if (p.stats) p.points = calcDream11PlayerPoints(p.stats, matchId); });
+    recalcDream11MatchPoints(d11m);
+
+    _d11Ll3LastSyncedAt[matchId] = Date.now();
+    d11ApplyBackupReplacements(matchId);
+    await _saveMatchToFirestore(matchId, m);
+    await _saveDream11MatchToFirestore(matchId, d11m);
+    await d11RefreshLiveTeamPoints(matchId);
+
+    let isFinished = false;
+    if (innings.length >= 2) {
+      try {
+        const infoRaw = await _ll3Fetch(`match/${m.ll3MatchId}/info`, { feature: 'Finish Check', matchId });
+        const infoStatus = (Array.isArray(infoRaw?.data) ? infoRaw.data[0] : infoRaw?.data)?.match_status || '';
+        const looksFinished = /completed/i.test(infoStatus);
+        if (looksFinished) {
+          const pendingKey = matchId + '_ll3';
+          if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = infoStatus || m.resultText; }
+          else { _d11PendingFinish[pendingKey] = true; }
+        } else {
+          delete _d11PendingFinish[matchId + '_ll3'];
+        }
+      } catch (e) { /* finish-check failure shouldn't block the sync itself */ }
+    }
+    if (isFinished) {
+      m.status = 'completed';
+      if (d11m) d11m.scored = true;
+      _d11MarkTeamsScoredForMatch(matchId);
+      await _saveMatchToFirestore(matchId, m);
+      await _saveDream11MatchToFirestore(matchId, d11m);
+      if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
+    } else if (showToast) {
+      if (battersApplied === 0 && bowlersApplied === 0) {
+        showNotif('⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).', 'error');
+      } else {
+        showNotif(`✅ Live data synced — ${battersApplied} batting + ${bowlersApplied} bowling + ${fieldersApplied} fielding rows updated`);
+      }
+    }
+    render();
+  } catch (e) {
+    console.error('Cricket Live Line 3 live sync error:', e);
+    if (showToast) showNotif('Could not sync — ' + (e.message||'unknown error') + '. You can still paste manually.', 'error');
+  }
+}
+
+function _d11RenderLl3SyncRow(m) {
+  if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId) return ''; // already on another provider
+  if (!m.ll3MatchId) {
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
+      <span style="font-size:11px;color:#fbbf24;flex:1;min-width:140px">⚡ Cricket Live Line 3: not linked</span>
+      <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;border:none" onclick="d11OpenLl3LinkPicker('${m.id}')">🔗 Link Cricket Live Line 3</button>
+    </div>`;
+  }
+  const lastSync = _d11Ll3LastSyncedAt[m.id];
+  const lastSyncStr = lastSync ? new Date(lastSync).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : 'not yet';
+  return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
+    <span style="font-size:11px;color:#fbbf24;flex:1;min-width:140px">⚡ Linked to Cricket Live Line 3 · Last synced: ${lastSyncStr}</span>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchLl3('${m.id}', true)">🔄 Sync Now</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchLl3('${m.id}', true)">🏁 Fetch Final Result</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromLl3('${m.id}')">📥 Fetch Squad</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11CheckPlayingXIAnnouncedLl3('${m.id}')">🏏 Check Playing XI</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11ActiveMatchId='${m.id}';d11AdminTab='pool';tab='dream11Pool';d11StartPasteSquad();window.scrollTo(0,0)">✍️ Paste Playing XI</button>
+    ${_d11Ll3DebugData ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11OpenLl3DebugModal()">🐛 View Raw Data</button>` : ''}
+    ${_d11SyncDebugData && _d11SyncDebugData.matchId === m.id ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.3);color:#fca5a5" onclick="d11OpenSyncDebugModal()">🐛 View Raw Sync Data</button>` : ''}
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(220,38,38,0.12);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11UnlinkLl3Match('${m.id}')">✕ Unlink</button>
+  </div>`;
+}
+
+function renderD11Ll3Hub() {
+  const linked = Object.values(matches).filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && m.ll3MatchId);
+  const unlinkedEligible = Object.values(matches)
+    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.ll3MatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cllMatchId && !m.cb2MatchId && !m.ll2MatchId && !dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
+
+  function renderCard(m) {
+    const d11m = dream11Matches[m.id];
+    const playerCount = d11m ? d11m.players.length : 0;
+    const teamCount = Object.values(dream11Teams).filter(t => t.matchId === m.id).length;
+    const xiCount = d11m ? d11m.players.filter(p => p.isPlayingXI).length : 0;
+    const dLocked = isD11Locked(m.id);
+    const deadlineStr = m.deadline ? pkDateTime(m.deadline) : 'Not set';
+    return `
+    <div class="card mb14">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div class="match-teams" style="gap:8px">
+          <span class="team-name" style="font-size:14px">${m.teamA||'TBD'}</span>
+          <span class="vs-badge" style="font-size:10px;padding:2px 8px">VS</span>
+          <span class="team-name" style="font-size:14px">${m.teamB||'TBD'}</span>
+        </div>
+        ${d11m?.scored ? `<span class="match-status status-completed">SCORED</span>` : dLocked ? `<span class="match-status status-live">LOCKED</span>` : `<span class="match-status status-upcoming">OPEN</span>`}
+      </div>
+      <div style="margin-bottom:8px">
+        ${d11m?.published ? `<span class="match-status" style="background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.35)">🟢 PUBLISHED — visible to users</span>` : `<span class="match-status" style="background:rgba(234,179,8,0.15);color:#facc15;border:1px solid rgba(234,179,8,0.35)">🔒 NOT PUBLISHED — hidden from users</span>`}
+      </div>
+      <div style="font-size:11.5px;color:var(--dim);margin-bottom:6px">👥 ${playerCount} players · 🏏 ${xiCount} XI confirmed · 📋 ${teamCount} teams</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:var(--input-bg);border-radius:8px;padding:8px 10px">
+        <span style="font-size:11px;color:var(--orange);flex:1">⏰ Deadline: ${deadlineStr}${dLocked && !d11m?.locked ? ' (auto-locked)' : ''}</span>
+        <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11EditDeadline('${m.id}')">✏️ Change</button>
+      </div>
+      ${_d11RenderLl3SyncRow(m)}
+      <button class="btn-primary btn-block" style="font-size:12px;padding:10px;margin-bottom:8px;background:${d11m?.published ? 'linear-gradient(135deg,#dc2626,#b91c1c)' : 'linear-gradient(135deg,#16a34a,#15803d)'}" onclick="d11TogglePublish('${m.id}')">${d11m?.published ? '🚫 Unpublish (hide from users)' : '🚀 Publish (show to users)'}</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn-secondary" style="flex:1;font-size:12px;padding:10px" onclick="openDream11Match('${m.id}')">⚙️ Manage Pool</button>
+        ${teamCount > 0 ? `<button class="btn-secondary" style="flex:1;font-size:12px;padding:10px" onclick="openDream11Leaderboard('${m.id}')">🏅 Leaderboard</button>` : ''}
+        <button class="btn-secondary" style="font-size:12px;padding:10px;background:rgba(220,38,38,0.12);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11DeleteMatch('${m.id}')">🗑️</button>
+      </div>
+    </div>`;
+  }
+
+  const notScored = linked.filter(m => !dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
+  const scoredList = linked.filter(m => dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(b.deadline||0) - new Date(a.deadline||0));
+
+  return `
+  ${renderD11Hero('Live sync via Cricket Live Line 3 — Match Link, Squad, Playing 11 & Scoring, fully automatic')}
+  <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="tab='dream11';render();window.scrollTo(0,0)">← Back to Dream11</button>
+  <div class="section-title">⚡ Cricket Live Line 3 Matches</div>
+  <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#f59e0b,#d97706)" onclick="d11OpenLl3ImportPanel()">⚡ Import from Cricket Live Line 3 (Upcoming)</button>
+  <button class="btn-secondary btn-block mb14" style="background:rgba(245,158,11,0.1);border-color:rgba(245,158,11,0.3);color:#fbbf24" onclick="d11AdminCreateMatchForLl3()">➕ Create New Match & Link Manually</button>
+  <div class="empty-state" style="padding:6px 2px;font-size:11.5px;text-align:left;line-height:1.6;margin-bottom:14px">
+    Or link a match you already created (manually, or via another provider, if not covered there) using the list below.
+  </div>
+  ${unlinkedEligible.length > 0 ? `
+    <div class="section-title" style="font-size:13px">Link a match</div>
+    ${unlinkedEligible.slice(0, 10).map(m => `
+      <div class="card mb10" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <div>
+          <div style="font-weight:700;font-size:13px">${m.teamA||'TBD'} vs ${m.teamB||'TBD'}</div>
+          <div style="font-size:10.5px;color:var(--dim)">${m.deadline ? pkDateTime(m.deadline) : 'No deadline set'}</div>
+        </div>
+        <button class="btn-secondary" style="font-size:11px;padding:7px 12px;white-space:nowrap;background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;border:none" onclick="d11OpenLl3LinkPicker('${m.id}')">🔗 Link</button>
+      </div>
+    `).join('')}
+  ` : ''}
+  <div class="section-title" style="font-size:13px;margin-top:${unlinkedEligible.length > 0 ? '18px' : '0'}">Linked matches</div>
+  ${notScored.length === 0 ? `<div class="empty-state"><div class="empty-icon">⚡</div>No Cricket Live Line 3-linked matches yet.<br/>Pick a match above to link one.</div>` : notScored.map(renderCard).join('')}
+  ${scoredList.length > 0 ? `
+    <button class="btn-secondary btn-block mb14" style="font-size:12px;padding:10px" onclick="d11AdminShowCompleted=!d11AdminShowCompleted;render()">
+      ${d11AdminShowCompleted ? '▲' : '▼'} ✅ Completed / Scored Matches (${scoredList.length})
+    </button>
+    ${d11AdminShowCompleted ? scoredList.map(renderCard).join('') : ''}
+  ` : ''}
+  `;
+}
+
+function d11AdminCreateMatchForLl3() {
+  startNewMatch();
+  if (draftMatch) { draftMatch.sport = 'cricket'; draftMatch._linkToLl3AfterSave = true; }
+  adminTab = 'create';
+  tab = 'dream11';
+  d11AdminCreatePending = true;
+  render();
+  window.scrollTo(0,0);
+}
+
+// ── Cricket Live Line 3 — Player Ranking (new feature, no CLL/CLL2 equivalent) ──
+// GET playerRanking/{category} — category 1 = e.g. Batting/ICC ranking bucket
+// per the provider's own numbering; exposed here as a simple fetch + render
+// so admin can pull rankings on demand (mirrors the _ll3Fetch wrapper style).
+async function d11FetchLl3PlayerRanking(category) {
+  _d11Ll3PlayerRankingLoading = true;
+  _d11Ll3PlayerRankingError = null;
+  render();
+  try {
+    const raw = await _ll3Fetch(`playerRanking/${category}`, { feature: 'Player Ranking', matchId: null });
+    _d11Ll3PlayerRankingData = { category, raw, fetchedAt: Date.now() };
+  } catch (e) {
+    _d11Ll3PlayerRankingError = 'Could not reach Cricket Live Line 3 API — ' + (e.message||'unknown error');
+  } finally {
+    _d11Ll3PlayerRankingLoading = false;
+    render();
+  }
+}
+
+function d11OpenLl3PlayerRankingPanel() {
+  if (!_d11Ll3PlayerRankingData && !_d11Ll3PlayerRankingLoading) d11FetchLl3PlayerRanking(1);
+  d11Ll3PlayerRankingPanelOpen = true;
+  render();
+}
+
+function d11CloseLl3PlayerRankingPanel() {
+  d11Ll3PlayerRankingPanelOpen = false;
+  render();
+}
+
+function renderD11Ll3PlayerRankingModal() {
+  const d = _d11Ll3PlayerRankingData;
+  const pretty = d ? JSON.stringify(d.raw, null, 2) : '';
+  return `
+  <div class="modal-overlay" onclick="if(event.target===this) d11CloseLl3PlayerRankingPanel()">
+    <div class="modal-content" style="max-width:520px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div style="font-size:15px;font-weight:700">🏆 Player Ranking — Cricket Live Line 3</div>
+        <button class="btn-secondary" style="font-size:11px;padding:5px 10px" onclick="d11CloseLl3PlayerRankingPanel()">✕</button>
+      </div>
+      ${_d11Ll3PlayerRankingLoading ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">🔄 Loading…</div>` : ''}
+      ${_d11Ll3PlayerRankingError ? `<div style="background:rgba(220,38,38,0.1);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:10px;font-size:12px;color:#f87171;margin-bottom:10px">${_d11Ll3PlayerRankingError}</div>` : ''}
+      ${!_d11Ll3PlayerRankingLoading && d ? `<pre style="font-size:10.5px;white-space:pre-wrap;word-break:break-all;background:rgba(0,0,0,0.25);border-radius:8px;padding:10px;max-height:50vh;overflow:auto">${pretty.replace(/</g,'&lt;')}</pre>` : ''}
+      <button class="btn-secondary btn-block" style="margin-top:10px;font-size:12px;padding:9px" onclick="d11FetchLl3PlayerRanking(1)">🔄 Refresh</button>
+    </div>
+  </div>`;
+}
+
+
+
 function renderD11CllHub() {
   const linked = Object.values(matches).filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && m.cllMatchId);
   const unlinkedEligible = Object.values(matches)
-    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.cllMatchId && !m.cricketDataMatchId && !m.espnMatchId && !dream11Matches[m.id]?.scored)
+    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.cllMatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cb2MatchId && !m.ll2MatchId && !m.ll3MatchId && !dream11Matches[m.id]?.scored)
     .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
 
   function renderCard(m) {
@@ -13030,7 +13784,7 @@ function renderD11CllHub() {
 }
 
 function _d11RenderCb2SyncRow(m) {
-  if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.ll2MatchId) return ''; // already on another provider
+  if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.ll2MatchId || m.ll3MatchId) return ''; // already on another provider
   if (!m.cb2MatchId) {
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(147,51,234,0.08);border:1px solid rgba(147,51,234,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
       <span style="font-size:11px;color:#c084fc;flex:1;min-width:140px">🏏 Cricbuzz No 2: not linked</span>
@@ -13055,7 +13809,7 @@ function _d11RenderCb2SyncRow(m) {
 function renderD11Cb2Hub() {
   const linked = Object.values(matches).filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && m.cb2MatchId);
   const unlinkedEligible = Object.values(matches)
-    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.cb2MatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cllMatchId && !dream11Matches[m.id]?.scored)
+    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.cb2MatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cllMatchId && !m.ll2MatchId && !m.ll3MatchId && !dream11Matches[m.id]?.scored)
     .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
 
   function renderCard(m) {
@@ -13992,21 +14746,61 @@ function renderD11EspnLinkPickerModal() {
 // many tabs are open at once. This keeps it to at most 2 extra Cricbuzz
 // calls per match (well within quota) while still surfacing the Playing XI
 // to users well before their team-submission deadline closes.
+// Provider dispatch table for the auto XI scheduler below — one entry per
+// live-sync provider, in the same priority order used everywhere else in
+// the app (Cricbuzz → CLL → CLL2 → CLL3 → CB2 → ESPN). `linked(m)` tells the
+// scheduler whether THIS match is using that particular provider; `fn` is
+// that provider's own d11CheckPlayingXIAnnounced* function, which already
+// knows how to silently fetch + mark confirmed players for its match-id
+// field. Adding a 7th provider later only means adding one entry here.
+const D11_XI_CHECK_PROVIDERS = [
+  { linked: m => !!(m.cricketDataMatchId && m.cricbuzzTeam1Id && m.cricbuzzTeam2Id), fn: d11CheckPlayingXIAnnounced },
+  { linked: m => !!m.cllMatchId, fn: d11CheckPlayingXIAnnouncedCll },
+  { linked: m => !!m.ll2MatchId, fn: d11CheckPlayingXIAnnouncedLl2 },
+  { linked: m => !!m.ll3MatchId, fn: d11CheckPlayingXIAnnouncedLl3 },
+  { linked: m => !!m.cb2MatchId, fn: d11CheckPlayingXIAnnouncedCb2 },
+  { linked: m => !!m.espnMatchId, fn: d11CheckPlayingXIAnnouncedEspn },
+];
+
+// ── Auto Playing XI check (deadline-proximity scheduler, ALL providers) ────
+// Runs off the existing 3-min background refresh loop (any signed-in user's
+// active tab can trigger it — no dedicated admin session needed). Works for
+// a match linked to ANY of the 6 live-sync providers (Cricbuzz, Cricket
+// Live Line, Cricket Live Line 2, Cricket Live Line 3, Cricbuzz No 2, ESPN
+// Cricinfo) — whichever one the match is actually linked to.
+//
+// Fires at most 4 times per match — 20, 15, 10, and 5 minutes before the
+// deadline — each window tracked in d11m.autoXICheck = { w20, w15, w10, w5 }
+// (saved to Firestore, so it's shared across every device/tab and never
+// double-fires). Each window is skipped entirely once the Playing XI is
+// confirmed for that match, WHETHER that confirmation came from one of
+// these auto calls or from the admin tapping "🏏 Check Playing XI"
+// manually — the `.some(p => p.isPlayingXI)` guard below covers both, so
+// admin's own manual check simply pre-empts every remaining scheduled call
+// and no further API quota is spent on that match.
 async function d11AutoCheckPlayingXI() {
   const now = Date.now();
   for (const m of Object.values(matches)) {
     const d11m = dream11Matches[m.id];
-    if (!d11m || !m.cricketDataMatchId || !m.cricbuzzTeam1Id || !m.cricbuzzTeam2Id) continue;
+    if (!d11m) continue;
     if (d11m.scored || d11m.locked) continue;
-    if ((d11m.players || []).some(p => p.isPlayingXI)) continue; // already confirmed
+    if ((d11m.players || []).some(p => p.isPlayingXI)) continue; // already confirmed — manual or auto, doesn't matter, stop calling
     if (!m.deadline) continue;
     const deadlineMs = new Date(m.deadline).getTime();
     if (isNaN(deadlineMs)) continue;
     const minsToDeadline = (deadlineMs - now) / 60000;
+    if (minsToDeadline <= 0) continue; // deadline already passed — leave final-result scheduler to take over
+
+    // Find which one of the 6 providers this match is actually linked to.
+    const provider = D11_XI_CHECK_PROVIDERS.find(p => p.linked(m));
+    if (!provider) continue; // not linked to any provider yet — nothing to call
+
     const check = d11m.autoXICheck || {};
     let windowHit = null;
-    if (!check.w25 && minsToDeadline <= 25 && minsToDeadline > 20) windowHit = 'w25';
-    else if (!check.w10 && minsToDeadline <= 10 && minsToDeadline > 8) windowHit = 'w10';
+    if (!check.w20 && minsToDeadline <= 20 && minsToDeadline > 15) windowHit = 'w20';
+    else if (!check.w15 && minsToDeadline <= 15 && minsToDeadline > 10) windowHit = 'w15';
+    else if (!check.w10 && minsToDeadline <= 10 && minsToDeadline > 5) windowHit = 'w10';
+    else if (!check.w5 && minsToDeadline <= 5 && minsToDeadline > 0) windowHit = 'w5';
     if (!windowHit) continue;
     // Mark the window used FIRST (before the async call) so a second tab
     // running this same loop a few seconds later doesn't double-fire while
@@ -14014,7 +14808,7 @@ async function d11AutoCheckPlayingXI() {
     d11m.autoXICheck = { ...check, [windowHit]: true };
     await _saveDream11MatchToFirestore(m.id, d11m);
     try {
-      await d11CheckPlayingXIAnnounced(m.id, /*silent=*/true);
+      await provider.fn(m.id, /*silent=*/true);
     } catch (e) {
       console.warn('Auto Playing XI check failed for', m.id, e.message);
     }
@@ -14044,17 +14838,19 @@ async function d11AutoFetchFinalResult() {
   for (const m of Object.values(matches)) {
     const d11m = dream11Matches[m.id];
     if (!d11m) continue;
-    // A match can be linked via any ONE of 5 providers — Cricbuzz
+    // A match can be linked via any ONE of 6 providers — Cricbuzz
     // (cricketDataMatchId), Cricket Live Line (cllMatchId), LiveLine2
-    // (ll2MatchId), CB2 (cb2MatchId), or ESPN (espnMatchId). This used to
-    // only check cricketDataMatchId, so any match linked through the other
-    // 4 providers was silently skipped forever — its winner/result never
-    // got picked up automatically, no matter how long after the deadline,
-    // and the admin had to notice and fetch it manually every time.
+    // (ll2MatchId), LiveLine3 (ll3MatchId), CB2 (cb2MatchId), or ESPN
+    // (espnMatchId). This used to only check cricketDataMatchId, so any
+    // match linked through the other providers was silently skipped
+    // forever — its winner/result never got picked up automatically, no
+    // matter how long after the deadline, and the admin had to notice and
+    // fetch it manually every time.
     let syncFn = null;
     if (m.cricketDataMatchId) syncFn = d11SyncLiveMatch;
     else if (m.cllMatchId) syncFn = d11SyncLiveMatchCll;
     else if (m.ll2MatchId) syncFn = d11SyncLiveMatchLl2;
+    else if (m.ll3MatchId) syncFn = d11SyncLiveMatchLl3;
     else if (m.cb2MatchId) syncFn = d11SyncLiveMatchCb2;
     else if (m.espnMatchId) syncFn = d11SyncLiveMatchEspn;
     if (!syncFn) continue; // not linked to any provider yet
@@ -16998,6 +17794,138 @@ async function joinD11H2HContest(matchId, teamId) {
 // Called when admin finalizes Dream11 scoring — resolves all 'full' H2H
 // contests for this match, pays the winner 95% of the pool, refunds on a tie,
 // and refunds/cancels any unmatched lone-player slots.
+// ════════════════════════════════════════════════════════════
+// ADMIN: Per-contest H2H actions (Payout / Refund / Undo / Fix Pool)
+// Same logic as the match-level "All" buttons (d11RunAllPayouts,
+// d11RunAllRefunds, d11UndoAllPayouts, d11FixAllPools) but scoped to a
+// SINGLE H2H contest id, for the per-row buttons in the Participants panel.
+// ════════════════════════════════════════════════════════════
+
+// ── Payout ONE H2H contest (winner takes the prize) ──
+async function d11PayoutOneH2H(contestId) {
+  const c = d11h2hContests[contestId];
+  if (!c) { showNotif('Contest not found.', 'error'); return; }
+  if (c.status !== 'full') { showNotif('Ye contest abhi "full" nahi hai — payout sirf full contests par chal sakta hai.', 'error'); return; }
+  const matchId = c.matchId;
+  const d11m = dream11Matches[matchId];
+  if (!d11m || !d11m.scored) { showNotif('Match abhi scored nahi hai — pehle score fix karo.', 'error'); return; }
+  if (!confirm('Is H2H contest ka payout chalayein? Winner ko prize mil jayega.')) return;
+
+  const p1 = users[c.player1?.email];
+  const p2 = users[c.player2?.email];
+  if (!p1 || !p2) {
+    c.status = 'cancelled';
+    await _saveD11H2HToFirestore(c.id, c);
+    d11h2hContests[c.id] = c;
+    if (p1) await _adminWalletRefund(c.player1.email, D11_H2H_ENTRY_FEE, matchId, 'D11 H2H refund — opponent record missing', 'h2h_refund');
+    if (p2) await _adminWalletRefund(c.player2.email, D11_H2H_ENTRY_FEE, matchId, 'D11 H2H refund — opponent record missing', 'h2h_refund');
+    render();
+    showNotif('⚠️ Ek player ka record missing tha — is contest ko refund kar diya gaya.');
+    return;
+  }
+
+  const p1Team = c.player1.teamId ? dream11Teams[c.player1.teamId] : d11GetUserTeam(matchId, c.player1.email);
+  const p2Team = c.player2.teamId ? dream11Teams[c.player2.teamId] : d11GetUserTeam(matchId, c.player2.email);
+  const p1Score = p1Team?.totalPoints || 0;
+  const p2Score = p2Team?.totalPoints || 0;
+
+  let winnerId = null;
+  if (p1Score > p2Score) winnerId = c.player1.email;
+  else if (p2Score > p1Score) winnerId = c.player2.email;
+  else winnerId = 'draw';
+
+  c.status = 'completed';
+  c.winnerId = winnerId;
+  c.p1Score = p1Score;
+  c.p2Score = p2Score;
+  d11h2hContests[c.id] = c;
+  await _saveD11H2HToFirestore(c.id, c);
+
+  if (winnerId !== 'draw') {
+    const winner = users[winnerId];
+    if (winner) winner.d11h2hWins = (winner.d11h2hWins || 0) + 1;
+    await _adminWalletPrize(winnerId, c.winnerPrize, 'd11_h2h_prize', matchId, 'D11 H2H win');
+    if (winner) await _saveUserToFirestore(winnerId, winner);
+  } else {
+    await _adminWalletRefund(c.player1.email, D11_H2H_ENTRY_FEE, matchId, 'D11 H2H draw refund', 'h2h_refund');
+    await _adminWalletRefund(c.player2.email, D11_H2H_ENTRY_FEE, matchId, 'D11 H2H draw refund', 'h2h_refund');
+  }
+
+  try {
+    localStorage.setItem('pp_users_cache', JSON.stringify(users));
+    localStorage.setItem('pp_dream11_h2h_cache', JSON.stringify(d11h2hContests));
+  } catch(e){}
+  render();
+  showNotif(winnerId === 'draw' ? '✅ Draw — dono ko entry fee wapas mil gayi.' : `✅ Payout complete — ${users[winnerId]?.name||winnerId} ne Rs ${c.winnerPrize} jeeta 💰`);
+}
+
+// ── Refund ONE H2H contest (entry fees back, contest cancelled) ──
+async function d11RefundOneH2H(contestId) {
+  const c = d11h2hContests[contestId];
+  if (!c) { showNotif('Contest not found.', 'error'); return; }
+  if (c.status === 'completed') { showNotif('Ye contest already completed hai — refund nahi ho sakta.', 'error'); return; }
+  const emails = [];
+  if (c.player1?.email) emails.push(c.player1.email);
+  if (c.player2?.email) emails.push(c.player2.email);
+  if (!emails.length) { showNotif('Is contest mein koi paid participant nahi mila.', 'error'); return; }
+  if (!confirm(`Is contest ko refund karein? Rs ${D11_H2H_ENTRY_FEE * emails.length} wapas ${emails.length} player(s) ko milega.`)) return;
+
+  for (const email of emails) {
+    await _adminWalletRefund(email, D11_H2H_ENTRY_FEE, c.matchId, 'H2H Contest cancelled/refunded by admin', 'admin_refund');
+  }
+  c.player1 = null;
+  c.player2 = null;
+  c.status = 'cancelled';
+  c.updatedAt = Date.now();
+  await _saveD11H2HToFirestore(c.id, c);
+  d11h2hContests[c.id] = c;
+  try {
+    localStorage.setItem('pp_users_cache', JSON.stringify(users));
+    localStorage.setItem('pp_dream11_h2h_cache', JSON.stringify(d11h2hContests));
+  } catch(e){}
+  render();
+  showNotif(`✅ Refunded Rs ${D11_H2H_ENTRY_FEE * emails.length} to ${emails.length} player(s) 💰`);
+}
+
+// ── Undo payout for ONE completed H2H contest (reverse the win only, entry fees untouched) ──
+async function d11UndoOneH2HPayout(contestId) {
+  const c = d11h2hContests[contestId];
+  if (!c) { showNotif('Contest not found.', 'error'); return; }
+  if (c.status !== 'completed' || !c.winnerId || c.winnerId === 'draw') {
+    showNotif('Is contest mein reverse karne ke liye koi winning prize nahi mili.', 'error');
+    return;
+  }
+  if (!confirm(`Is contest ka payout undo karein? Rs ${c.winnerPrize} winner ke wallet se wapas le liya jayega. Entry fees isse touch nahi hongi.`)) return;
+
+  await _adminWalletDeduct(c.winnerId, c.winnerPrize, c.matchId, 'D11 H2H prize reversed — result was corrected', 'd11_h2h_reversal');
+  const winner = users[c.winnerId];
+  if (winner) { winner.d11h2hWins = Math.max(0, (winner.d11h2hWins || 0) - 1); await _saveUserToFirestore(c.winnerId, winner); }
+  c.status = 'full';
+  c.winnerId = null; c.p1Score = null; c.p2Score = null;
+  d11h2hContests[c.id] = c;
+  await _saveD11H2HToFirestore(c.id, c);
+  try {
+    localStorage.setItem('pp_users_cache', JSON.stringify(users));
+    localStorage.setItem('pp_dream11_h2h_cache', JSON.stringify(d11h2hContests));
+  } catch(e){}
+  render();
+  showNotif(`✅ Payout reversed — Rs ${c.winnerPrize} wapas le liya gaya. Ab result theek karo aur dobara payout chalao.`);
+}
+
+// ── Recompute pool for ONE H2H contest (does not touch wallets) ──
+async function d11FixOneH2HPool(contestId) {
+  const c = d11h2hContests[contestId];
+  if (!c) { showNotif('Contest not found.', 'error'); return; }
+  const joiners = (c.player1 ? 1 : 0) + (c.player2 ? 1 : 0);
+  c.pool = joiners * D11_H2H_ENTRY_FEE;
+  c.updatedAt = Date.now();
+  await _saveD11H2HToFirestore(c.id, c);
+  d11h2hContests[c.id] = c;
+  try { localStorage.setItem('pp_dream11_h2h_cache', JSON.stringify(d11h2hContests)); } catch(e){}
+  render();
+  showNotif(`✅ Pool fixed — Rs ${c.pool} (${joiners} joiner${joiners===1?'':'s'} × Rs ${D11_H2H_ENTRY_FEE}).`);
+}
+
 async function finalizeD11H2HContests(matchId) {
   const d11m = dream11Matches[matchId];
   if (!d11m || !d11m.scored) return;
@@ -19996,6 +20924,8 @@ function renderDream11Hub() {
     <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#0ea5a5,#0d7d7d)" onclick="goD11CllHub()">🎯 Cricket Live Line Matches</button>
     <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#9333ea,#7e22ce)" onclick="goD11Cb2Hub()">🏏 Cricbuzz No 2 Matches</button>
     <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#f59e0b,#d97706)" onclick="goD11Ll2Hub()">⚡ Cricket Live Line 2 Matches</button>
+    <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#16a34a,#15803d)" onclick="goD11Ll3Hub()">⚡ Cricket Live Line 3 Matches</button>
+    <button class="btn-secondary btn-block mb14" style="background:rgba(22,163,74,0.1);border-color:rgba(22,163,74,0.3);color:#4ade80" onclick="d11OpenLl3PlayerRankingPanel()">🏆 Player Ranking (Cricket Live Line 3)</button>
     <button class="btn-secondary btn-block mb14" style="background:rgba(168,85,247,0.1);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="goD11Tournaments()">🏆 Tournaments (multi-match contests)</button>
     <button class="btn-secondary btn-block mb14" style="background:rgba(249,115,22,0.1);border-color:rgba(249,115,22,0.3);color:#fb923c" onclick="goUtHub()">👑 User Tournaments (owner-run contests)</button>
     ${(() => {
@@ -22133,18 +23063,20 @@ function renderSubAdminXIPanel() {
       const d11m = dream11Matches[m.id];
       const xiCount = (d11m.players||[]).filter(p=>p.isPlayingXI).length;
       const isLive = m.deadline && new Date(m.deadline).getTime() <= Date.now();
-      const linked = !!(m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId);
+      const linked = !!(m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll3MatchId);
       const action = subAdminXIMatchPicker==='xi'
         ? (m.cricketDataMatchId ? `d11CheckPlayingXIAnnounced('${m.id}')`
           : m.espnMatchId ? `d11CheckPlayingXIAnnouncedEspn('${m.id}')`
           : m.cllMatchId ? `d11CheckPlayingXIAnnouncedCll('${m.id}')`
           : m.cb2MatchId ? `d11CheckPlayingXIAnnouncedCb2('${m.id}')`
-          : m.ll2MatchId ? `d11CheckPlayingXIAnnouncedLl2('${m.id}')` : '')
+          : m.ll2MatchId ? `d11CheckPlayingXIAnnouncedLl2('${m.id}')`
+          : m.ll3MatchId ? `d11CheckPlayingXIAnnouncedLl3('${m.id}')` : '')
         : (m.cricketDataMatchId ? `d11SyncLiveMatch('${m.id}', true)`
           : m.espnMatchId ? `d11SyncLiveMatchEspn('${m.id}', true)`
           : m.cllMatchId ? `d11SyncLiveMatchCll('${m.id}', true)`
           : m.cb2MatchId ? `d11SyncLiveMatchCb2('${m.id}', true)`
-          : m.ll2MatchId ? `d11SyncLiveMatchLl2('${m.id}', true)` : '');
+          : m.ll2MatchId ? `d11SyncLiveMatchLl2('${m.id}', true)`
+          : m.ll3MatchId ? `d11SyncLiveMatchLl3('${m.id}', true)` : '');
       return `
       <div class="card mb10" style="${linked ? 'cursor:pointer' : 'opacity:0.55'}" ${linked ? `onclick="${action}"` : ''}>
         <div style="display:flex;justify-content:space-between;align-items:center">
@@ -22538,6 +23470,12 @@ function renderAdminD11ParticipantsPanel(matchId) {
           </div>
           <div style="font-size:12px;margin-top:3px">${c.player1?.name||'—'} vs ${c.player2?.name||'⏳ Waiting'}</div>
           ${c.winnerId?`<div style="font-size:11px;color:#4ade80;margin-top:2px">🏆 Winner: ${users[c.winnerId]?.name||c.winnerId}</div>`:''}
+          <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px">
+            ${c.status==='full'?`<button style="flex-shrink:0;width:auto;padding:4px 9px;font-size:10px;border:none;border-radius:7px;background:rgba(34,197,94,0.12);color:#4ade80;font-weight:700;cursor:pointer" onclick="d11PayoutOneH2H('${c.id}')">💰 Payout</button>`:''}
+            ${c.status!=='completed'?`<button style="flex-shrink:0;width:auto;padding:4px 9px;font-size:10px;border:none;border-radius:7px;background:rgba(220,38,38,0.12);color:#f87171;font-weight:700;cursor:pointer" onclick="d11RefundOneH2H('${c.id}')">↩️ Refund</button>`:''}
+            ${c.status==='completed'&&c.winnerId&&c.winnerId!=='draw'?`<button style="flex-shrink:0;width:auto;padding:4px 9px;font-size:10px;border:none;border-radius:7px;background:rgba(251,146,60,0.12);color:#fb923c;font-weight:700;cursor:pointer" onclick="d11UndoOneH2HPayout('${c.id}')">↩️ Undo Payout</button>`:''}
+            <button style="flex-shrink:0;width:auto;padding:4px 9px;font-size:10px;border:none;border-radius:7px;background:rgba(56,189,248,0.12);color:#38bdf8;font-weight:700;cursor:pointer" onclick="d11FixOneH2HPool('${c.id}')">🔧 Fix Pool</button>
+          </div>
         </div>`).join('')}
     `:tab==='custom'?`
       ${customList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Koi custom contest nahi</div>`:customList.map((c,i)=>{
@@ -23040,6 +23978,7 @@ async function runD11StuckH2HFix() {
     c.player1 = null;
     c.player2 = null;
     c.status = 'cancelled';
+    c._adminRefundUndo = { emails: issue.emails, amountEach: D11_H2H_ENTRY_FEE, matchId: issue.matchId };
     c.updatedAt = Date.now();
     await _saveD11H2HToFirestore(c.id, c);
     d11h2hContests[c.id] = c;
@@ -23051,6 +23990,64 @@ async function runD11StuckH2HFix() {
   } catch(e){}
   render();
   showNotif(`✅ ${fixedCount} stuck H2H contest(s) fixed — Rs ${totalRefunded} refunded 💰`);
+}
+
+// ── Per-row single-contest fix (used by the individual "🔧 Refund" button) ──
+async function runD11StuckH2HFixOne(contestId) {
+  const c = d11h2hContests[contestId];
+  if (!c || c.status === 'completed') { showNotif('Contest not found or already completed.', 'error'); return; }
+  const emails = [];
+  if (c.player1?.email) emails.push(c.player1.email);
+  if (c.player2?.email) emails.push(c.player2.email);
+  if (!emails.length) { showNotif('No stuck entries found in this contest.', 'error'); return; }
+  for (const email of emails) {
+    await _adminWalletRefund(email, D11_H2H_ENTRY_FEE, c.matchId, 'Missed H2H refund — recovered by admin cleanup', 'h2h_refund');
+  }
+  c.player1 = null;
+  c.player2 = null;
+  c.status = 'cancelled';
+  c._adminRefundUndo = { emails, amountEach: D11_H2H_ENTRY_FEE, matchId: c.matchId };
+  c.updatedAt = Date.now();
+  await _saveD11H2HToFirestore(c.id, c);
+  d11h2hContests[c.id] = c;
+  try {
+    localStorage.setItem('pp_users_cache', JSON.stringify(users));
+    localStorage.setItem('pp_dream11_h2h_cache', JSON.stringify(d11h2hContests));
+  } catch(e){}
+  render();
+  showNotif(`✅ Refunded Rs ${D11_H2H_ENTRY_FEE * emails.length} to ${emails.length} player(s) 💰`);
+}
+
+// ── Undo a payout/refund that was fixed by mistake ──
+// Reverses the balance change recorded in c._adminRefundUndo and restores
+// the contest back to its pre-fix state so the admin can re-review it.
+async function runD11UndoPayout(contestId) {
+  const c = d11h2hContests[contestId];
+  if (!c || !c._adminRefundUndo) { showNotif('Nothing to undo for this contest.', 'error'); return; }
+  const { emails, amountEach, matchId } = c._adminRefundUndo;
+  for (const email of emails) {
+    await _adminWalletDeduct(email, amountEach, matchId, 'Undo: reversing previously-fixed H2H refund', 'admin_reversal');
+  }
+  c.status = 'open';
+  delete c._adminRefundUndo;
+  c.updatedAt = Date.now();
+  await _saveD11H2HToFirestore(c.id, c);
+  d11h2hContests[c.id] = c;
+  try {
+    localStorage.setItem('pp_users_cache', JSON.stringify(users));
+    localStorage.setItem('pp_dream11_h2h_cache', JSON.stringify(d11h2hContests));
+  } catch(e){}
+  render();
+  showNotif(`↩️ Undone — Rs ${amountEach * emails.length} reversed from ${emails.length} player(s)`);
+}
+
+// ── Accordion state: which stuck-H2H row is currently expanded ──
+// Only one row's full detail shows at a time; clicking a match name
+// toggles just that row open/closed without affecting the others.
+let _stuckH2HExpandedId = null;
+function toggleStuckH2HDetail(contestId) {
+  _stuckH2HExpandedId = (_stuckH2HExpandedId === contestId) ? null : contestId;
+  render();
 }
 
 // ════════════════════════════════════════════════════════════
@@ -23277,11 +24274,36 @@ function renderAdminDuplicateCleanup() {
       : `
       <div style="margin-top:12px;font-size:13px;color:var(--gold);font-weight:700">⚠️ ${stuckH2H.length} contest${stuckH2H.length===1?'':'s'} stuck • Estimated refund: Rs ${stuckH2HTotal}</div>
       <button class="btn-primary mb14" style="margin-top:10px;background:linear-gradient(135deg,#dc2626,#991b1b)" onclick="if(confirm('Refund all stuck H2H entries now? This cannot be undone.')) runD11StuckH2HFix();">🔧 Fix All & Refund Now</button>
-      ${stuckH2H.map(r => `
+      ${stuckH2H.map(r => {
+        const c = d11h2hContests[r.id];
+        const alreadyFixed = c && c.status === 'cancelled' && c._adminRefundUndo;
+        const isExpanded = _stuckH2HExpandedId === r.id;
+        return `
       <div style="padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:12px">
-        <div><b>${r.label}</b> <span style="color:var(--dim)">(${r.status})</span></div>
-        <div style="color:var(--dim)">${r.emails.join(', ')} — refund Rs ${r.emails.length * r.refundEach}</div>
-      </div>`).join('')}
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+          <div style="cursor:pointer;flex:1;min-width:150px" onclick="toggleStuckH2HDetail('${r.id}')">
+            <b>${r.label}</b> <span style="color:var(--dim)">(${r.status})</span>
+            <span style="color:var(--dim);font-size:10.5px">${isExpanded ? ' ▲' : ' ▼ tap for details'}</span>
+          </div>
+          <div style="display:flex;gap:6px;flex-shrink:0">
+            ${alreadyFixed
+              ? `<button style="font-size:11px;padding:5px 10px;border-radius:8px;border:1px solid rgba(96,165,250,0.35);background:rgba(96,165,250,0.12);color:#60a5fa;font-weight:700" onclick="event.stopPropagation();if(confirm('Undo this payout/refund? This will reverse the balance change for this contest only.')) runD11UndoPayout('${r.id}');">↩️ Undo Payout</button>`
+              : `<button style="font-size:11px;padding:5px 10px;border-radius:8px;border:1px solid rgba(220,38,38,0.35);background:rgba(220,38,38,0.12);color:#f87171;font-weight:700" onclick="event.stopPropagation();if(confirm('Refund this contest now? Rs ${r.emails.length * r.refundEach} will be credited.')) runD11StuckH2HFixOne('${r.id}');">🔧 Refund</button>`}
+          </div>
+        </div>
+        <div style="color:var(--dim);margin-top:2px">${r.emails.join(', ')} — refund Rs ${r.emails.length * r.refundEach}</div>
+        ${isExpanded ? `
+        <div style="margin-top:8px;padding:10px;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);font-size:11.5px">
+          <div><b>Contest ID:</b> ${r.id}</div>
+          <div><b>Match ID:</b> ${r.matchId}</div>
+          <div><b>Status:</b> ${c ? c.status : r.status}</div>
+          <div><b>Entry fee each:</b> Rs ${r.refundEach}</div>
+          <div style="margin-top:4px"><b>Players stuck:</b></div>
+          ${r.emails.map(e => `<div style="padding-left:8px;color:var(--dim)">• ${e}</div>`).join('')}
+          ${alreadyFixed ? `<div style="margin-top:6px;color:#60a5fa">✅ Already refunded — use "Undo Payout" above if this was a mistake.</div>` : ''}
+        </div>` : ''}
+      </div>`;
+      }).join('')}
       `}
   </div>
 
@@ -27982,6 +29004,14 @@ if ('serviceWorker' in navigator) {
   // loop just needs to periodically re-run the two lightweight
   // "auto-check" tasks that aren't tied to a collection listener, and
   // do a light re-render/currentUser refresh as a safety net.
+  //
+  // Interval is 5 min (not 20) so the d11AutoCheckPlayingXI 20/15/10/5-min
+  // windows below are never skipped — each window is only 5 minutes wide,
+  // so a 20-min tick could miss two of the four windows entirely. This does
+  // NOT add extra Firestore reads on every tick: the loop itself is just a
+  // local Date.now() comparison against each match's cached deadline: a
+  // Firestore write only happens on the (rare) tick where a window
+  // actually fires for a given match, exactly as before.
   setInterval(function(){
     if(!currentUser||!window._fbAuthCurrentUser||!window._fbAuthCurrentUser())return;
     if(document.hidden)return;
@@ -27994,7 +29024,7 @@ if ('serviceWorker' in navigator) {
     render();
     if (typeof d11AutoCheckPlayingXI === 'function') d11AutoCheckPlayingXI().catch(function(){});
     if (typeof d11AutoFetchFinalResult === 'function') d11AutoFetchFinalResult().catch(function(){});
-  },20*60*1000);
+  },5*60*1000);
 })();
 
 // ── Live countdown ticker ──
