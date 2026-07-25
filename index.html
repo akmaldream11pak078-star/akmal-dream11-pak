@@ -12848,17 +12848,21 @@ async function d11SyncLiveMatchCb2(matchId, showToast) {
     await _saveDream11MatchToFirestore(matchId, d11m);
     await d11RefreshLiveTeamPoints(matchId);
 
-    // Confirm-twice guard before auto-finishing, same pattern used for the
-    // other three providers — a single "match over" style status string
-    // isn't confirmed for this API yet, so this only auto-marks finished
-    // once both innings are present AND a second consecutive sync still
-    // shows the same state (avoids a transient/incomplete response
-    // prematurely closing out a match).
+    // This provider's scorecard response includes its own authoritative
+    // "result" field once the match is over (same shape confirmed on the
+    // cll provider: data.result = "Team X won by N runs") — require that
+    // field to be present, not just 2 innings existing (2 innings alone
+    // doesn't mean the match has actually finished). Still keep the
+    // double-confirm guard (two consecutive syncs both showing a result)
+    // so a transient/glitchy response can't finalize a match on its own.
     let isFinished = false;
-    if (innings.length >= 2) {
+    const resultText = (data.result || '').trim();
+    if (innings.length >= 2 && resultText) {
       const pendingKey = matchId + '_cb2';
-      if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; }
+      if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = resultText; }
       else { _d11PendingFinish[pendingKey] = true; }
+    } else {
+      delete _d11PendingFinish[matchId + '_cb2'];
     }
     if (isFinished) {
       m.status = 'completed';
@@ -13431,20 +13435,22 @@ async function d11SyncLiveMatchLl2(matchId, showToast) {
     await _saveDream11MatchToFirestore(matchId, d11m);
     await d11RefreshLiveTeamPoints(matchId);
 
+    // This provider's scorecard response includes its own authoritative
+    // "result" field once the match is over (same shape confirmed on the
+    // cll provider: data.result = "Team X won by N runs") — no need for a
+    // separate /info API call to check match_status, which was the
+    // previous approach and didn't reliably flip to "completed" even once
+    // the scorecard itself already showed a final result. Still keep the
+    // double-confirm guard (two consecutive syncs both showing a result)
+    // so a transient/glitchy response can't finalize a match on its own.
     let isFinished = false;
-    if (innings.length >= 2) {
-      try {
-        const infoRaw = await _ll2Fetch(`match/${m.ll2MatchId}/info`, { feature: 'Finish Check', matchId });
-        const infoStatus = (Array.isArray(infoRaw?.data) ? infoRaw.data[0] : infoRaw?.data)?.match_status || '';
-        const looksFinished = /completed/i.test(infoStatus);
-        if (looksFinished) {
-          const pendingKey = matchId + '_ll2';
-          if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = infoStatus || m.resultText; }
-          else { _d11PendingFinish[pendingKey] = true; }
-        } else {
-          delete _d11PendingFinish[matchId + '_ll2'];
-        }
-      } catch (e) { /* finish-check failure shouldn't block the sync itself */ }
+    const resultText = (data.result || '').trim();
+    if (innings.length >= 2 && resultText) {
+      const pendingKey = matchId + '_ll2';
+      if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = resultText; }
+      else { _d11PendingFinish[pendingKey] = true; }
+    } else {
+      delete _d11PendingFinish[matchId + '_ll2'];
     }
     if (isFinished) {
       m.status = 'completed';
@@ -14207,20 +14213,25 @@ async function d11SyncLiveMatchLl3(matchId, showToast) {
     await _saveDream11MatchToFirestore(matchId, d11m);
     await d11RefreshLiveTeamPoints(matchId);
 
+    // This provider's scorecard response includes its own authoritative
+    // "result" field once the match is over (confirmed live: data.result =
+    // "Welsh Fire won by 15 runs") — no need for a separate /info API call
+    // to check match_status, which was the previous approach and didn't
+    // reliably flip to "completed" even once the scorecard itself already
+    // showed a final result (this was the actual bug: admin's Fetch Final
+    // Result correctly pulled the finished scorecard/result but the match
+    // never got marked completed, so users' contest screens stayed stuck
+    // showing no result). Still keep the double-confirm guard (two
+    // consecutive syncs both showing a result) so a transient/glitchy
+    // response can't finalize a match on its own.
     let isFinished = false;
-    if (innings.length >= 2) {
-      try {
-        const infoRaw = await _ll3Fetch(`match/${m.ll3MatchId}/info`, { feature: 'Finish Check', matchId });
-        const infoStatus = (Array.isArray(infoRaw?.data) ? infoRaw.data[0] : infoRaw?.data)?.match_status || '';
-        const looksFinished = /completed/i.test(infoStatus);
-        if (looksFinished) {
-          const pendingKey = matchId + '_ll3';
-          if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = infoStatus || m.resultText; }
-          else { _d11PendingFinish[pendingKey] = true; }
-        } else {
-          delete _d11PendingFinish[matchId + '_ll3'];
-        }
-      } catch (e) { /* finish-check failure shouldn't block the sync itself */ }
+    const resultText = (data.result || '').trim();
+    if (innings.length >= 2 && resultText) {
+      const pendingKey = matchId + '_ll3';
+      if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = resultText; }
+      else { _d11PendingFinish[pendingKey] = true; }
+    } else {
+      delete _d11PendingFinish[matchId + '_ll3'];
     }
     if (isFinished) {
       m.status = 'completed';
@@ -14993,20 +15004,22 @@ async function d11SyncLiveMatchLl4(matchId, showToast) {
     await _saveDream11MatchToFirestore(matchId, d11m);
     await d11RefreshLiveTeamPoints(matchId);
 
+    // This provider's scorecard response includes its own authoritative
+    // "result" field once the match is over (same shape confirmed on the
+    // cll provider: data.result = "Team X won by N runs") — no need for a
+    // separate /info API call to check match_status, which was the
+    // previous approach and didn't reliably flip to "completed" even once
+    // the scorecard itself already showed a final result. Still keep the
+    // double-confirm guard (two consecutive syncs both showing a result)
+    // so a transient/glitchy response can't finalize a match on its own.
     let isFinished = false;
-    if (innings.length >= 2) {
-      try {
-        const infoRaw = await _ll4Fetch(`match/${m.ll4MatchId}/info`, { feature: 'Finish Check', matchId });
-        const infoStatus = (Array.isArray(infoRaw?.data) ? infoRaw.data[0] : infoRaw?.data)?.match_status || '';
-        const looksFinished = /completed/i.test(infoStatus);
-        if (looksFinished) {
-          const pendingKey = matchId + '_ll4';
-          if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = infoStatus || m.resultText; }
-          else { _d11PendingFinish[pendingKey] = true; }
-        } else {
-          delete _d11PendingFinish[matchId + '_ll4'];
-        }
-      } catch (e) { /* finish-check failure shouldn't block the sync itself */ }
+    const resultText = (data.result || '').trim();
+    if (innings.length >= 2 && resultText) {
+      const pendingKey = matchId + '_ll4';
+      if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = resultText; }
+      else { _d11PendingFinish[pendingKey] = true; }
+    } else {
+      delete _d11PendingFinish[matchId + '_ll4'];
     }
     if (isFinished) {
       m.status = 'completed';
@@ -30727,7 +30740,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.26.0";
+const APP_VERSION = "4.26.1";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
