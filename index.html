@@ -20351,7 +20351,9 @@ async function d11GenerateResultImageBlob(matchId) {
     picked.forEach(p => {
       const isC = myTeam.captain === p.id, isVC = myTeam.viceCaptain === p.id;
       const mult = isC ? 2 : isVC ? 1.5 : 1;
-      const finalPts = Math.round((p.points||0) * mult);
+      // Recompute live rather than trusting stored p.points, which can lag
+      // behind the latest synced stats — see renderD11StatsTab for the same fix.
+      const finalPts = Math.round(calcDream11PlayerPoints(p.stats, matchId) * mult);
       const tag = isC ? ' (C)' : isVC ? ' (VC)' : '';
       ctx.textAlign = 'left';
       ctx.fillStyle = dark;
@@ -20361,7 +20363,7 @@ async function d11GenerateResultImageBlob(matchId) {
       ctx.font = '400 13px Arial, sans-serif';
       ctx.fillText(p.role||'—', PAD+430, y);
       ctx.textAlign = 'right';
-      ctx.fillText(String(p.points||0), PAD+560, y);
+      ctx.fillText(String(Math.round(calcDream11PlayerPoints(p.stats, matchId))), PAD+560, y);
       ctx.fillText(mult+'x', PAD+660, y);
       ctx.fillStyle = finalPts>0 ? green : dim;
       ctx.font = '700 15px Arial, sans-serif';
@@ -24101,7 +24103,9 @@ function renderDream11ViewTeam() {
     const isC = t.captain === p.id, isVC = t.viceCaptain === p.id;
     const isSwappedIn = t.replacements && Object.values(t.replacements).includes(p.id);
     const mult = isC ? 2 : isVC ? 1.5 : 1;
-    const finalPts = Math.round((p.points||0) * mult);
+    // Recompute live rather than trusting stored p.points, which can lag
+    // behind the latest synced stats — see renderD11StatsTab for the same fix.
+    const finalPts = Math.round(calcDream11PlayerPoints(p.stats, t.matchId) * mult);
     return `
     <div style="display:flex;flex-direction:column;align-items:center;width:84px">
       <div style="position:relative">
@@ -24253,7 +24257,14 @@ function renderDream11ViewTeam() {
     if (!p) return '';
     const isC = t.captain === pid, isVC = t.viceCaptain === pid;
     const mult = isC ? 2 : isVC ? 1.5 : 1;
-    const finalPts = Math.round((p.points||0) * mult);
+    // Always recompute from live stats rather than trusting the stored
+    // p.points, which can lag behind the latest synced stats (e.g. right
+    // after an admin "Sync now" hasn't fully propagated) — same fix as
+    // renderD11StatsTab. Using the stale field here caused this screen to
+    // show inflated totals (e.g. 108 pts here vs 32 pts on the Stats tab
+    // for the same player) even though both should always match.
+    const livePlayerPts = calcDream11PlayerPoints(p.stats, t.matchId);
+    const finalPts = Math.round(livePlayerPts * mult);
     const s = p.stats || {};
     const sc2 = getD11Scoring(t.matchId);
     const runs = Number(s.runs)||0; const balls = Number(s.ballsFaced)||0;
@@ -24295,7 +24306,7 @@ function renderDream11ViewTeam() {
       </div>
       <div style="text-align:right">
         <div style="font-weight:700;font-size:13px;color:${finalPts>0?'#4ade80':'var(--dim)'}">${finalPts} pts</div>
-        ${mult>1 ? `<div style="font-size:9.5px;color:var(--dim)">${p.points||0} × ${mult}</div>` : ''}
+        ${mult>1 ? `<div style="font-size:9.5px;color:var(--dim)">${livePlayerPts} × ${mult}</div>` : ''}
       </div>
     </div>`;
   }).join('')}
@@ -30001,7 +30012,9 @@ function renderUtViewTeam() {
   const fieldPlayerCard = (p) => {
     const isC = team.captain === p.id, isVC = team.viceCaptain === p.id;
     const mult = isC ? 2 : isVC ? 1.5 : 1;
-    const finalPts = Math.round((p.points||0) * mult);
+    // Recompute live rather than trusting stored p.points, which can lag
+    // behind the latest synced stats — see renderD11StatsTab for the same fix.
+    const finalPts = Math.round(calcUtPlayerPoints(p.stats, m.id) * mult);
     return `
     <div style="display:flex;flex-direction:column;align-items:center;width:84px">
       <div style="position:relative">
@@ -30046,7 +30059,10 @@ function renderUtViewTeam() {
     if (!p) return '';
     const isC = team.captain === pid, isVC = team.viceCaptain === pid;
     const mult = isC ? 2 : isVC ? 1.5 : 1;
-    const finalPts = Math.round((p.points||0) * mult);
+    // Recompute live rather than trusting stored p.points, which can lag
+    // behind the latest synced stats — see renderD11StatsTab for the same fix.
+    const livePlayerPts = calcUtPlayerPoints(p.stats, m.id);
+    const finalPts = Math.round(livePlayerPts * mult);
     return `
     <div class="d11-player-row">
       <div class="d11-player-left">
@@ -30055,7 +30071,7 @@ function renderUtViewTeam() {
       </div>
       <div style="text-align:right">
         <div style="font-weight:700;font-size:13px;color:${finalPts>0?'#4ade80':'var(--dim)'}">${finalPts} pts</div>
-        ${mult>1 ? `<div style="font-size:9.5px;color:var(--dim)">${p.points||0} × ${mult}</div>` : ''}
+        ${mult>1 ? `<div style="font-size:9.5px;color:var(--dim)">${livePlayerPts} × ${mult}</div>` : ''}
       </div>
     </div>`;
   }).join('')}
@@ -30402,7 +30418,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.25.8";
+const APP_VERSION = "4.25.9";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
