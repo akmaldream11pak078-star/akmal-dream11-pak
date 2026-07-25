@@ -1708,38 +1708,92 @@ async function _saveUserToFirestore(email, userData) {
   // point is treated as possibly-stale for this user.
   window._userWriteStamps[email] = Date.now();
 }
+// Cache-first + live listener for pp_users, matching the pattern used by
+// _liveLoadCollection for matches/contests/etc (see notes there).
+//
+// CHANGED: this used to be purely cache-first with no listener at all — a
+// user whose profile (name, photo) wasn't already in this device's cache
+// (e.g. someone who just registered, or registered on a different device)
+// would show up as their raw email + a "?" avatar on leaderboards
+// everywhere, until someone tapped the manual 🔄 button to force a full
+// re-read. Attaching a live listener here means new/updated profiles
+// (name, dp photo, idNumber) now populate on their own, live, same as
+// matches and contests do — no more "leaderboard shows emails until you
+// refresh" bug.
 async function _loadAllUsersFromFirestore(forceRefresh) {
   if (!window._fbDb || !window._fbFns) return false;
   const isAdminUser = typeof isAdmin === 'function' && isAdmin();
-  // Same cache-first rule as _liveLoadCollection: a regular app open/login
-  // should NOT re-read the whole (continuously growing, as new users sign
-  // up) pp_users collection every single time. Use the cache if we have
-  // one, unless this is a forced manual refresh or the cache is empty.
-  if (!forceRefresh && !isAdminUser) {
+
+  // Instant paint from cache first (0 reads) — unchanged.
+  if (!forceRefresh) {
     try {
       const cached = localStorage.getItem('pp_users_cache');
-      if (cached) { Object.assign(users, JSON.parse(cached)); return true; }
+      if (cached) { Object.assign(users, JSON.parse(cached)); }
     } catch(e){}
-    // No cache at all — fall through to the one real fetch needed to
-    // populate it for next time.
   }
-  const { collection, getDocs } = window._fbFns;
-  const readStartedAt = Date.now();
-  try {
-    const snap = await getDocs(collection(window._fbDb, 'pp_users'));
-    window._userWriteStamps = window._userWriteStamps || {};
-    snap.forEach(d => {
-      const key = d.id.replace(/_/g,'.');
-      const stamp = window._userWriteStamps[key];
-      // A local save for this user completed AFTER this read started —
-      // that local write is newer than what this snapshot can possibly
-      // contain, so applying the snapshot here would revert it. Skip.
-      if (stamp && stamp > readStartedAt) return;
-      users[key] = d.data();
-    });
-    try { localStorage.setItem('pp_users_cache', JSON.stringify(users)); } catch(e){}
-    return true;
-  } catch(e){ return false; }
+
+  // Admin already gets a dedicated live listener while on the Users tab
+  // (_startAdminUsersLiveSync) with its own attach/detach lifecycle tied to
+  // that tab — don't double-attach a second one here for admins.
+  if (isAdminUser) {
+    if (!forceRefresh && Object.keys(users).length) return true;
+  } else if (window._liveCollectionUnsubs && window._liveCollectionUnsubs['pp_users'] && !forceRefresh) {
+    return true; // listener already running — cache/in-memory data is already live
+  }
+
+  if (!window._fbDb || !window._fbFns || !window._fbFns.collection) return false;
+
+  if (!window._fbFns.onSnapshot) {
+    // Fallback: one-time full read if onSnapshot isn't available.
+    try {
+      const { collection, getDocs } = window._fbFns;
+      const readStartedAt = Date.now();
+      const snap = await getDocs(collection(window._fbDb, 'pp_users'));
+      window._userWriteStamps = window._userWriteStamps || {};
+      snap.forEach(d => {
+        const key = d.id.replace(/_/g,'.');
+        const stamp = window._userWriteStamps[key];
+        if (stamp && stamp > readStartedAt) return;
+        users[key] = d.data();
+      });
+      try { localStorage.setItem('pp_users_cache', JSON.stringify(users)); } catch(e){}
+      return true;
+    } catch(e){ return false; }
+  }
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    try {
+      const { collection, onSnapshot } = window._fbFns;
+      const readStartedAt = Date.now();
+      const unsub = onSnapshot(collection(window._fbDb, 'pp_users'), snap => {
+        window._userWriteStamps = window._userWriteStamps || {};
+        const eventReceivedAt = Date.now();
+        snap.forEach(d => {
+          const key = d.id.replace(/_/g,'.');
+          const stamp = window._userWriteStamps[key];
+          if (stamp && stamp > eventReceivedAt) return;
+          users[key] = d.data();
+        });
+        try { localStorage.setItem('pp_users_cache', JSON.stringify(users)); } catch(e){}
+        if (currentUser && users[currentUser.email]) {
+          currentUser = { ...users[currentUser.email], email: currentUser.email };
+        }
+        if (!resolved) { resolved = true; resolve(true); }
+        else { try { render(); } catch(e){} }
+      }, err => {
+        console.error('pp_users live-sync error:', err);
+        if (!resolved) { resolved = true; resolve(false); }
+      });
+      window._liveCollectionUnsubs = window._liveCollectionUnsubs || {};
+      window._liveCollectionUnsubs['pp_users'] = unsub;
+      _liveCollections['pp_users'] = unsub;
+      _liveCollectionSpecs['pp_users'] = { targetSetter: null, cacheKey: 'pp_users_cache', opts: {} };
+    } catch(e) {
+      console.error('Failed to attach pp_users live listener:', e);
+      if (!resolved) { resolved = true; resolve(false); }
+    }
+  });
 }
 
 // ── Fetch ONE user by email directly (1 read), instead of downloading the
@@ -1794,6 +1848,55 @@ function _startAdminUsersLiveSync() {
 function _stopAdminUsersLiveSync() {
   if (_usersLiveUnsub) { try { _usersLiveUnsub(); } catch(e){} _usersLiveUnsub = null; }
 }
+
+// ── Live listener for the LOGGED-IN USER's own record ──
+// The cache-first change to _liveLoadCollection (see notes there) means a
+// regular user's `users` object is no longer auto-refreshed on every app
+// open — by design, to stop the reads explosion. But that's wrong for a
+// user's OWN wallet/transaction status specifically: if the admin approves
+// or rejects their pending deposit/withdraw while their app is sitting
+// open, they should see that update immediately, not only after they
+// happen to tap 🔄. Reported bug: a user's deposit sat "pending" after
+// admin had already rejected it, until they manually refreshed — leaving a
+// stale, misleading status on screen.
+//
+// This listens to exactly ONE document (the current user's own pp_users
+// doc) — a single-doc onSnapshot listener, not the whole collection — so
+// it costs 1 read on attach plus 1 read per future change to THIS user's
+// doc specifically. That's negligible compared to a full-collection read
+// and doesn't reintroduce the reads-quota problem; it only affects the
+// person's own account, in real time, which is exactly where instant
+// updates actually matter (money status), unlike the bulk reference data
+// (team squads, tournaments, player history) that's fine to be a few
+// minutes stale until a manual refresh.
+let _ownUserLiveUnsub = null;
+function _startOwnUserLiveSync(email) {
+  _stopOwnUserLiveSync(); // one at a time — always matches the currently logged-in user
+  if (!email || !window._fbDb || !window._fbFns || !window._fbFns.onSnapshot) return;
+  const { doc, onSnapshot } = window._fbFns;
+  try {
+    const safeKey = email.replace(/\./g, '_');
+    _ownUserLiveUnsub = onSnapshot(doc(window._fbDb, 'pp_users', safeKey), snap => {
+      if (!snap.exists()) return;
+      const eventReceivedAt = Date.now();
+      window._userWriteStamps = window._userWriteStamps || {};
+      const stamp = window._userWriteStamps[email];
+      // Same staleness guard as elsewhere: don't let a snapshot event that
+      // was already in flight stomp a local write that has since completed.
+      if (stamp && stamp > eventReceivedAt) return;
+      users[email] = snap.data();
+      if (currentUser && currentUser.email === email) {
+        currentUser = { ...users[email], email };
+      }
+      try { localStorage.setItem('pp_users_cache', JSON.stringify(users)); } catch(e){}
+      render();
+    }, err => console.error('Own-user live-sync error:', err));
+  } catch(e){ console.error('Failed to start own-user live-sync:', e); }
+}
+function _stopOwnUserLiveSync() {
+  if (_ownUserLiveUnsub) { try { _ownUserLiveUnsub(); } catch(e){} _ownUserLiveUnsub = null; }
+}
+
 // ── One-time migration: backfill 8-digit idNumber for users created before
 // the ID system existed. Only the admin has full pp_users read access, so
 // this runs from the admin panel and silently saves any user missing an ID.
@@ -1918,6 +2021,7 @@ function _detachAllLiveCollections() {
   Object.keys(_liveCollections).forEach(name => {
     try { _liveCollections[name](); } catch(e){}
     delete _liveCollections[name];
+    if (window._liveCollectionUnsubs) delete window._liveCollectionUnsubs[name];
   });
 }
 function _reattachAllLiveCollectionsThrottled() {
@@ -2098,27 +2202,119 @@ async function _autoIncrementalRefresh(collectionName, targetSetter, cacheKey, o
   }
 }
 
-// Direct Firestore fetch — no caching, no localStorage, no onSnapshot
-// listeners, no incremental/watermark logic. Every call to this reads the
-// full collection straight from Firestore and nothing else. Simple by
-// design: always accurate, at the cost of a full read every time it's
-// called (e.g. every app open/refresh hits Firestore for every collection
-// that gets loaded).
-async function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKey, opts, bypassThrottle, isAppOpen) {
+// Cache-first Firestore fetch WITH a live listener attached afterwards.
+//
+// A normal app open/reopen paints instantly from the localStorage cache
+// (0 reads), then attaches a real Firestore onSnapshot listener for that
+// collection (once per collection per session — see _liveCollectionUnsubs
+// below, calling this again for a collection that already has a listener
+// is a no-op on the listener side). From then on, any admin action that
+// changes that collection — publishing a match, updating a live score,
+// someone joining a contest, anything — streams to every open tab/device
+// in real time via Firestore's own change-detection, without any of them
+// needing to tap the manual 🔄 button.
+//
+// This replaces the earlier "cache-first, only refresh on manual 🔄" version.
+// That was fine for the reads-quota problem (see comment history below) but
+// wrong for anything the admin needs users to see live — a newly published
+// match, a live score update, or updated contest participant counts should
+// never require the user to know to tap refresh. onSnapshot is the right
+// tool for exactly this: Firestore only sends the documents that actually
+// changed, not a full collection re-read, so this does NOT reintroduce the
+// full-collection-read-every-open problem — the (much cheaper) full read
+// only happens once per collection per browser tab session (on attach),
+// after which updates are incremental pushes from Firestore itself.
+//
+// CHANGED BACK (again) from the previous "no caching, always full read"
+// version: that version read every one of ~9 collections in full on every
+// single app open, for every user, every time — with even a few hundred
+// users that blew through Firestore's 50K-reads/day free-tier quota in
+// hours (confirmed: 596K reads/day on the Firebase console). Caching the
+// FIRST paint and switching to a live listener for ongoing updates gets
+// both properties at once: cheap on reads, and instantly live for anyone
+// with the tab open.
+window._liveCollectionUnsubs = window._liveCollectionUnsubs || {};
+async function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKey, opts, forceRefresh, isAppOpen) {
   opts = opts || {};
-  if (!window._fbDb || !window._fbFns || !window._fbFns.getDocs || !window._fbFns.collection) return false;
-  try {
-    const { collection, getDocs } = window._fbFns;
-    const snap = await getDocs(collection(window._fbDb, collectionName));
-    const obj = {};
-    snap.forEach(d => { obj[d.id] = d.data(); });
-    targetSetter(obj);
-    if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
-    return true;
-  } catch (e) {
-    console.error(collectionName + ' fetch error:', e);
-    return false;
+
+  // Instant paint from cache first (0 reads), same as before — this makes
+  // the very first render of the app feel instant regardless of what
+  // happens with the listener below.
+  if (!forceRefresh) {
+    try {
+      const cached = localStorage.getItem(cacheKey);
+      if (cached) {
+        const obj = JSON.parse(cached);
+        targetSetter(obj);
+        if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
+      }
+    } catch(e){}
   }
+
+  if (!window._fbDb || !window._fbFns || !window._fbFns.getDocs || !window._fbFns.collection) return false;
+
+  // Attach the live listener once per collection per session. If it's
+  // already attached, we're done — the cache paint above (or whatever's
+  // already in memory from the listener) is enough, no extra read needed.
+  if (window._liveCollectionUnsubs[collectionName] && !forceRefresh) {
+    return true;
+  }
+  if (window._liveCollectionUnsubs[collectionName] && forceRefresh) {
+    // Explicit manual refresh with a listener already running — the
+    // listener keeps us live-synced already, nothing more to do.
+    return true;
+  }
+
+  if (!window._fbFns.onSnapshot) {
+    // Fallback for an environment without onSnapshot exposed — one-time read.
+    try {
+      const { collection, getDocs } = window._fbFns;
+      const snap = await getDocs(collection(window._fbDb, collectionName));
+      const obj = {};
+      snap.forEach(d => { obj[d.id] = d.data(); });
+      targetSetter(obj);
+      try { localStorage.setItem(cacheKey, JSON.stringify(obj)); } catch(e){}
+      if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
+      return true;
+    } catch (e) {
+      console.error(collectionName + ' fetch error:', e);
+      return false;
+    }
+  }
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    try {
+      const { collection, onSnapshot } = window._fbFns;
+      const unsub = onSnapshot(collection(window._fbDb, collectionName), snap => {
+        const obj = {};
+        snap.forEach(d => { obj[d.id] = d.data(); });
+        targetSetter(obj);
+        try { localStorage.setItem(cacheKey, JSON.stringify(obj)); } catch(e){}
+        if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
+        if (!resolved) { resolved = true; resolve(true); }
+        else if (opts.rerenderOnUpdate !== false) {
+          // A later snapshot (someone else's change) after our own initial
+          // resolve — repaint whatever's currently on screen so it's live.
+          try { render(); } catch(e){}
+        }
+      }, err => {
+        console.error(collectionName + ' live-sync error:', err);
+        if (!resolved) { resolved = true; resolve(false); }
+      });
+      window._liveCollectionUnsubs[collectionName] = unsub;
+      // Register with the existing idle-detach/reattach system (see
+      // _detachAllLiveCollections / _resetIdleDetachTimer above) so this
+      // listener gets cleanly detached after 30 min of no interaction (or
+      // when the tab goes hidden) and transparently reattached on the next
+      // tap — instead of running forever in a backgrounded/idle tab.
+      _liveCollections[collectionName] = unsub;
+      _liveCollectionSpecs[collectionName] = { targetSetter, cacheKey, opts };
+    } catch(e) {
+      console.error('Failed to attach live listener for ' + collectionName + ':', e);
+      if (!resolved) { resolved = true; resolve(false); }
+    }
+  });
 }
 
 async function _loadAllMatchesFromFirestore(forceRefresh, isAppOpen) {
@@ -2634,6 +2830,7 @@ async function handleLogin() {
 
   currentUser = { ...user, email };
   saveSession(email);
+  _startOwnUserLiveSync(email); // instant deposit/withdraw/balance updates from now on — see _startOwnUserLiveSync
   _legacyMigrationEmail = '';
   tab = 'home';
   showNotif(`Welcome back, ${user.name}!`);
@@ -2695,6 +2892,7 @@ async function handleRefreshApp() {
 function handleLogout() {
   currentUser = null;
   clearSession();
+  _stopOwnUserLiveSync();
   _tpinUnlocked = false;
   _tpinEntry = '';
   _tpinError = null;
@@ -3632,6 +3830,12 @@ async function createCustomContest(matchId, entryFee) {
 async function joinCustomContestByCode(rawCode) {
   const code = (rawCode||'').trim().toUpperCase();
   if (!code) return showNotif('Please enter a contest code', 'error');
+
+  // Same race as the Dream11 version (see joinD11CustomContestByCode) — a
+  // contest a friend just created and shared may not have reached this
+  // device yet if the live listener hasn't delivered its first snapshot.
+  // Resolves instantly once already synced, so no visible delay normally.
+  await _loadAllCustomContestsFromFirestore(false, true);
 
   const cc = Object.values(customContests).find(c => c.code === code);
   if (!cc) return showNotif('No contest found with that code', 'error');
@@ -5347,6 +5551,32 @@ function renderHome() {
       live: 'No live matches right now.',
       completed: 'No completed matches yet.'
     };
+
+    // Real match/contest data is only ever cached in memory for this tab's
+    // session — a fresh app open or reopen genuinely starts with none of it
+    // and has to wait for the Firestore sync in initApp's Step 3 to land
+    // (see the _homeDataSyncDone comment there). Showing "(0)" / the empty
+    // message during that brief window looks identical to "you really have
+    // nothing", which is the wrong impression — this renders a loading
+    // skeleton instead so it's clearly "still loading", and the same
+    // section quietly repaints with real counts the moment the sync's
+    // render() call fires.
+    if (!window._homeDataSyncDone) {
+      return `<div class="i11-section">
+        <div class="i11-section-head">
+          <div class="i11-section-title">🎮 My Matches</div>
+        </div>
+        <div class="i11-contest-tabs">
+          <button class="i11-contest-tab active">🕒 Upcoming</button>
+          <button class="i11-contest-tab">🔴 Live</button>
+          <button class="i11-contest-tab">🏁 Completed</button>
+        </div>
+        <div style="text-align:center;padding:40px 20px;color:var(--dim)">
+          <div style="font-size:34px;margin-bottom:10px;opacity:0.6">⏳</div>
+          <div style="font-size:13px;font-weight:600">Loading your matches…</div>
+        </div>
+      </div>`;
+    }
 
     return `<div class="i11-section">
       <div class="i11-section-head">
@@ -19615,6 +19845,16 @@ async function d11GlobalJoinByCode() {
     return;
   }
 
+  // Same race as joinD11CustomContestByCode: a contest a friend just
+  // created and shared may not have reached this device's in-memory
+  // d11CustomContests yet if the live listener hasn't delivered its first
+  // snapshot (e.g. right after the app was opened). Confirm the listener
+  // is actually attached/synced before declaring the code invalid — this
+  // resolves instantly once already live, so no visible delay in the
+  // normal case.
+  if (resultEl) resultEl.innerHTML = `<div style="color:var(--dim);font-size:12px">🔎 Checking code…</div>`;
+  await _loadAllD11CustomContestsFromFirestore(false, true);
+
   const cc = Object.values(d11CustomContests).find(c => c.code === code);
   if (!cc) {
     if (resultEl) resultEl.innerHTML = `<div style="color:#f87171;font-size:12px">❌ This code does not match any contest — please check</div>`;
@@ -19681,6 +19921,18 @@ async function d11JoinFromSearch(ccId) {
 async function joinD11CustomContestByCode(rawCode, teamId) {
   const code = (rawCode||'').trim().toUpperCase();
   if (!code) return showNotif('Please enter a contest code', 'error');
+
+  // Make sure the custom-contests listener has actually attached and
+  // delivered its first snapshot before trusting what's currently in
+  // memory. On a freshly opened app, _liveLoadCollection's listener attach
+  // is async — if this runs in the few hundred ms before that first
+  // snapshot lands (e.g. someone typing a code immediately after open, or
+  // pasting a code shared seconds earlier by a friend), d11CustomContests
+  // can still be empty/stale even though the contest genuinely exists,
+  // producing a false "No contest found with this code". Awaiting the
+  // loader here is a no-op once the listener is already live (it resolves
+  // instantly), so this costs nothing in the normal case.
+  await _loadAllD11CustomContestsFromFirestore(false, true);
 
   const cc = Object.values(d11CustomContests).find(c => c.code === code);
   if (!cc) return showNotif('No contest found with this code', 'error');
@@ -30102,6 +30354,16 @@ async function initApp() {
   _navEnsureSentinel();
 
   // Step 1: Load cache instantly → render right away (feels instant)
+  // NOTE: matches/contests are no longer cached in localStorage (loadLocalCache
+  // is a no-op), so on every fresh app open `matches`/`dream11Matches` really
+  // are empty here until the Firestore sync in Step 3 lands. Without a flag
+  // to distinguish "still loading" from "genuinely nothing to show", the very
+  // first render() below would paint "Upcoming (0)" / the empty-state message
+  // as if that were the final answer — a false "you have nothing" impression
+  // for a split second (or longer on a slow connection) before the real data
+  // pops in. window._homeDataSyncDone lets renderHome() show a loading
+  // skeleton instead until the first real sync finishes (see Step 3).
+  window._homeDataSyncDone = false;
   loadLocalCache();
   loadSession(); // optimistic instant paint from localStorage (legacy/cache only)
   applySavedAppTheme(); // apply saved Light/Dark Mode preference before first paint
@@ -30180,10 +30442,17 @@ async function initApp() {
       if (currentUser) { currentUser = null; clearSession(); }
     }
     window._authCheckDone = true; // Firebase has now told us the real answer — safe to show login screen if needed
+    // Start live-syncing THIS user's own doc now that we know who's logged
+    // in (or aren't syncing at all if they got logged out above) — see
+    // _startOwnUserLiveSync for why this matters (instant deposit/withdraw
+    // status updates without needing the manual 🔄 button).
+    if (currentUser && currentUser.email) _startOwnUserLiveSync(currentUser.email);
+    else _stopOwnUserLiveSync();
     render();
   } else if (!firebaseOk) {
     console.warn("Firebase not available — running on localStorage cache only");
     window._authCheckDone = true; // give up waiting; show login screen if no cached user
+    window._homeDataSyncDone = true; // no Firestore to wait on — stop showing a loading skeleton
     render(); // re-render now that we're allowed to show the login screen if needed
     return; // App already rendered from cache above — user can still use it
   }
@@ -30203,6 +30472,7 @@ async function initApp() {
   const authOk = !!(authUser && authUser.email);
   if (!authOk) {
     console.warn('[initApp] No Firebase Auth session — skipping Firestore sync to avoid PERMISSION_DENIED');
+    window._homeDataSyncDone = true; // not syncing at all (no session) — stop showing a loading skeleton
     render();
     return;
   }
@@ -30240,14 +30510,47 @@ async function initApp() {
   // in the background (see the .then() below) so the home screen appears
   // immediately from cache/auth, then quietly refreshes itself the moment
   // the Firestore reads land — same end-state correctness, no forced wait.
+  // Kick off all 14 syncs together (unchanged), BUT don't make the person
+  // wait for all 14 before the home screen updates. renderHome() only reads
+  // two of these — `matches` and `dream11Matches` — so as soon as THOSE two
+  // specific reads land we already have everything needed to replace the
+  // loading skeleton with real matches. The other 12 (users, H2H, custom
+  // contests, team squads, tournaments, player history, etc.) keep loading
+  // in the background exactly as before and still repaint via the full
+  // Promise.all().then() below when everything is in. This just removes the
+  // artificial wait on the slowest of the 14 reads before the person can see
+  // their matches, which — on a slow connection — was the actual cause of
+  // "Loading your matches..." sticking around far longer than necessary.
+  //
+  // CHANGED: forceRefresh is no longer hardcoded true here. Passing true on
+  // every single app open meant every one of these ~9 collections did a
+  // full getDocs() read for every user, every time they opened the app —
+  // confirmed as the direct cause of the project blowing through Firestore's
+  // 50K-reads/day free quota (596K reads in one day on the console). These
+  // now default to `false`, so _liveLoadCollection uses its localStorage
+  // cache first and only actually reads Firestore when a device has no
+  // cache yet — matching the cache-first design already documented above
+  // (see _MANUAL_REFRESH_COOLDOWN_MS) where the 🔄 button is meant to be
+  // the only thing that forces a real re-read.
+  const _homeMatchesReady = Promise.all([
+    _loadAllMatchesFromFirestore(false, true),
+    _loadAllDream11MatchesFromFirestore(false, true),
+  ]).then(() => {
+    window._homeDataSyncDone = true;
+    render();
+  }).catch(() => {
+    window._homeDataSyncDone = true; // don't get stuck loading forever even if this pair fails
+    render();
+  });
+
   Promise.all([
-    _loadAllUsersFromFirestore(true),_loadAllMatchesFromFirestore(true, true),
-    _loadAllH2HFromFirestore(true, true),_loadAllCustomContestsFromFirestore(true, true),
-    _loadAllDream11MatchesFromFirestore(true, true),_loadAllTeamSquadsFromFirestore(),
-    _loadAllDream11TeamsFromFirestore(true, true),_loadAllD11H2HFromFirestore(true, true),_loadAllD11TrioFromFirestore(true, true),
-    _loadAllD11CustomContestsFromFirestore(true, true),_loadAllD11TournamentsFromFirestore(),
+    _loadAllUsersFromFirestore(false),_homeMatchesReady,
+    _loadAllH2HFromFirestore(false, true),_loadAllCustomContestsFromFirestore(false, true),
+    _loadAllTeamSquadsFromFirestore(),
+    _loadAllDream11TeamsFromFirestore(false, true),_loadAllD11H2HFromFirestore(false, true),_loadAllD11TrioFromFirestore(false, true),
+    _loadAllD11CustomContestsFromFirestore(false, true),_loadAllD11TournamentsFromFirestore(),
     _loadAllUtTournamentsFromFirestore(),_loadAllUtTeamsFromFirestore(),
-    _loadAllPlayerHistoryFromFirestore(true, true),
+    _loadAllPlayerHistoryFromFirestore(false, true),
   ]).then(async () => {
     if (isAdmin()) {
       // Admin needs everything, including admin-only screens' data, right away.
@@ -30267,8 +30570,13 @@ async function initApp() {
     if (currentUser && users[currentUser.email]) {
       currentUser = { ...users[currentUser.email], email: currentUser.email };
     }
+    window._homeDataSyncDone = true; // real Firestore data has landed — 0/empty now means genuinely empty
     render(); // Re-render with fresh data (silent update)
-  }).catch(err => console.error('[initApp] background Firestore sync failed:', err));
+  }).catch(err => {
+    console.error('[initApp] background Firestore sync failed:', err);
+    window._homeDataSyncDone = true; // sync failed, but stop showing a loading skeleton forever — fall back to whatever we have
+    render();
+  });
   // Render now with whatever we already have (cache/auth), don't wait on the sync.
   render();
   // Live Sync is fully manual now — no polling to resume on startup.
@@ -30276,6 +30584,7 @@ async function initApp() {
 }
 
 initApp();
+_installVisibilityGuard(); // was fully built but never wired up — needed so onSnapshot listeners detach when idle/hidden and reattach on return, instead of running forever or never starting
 
 // ── Register service worker for offline support + push ──
 if ('serviceWorker' in navigator) {
