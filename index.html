@@ -13536,10 +13536,11 @@ async function d11SearchLiveMatchLl3(matchId) {
   }
 }
 
-function d11LinkLl3Match(matchId, ll3MatchId) {
+function d11LinkLl3Match(matchId, ll3MatchId, seriesId) {
   const m = matches[matchId];
   if (!m) return;
   m.ll3MatchId = ll3MatchId;
+  if (seriesId) m.ll3SeriesId = seriesId; // captured at link time — avoids relying on the match/info endpoint later
   _saveMatchToFirestore(matchId, m);
   _d11Ll3SearchResults = [];
   d11Ll3LinkPickerMatchId = null;
@@ -13593,7 +13594,7 @@ function renderD11Ll3LinkPickerModal() {
           <div style="font-size:12.5px;font-weight:600;line-height:1.4;margin-bottom:2px">${title}</div>
           <div style="font-size:10.5px;color:var(--dim);margin-bottom:2px">${sub}</div>
           ${status ? `<div style="font-size:10px;color:var(--dim2);margin-bottom:8px">${status}</div>` : `<div style="margin-bottom:8px"></div>`}
-          <button class="btn-secondary btn-block" style="font-size:11px;padding:8px;background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;border:none" onclick="d11LinkLl3Match('${d11Ll3LinkPickerMatchId}',${mt.match_id})">Link this match</button>
+          <button class="btn-secondary btn-block" style="font-size:11px;padding:8px;background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;border:none" onclick="d11LinkLl3Match('${d11Ll3LinkPickerMatchId}',${mt.match_id},${mt.series_id||mt.seriesId||'null'})">Link this match</button>
         </div>
       `;
       }).join('') : ''}
@@ -13624,11 +13625,31 @@ function renderD11Ll3DebugModal() {
   </div>`;
 }
 
+async function _d11Ll3AutoFindSeriesId(matchId, m) {
+  // The match/{id}/info endpoint 404s for some matches, so fall back to
+  // re-scanning liveMatches/upcomingMatches (same pool used at link time)
+  // and match by ll3MatchId to recover the series_id automatically.
+  try {
+    const [liveRaw, upcomingRaw] = await Promise.all([
+      _ll3Fetch('liveMatches', { feature: 'Auto-find Series ID', matchId }).catch(()=>null),
+      _ll3Fetch('upcomingMatches', { feature: 'Auto-find Series ID', matchId }).catch(()=>null)
+    ]);
+    const pool = [
+      ...(Array.isArray(liveRaw?.data) ? liveRaw.data : []),
+      ...(Array.isArray(upcomingRaw?.data) ? upcomingRaw.data : [])
+    ];
+    const found = pool.find(mt => String(mt.match_id) === String(m.ll3MatchId));
+    return found?.series_id || found?.seriesId || null;
+  } catch (e) {
+    console.warn('Cricket Live Line 3 auto series-id lookup failed:', e.message);
+    return null;
+  }
+}
+
 async function _d11Ll3FetchSeriesSquadFallback(matchId, m) {
-  // Older/manually-linked matches won't have this yet — derive it from the
-  // match's own info endpoint, which (like Cricbuzz) should carry a series id
-  // somewhere in its payload. We check every plausible key name since the
-  // exact field hasn't been confirmed against a live response yet.
+  // Older/manually-linked matches won't have this yet — first try the
+  // match's own info endpoint (fast path), and if that 404s, fall back to
+  // re-scanning the live/upcoming match list to recover the series id.
   let deriveErr = null, infoRaw = null;
   if (!m.ll3SeriesId) {
     try {
@@ -13643,6 +13664,13 @@ async function _d11Ll3FetchSeriesSquadFallback(matchId, m) {
     } catch (e) {
       deriveErr = e.message;
       console.warn('Cricket Live Line 3 series ID lookup failed:', e.message);
+    }
+    if (!m.ll3SeriesId) {
+      const sidFromList = await _d11Ll3AutoFindSeriesId(matchId, m);
+      if (sidFromList) {
+        m.ll3SeriesId = sidFromList;
+        await _saveMatchToFirestore(matchId, m);
+      }
     }
   }
   if (!m.ll3SeriesId) {
@@ -13663,7 +13691,18 @@ async function _d11Ll3FetchSeriesSquadFallback(matchId, m) {
   };
   const g1 = findTeam(m.teamA);
   const g2 = findTeam(m.teamB);
+  // If team names don't fuzzy-match (e.g. squad naming differs from our
+  // stored team names), still surface every player found in the series so
+  // the admin isn't stuck with zero — better to over-include than to block.
   if (!g1 && !g2) {
+    if (list.length > 0) {
+      showNotif(`⚠️ Couldn't match team names exactly — added all ${list.reduce((n,g)=>n+(g.player?.length||0),0)} players found in this series squad instead`, 'error');
+      return {
+        raw,
+        teamA: { player: list.flatMap(g => g.player || []), flag: list[0]?.team?.flag },
+        teamB: { player: [], flag: null }
+      };
+    }
     _d11Ll3DebugData = { ll3MatchId: m.ll3MatchId, ll3SeriesId: m.ll3SeriesId, seriesFallbackFailedAt: 'no-team-match', seriesRaw: raw, teamA: m.teamA, teamB: m.teamB, availableTeams: list.map(g => g.team?.name) };
     return null;
   }
@@ -30254,7 +30293,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.23.2";
+const APP_VERSION = "4.24.1";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
