@@ -30124,7 +30124,9 @@ async function initApp() {
       if (users[authEmail]) {
         currentUser = { ...users[authEmail], email: authEmail };
         saveSession(authEmail); // keep cache in sync for next instant paint
-        if (window.showBabarSplash) window.showBabarSplash();
+        // No splash here — this is a session restore (app already painted
+        // from cache in Step 1), not a fresh login. Re-showing the splash
+        // just re-blocks the UI with its animation delay for no reason.
         if (!currentUser.idNumber) {
           currentUser.idNumber = genUserIdNumber();
           users[authEmail].idNumber = currentUser.idNumber;
@@ -30137,12 +30139,10 @@ async function initApp() {
         if (users[authEmail]) {
           currentUser = { ...users[authEmail], email: authEmail };
           saveSession(authEmail);
-          if (window.showBabarSplash) window.showBabarSplash();
         } else {
           // Still not found — keep them logged in with basic info so they can use the app
           currentUser = { email: authEmail, points: 0, balance: 0 };
           saveSession(authEmail);
-          if (window.showBabarSplash) window.showBabarSplash();
         }
       }
     } else if (_legacySessionEmail) {
@@ -30168,7 +30168,6 @@ async function initApp() {
   } else if (!firebaseOk) {
     console.warn("Firebase not available — running on localStorage cache only");
     window._authCheckDone = true; // give up waiting; show login screen if no cached user
-    if (currentUser && window.showBabarSplash) window.showBabarSplash();
     render(); // re-render now that we're allowed to show the login screen if needed
     return; // App already rendered from cache above — user can still use it
   }
@@ -30403,7 +30402,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.25.7";
+const APP_VERSION = "4.25.8";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
