@@ -21788,6 +21788,7 @@ function renderD11Hero(subtitle) {
 // ── Live Sync status row shown on each Dream11 admin match card ──
 function _d11RenderLiveSyncRow(m) {
   if (!m.cricketDataMatchId) {
+    if (m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll3MatchId || m.ll4MatchId) return ''; // already on another provider
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
       <span style="font-size:11px;color:#4ade80;flex:1;min-width:140px">📡 Cricbuzz: not linked (manual paste mode)</span>
       <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;border:none" onclick="d11OpenLiveSyncPicker('${m.id}')">🔗 Link Live Match</button>
@@ -21815,7 +21816,7 @@ function _d11RenderLiveSyncRow(m) {
 // visual pattern as _d11RenderLiveSyncRow, red-tinted to visually
 // distinguish the provider at a glance.
 function _d11RenderEspnSyncRow(m) {
-  if (m.cricketDataMatchId) return ''; // already on Cricbuzz — don't offer a second provider on the same match
+  if (m.cricketDataMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll3MatchId || m.ll4MatchId) return ''; // already on another provider
   if (!m.espnMatchId) {
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(220,38,38,0.08);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
       <span style="font-size:11px;color:#f87171;flex:1;min-width:140px">🏏 ESPN Cricinfo: not linked</span>
@@ -21927,6 +21928,11 @@ function renderD11CricbuzzHub() {
       </div>
       ${_d11RenderLiveSyncRow(m)}
       ${_d11RenderEspnSyncRow(m)}
+      ${_d11RenderCllSyncRow(m)}
+      ${_d11RenderCb2SyncRow(m)}
+      ${_d11RenderLl2SyncRow(m)}
+      ${_d11RenderLl3SyncRow(m)}
+      ${_d11RenderLl4SyncRow(m)}
       <button class="btn-primary btn-block" style="font-size:12px;padding:10px;margin-bottom:8px;background:${d11m?.published ? 'linear-gradient(135deg,#dc2626,#b91c1c)' : 'linear-gradient(135deg,#16a34a,#15803d)'}" onclick="d11TogglePublish('${m.id}')">${d11m?.published ? '🚫 Unpublish (hide from users)' : '🚀 Publish (show to users)'}</button>
       <div style="display:flex;gap:8px">
         <button class="btn-secondary" style="flex:1;font-size:12px;padding:10px" onclick="openDream11Match('${m.id}')">⚙️ Manage Pool</button>
@@ -22137,6 +22143,11 @@ function renderDream11Hub() {
         </div>
         ${_d11RenderLiveSyncRow(m)}
         ${_d11RenderEspnSyncRow(m)}
+        ${_d11RenderCllSyncRow(m)}
+        ${_d11RenderCb2SyncRow(m)}
+        ${_d11RenderLl2SyncRow(m)}
+        ${_d11RenderLl3SyncRow(m)}
+        ${_d11RenderLl4SyncRow(m)}
         <button class="btn-primary btn-block" style="font-size:12px;padding:10px;margin-bottom:8px;background:${d11m?.published ? 'linear-gradient(135deg,#dc2626,#b91c1c)' : 'linear-gradient(135deg,#16a34a,#15803d)'}" onclick="d11TogglePublish('${m.id}')">${d11m?.published ? '🚫 Unpublish (hide from users)' : '🚀 Publish (show to users)'}</button>
         <div style="display:flex;gap:8px">
           <button class="btn-secondary" style="flex:1;font-size:12px;padding:10px" onclick="openDream11Match('${m.id}')">⚙️ Manage Pool</button>
