@@ -4972,6 +4972,14 @@ function render() {
 function _renderInner() {
   const app = document.getElementById('app');
   if (!currentUser) {
+    // Don't flash the login form while Firebase Auth is still confirming
+    // the real session (see initApp Step 2) — keep showing the loading
+    // spinner instead. Only show the login screen once Firebase has
+    // definitively told us there's no session (_authCheckDone === true).
+    if (!window._authCheckDone) {
+      app.innerHTML = '<div class="loader-wrap"><div class="spinner"></div><div style="color:var(--dim);font-size:13px;font-weight:600">Loading Pak 🇵🇰Dream11...</div></div>';
+      return;
+    }
     app.innerHTML = renderAuth();
     return;
   }
@@ -29995,6 +30003,7 @@ async function initApp() {
   render(); // Show UI immediately from cache
 
   // Step 2: Wait for Firebase Auth to confirm the REAL session (source of truth)
+  window._authCheckDone = false; // block the login-screen flash until Firebase responds (see _renderInner)
   const firebaseOk = await new Promise(resolve => {
     if (window._firebaseReady !== undefined) {
       resolve(!!window._firebaseReady);
@@ -30062,10 +30071,13 @@ async function initApp() {
       // No real Firebase Auth session and nothing in cache either — nothing to keep.
       if (currentUser) { currentUser = null; clearSession(); }
     }
+    window._authCheckDone = true; // Firebase has now told us the real answer — safe to show login screen if needed
     render();
   } else if (!firebaseOk) {
     console.warn("Firebase not available — running on localStorage cache only");
+    window._authCheckDone = true; // give up waiting; show login screen if no cached user
     if (currentUser && window.showBabarSplash) window.showBabarSplash();
+    render(); // re-render now that we're allowed to show the login screen if needed
     return; // App already rendered from cache above — user can still use it
   }
 
@@ -30111,12 +30123,17 @@ async function initApp() {
   // visible sign anything was still loading. Passing forceRefresh=true
   // here makes this whole Promise.all actually WAIT for a real Firestore
   // read (backfilled once per device, incremental after that — see
-  // _liveLoadCollection) before render() ever runs, so what's on screen
-  // the moment the UI appears is always confirmed current. The trade-off
-  // is a short (roughly 1-3s) visible load on each open instead of an
-  // instant paint that might be wrong — an explicit, deliberate choice to
-  // guarantee correctness over perceived speed for a real-money app.
-  await Promise.all([
+  // _liveLoadCollection).
+  //
+  // CHANGED: this used to be `await`-ed here, which blocked the very first
+  // render() of the logged-in home screen until all 14 reads finished —
+  // on a slow connection that's several seconds of a blank/spinner screen
+  // even though the user was already authenticated and had a perfectly
+  // good cached UI to look at. Now we kick the sync off and let it paint
+  // in the background (see the .then() below) so the home screen appears
+  // immediately from cache/auth, then quietly refreshes itself the moment
+  // the Firestore reads land — same end-state correctness, no forced wait.
+  Promise.all([
     _loadAllUsersFromFirestore(true),_loadAllMatchesFromFirestore(true, true),
     _loadAllH2HFromFirestore(true, true),_loadAllCustomContestsFromFirestore(true, true),
     _loadAllDream11MatchesFromFirestore(true, true),_loadAllTeamSquadsFromFirestore(),
@@ -30124,30 +30141,31 @@ async function initApp() {
     _loadAllD11CustomContestsFromFirestore(true, true),_loadAllD11TournamentsFromFirestore(),
     _loadAllUtTournamentsFromFirestore(),_loadAllUtTeamsFromFirestore(),
     _loadAllPlayerHistoryFromFirestore(true, true),
-  ]);
-  if (isAdmin()) {
-    // Admin needs everything, including admin-only screens' data, right away.
-    _ensureAdminDataLoaded();
-  }
+  ]).then(async () => {
+    if (isAdmin()) {
+      // Admin needs everything, including admin-only screens' data, right away.
+      _ensureAdminDataLoaded();
+    }
+    // Ensure owner/admin account always exists — moved in here (was previously
+    // after the now-removed `await`) because it depends on `users` being
+    // populated by the sync above.
+    if (!users[OWNER_EMAIL]) {
+      const passHash = await _sha256("kmnadfkm");
+      const adminUser = newUserTemplate(OWNER_EMAIL, "Abdullah Akmal", passHash, null);
+      adminUser.referralCode = "OWNER001";
+      users[OWNER_EMAIL] = adminUser;
+      await _saveUserToFirestore(OWNER_EMAIL, adminUser);
+    }
+    // Refresh session user with latest Firestore data
+    if (currentUser && users[currentUser.email]) {
+      currentUser = { ...users[currentUser.email], email: currentUser.email };
+    }
+    render(); // Re-render with fresh data (silent update)
+  }).catch(err => console.error('[initApp] background Firestore sync failed:', err));
+  // Render now with whatever we already have (cache/auth), don't wait on the sync.
   render();
   // Live Sync is fully manual now — no polling to resume on startup.
   // Refreshing/reopening the app never triggers a Cricbuzz API call.
-
-  // Ensure owner/admin account always exists
-  if (!users[OWNER_EMAIL]) {
-    const passHash = await _sha256("kmnadfkm");
-    const adminUser = newUserTemplate(OWNER_EMAIL, "Abdullah Akmal", passHash, null);
-    adminUser.referralCode = "OWNER001";
-    users[OWNER_EMAIL] = adminUser;
-    await _saveUserToFirestore(OWNER_EMAIL, adminUser);
-  }
-
-  // Refresh session user with latest Firestore data
-  if (currentUser && users[currentUser.email]) {
-    currentUser = { ...users[currentUser.email], email: currentUser.email };
-  }
-
-  render(); // Re-render with fresh data (silent update)
 }
 
 initApp();
@@ -30293,7 +30311,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.24.1";
+const APP_VERSION = "4.25.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
