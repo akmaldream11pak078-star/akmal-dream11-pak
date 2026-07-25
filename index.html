@@ -6864,7 +6864,13 @@ function renderD11StatsTab(matchId) {
   const myTeam = currentUser ? d11GetUserTeam(matchId, currentUser.email) : null;
   const myPickIds = new Set(myTeam ? myTeam.picks : []);
 
-  const sorted = [...d11m.players].sort((a, b) => (b.points||0) - (a.points||0));
+  // Always recompute from live stats rather than trusting each player's
+  // stored p.points — that field can lag behind the latest synced stats
+  // (e.g. right after an admin "Sync now"), which previously caused this
+  // list and the Points Breakup screen to show two different totals for
+  // the same player.
+  const livePts = new Map(d11m.players.map(p => [p.id, calcDream11PlayerPoints(p.stats, matchId)]));
+  const sorted = [...d11m.players].sort((a, b) => (livePts.get(b.id)||0) - (livePts.get(a.id)||0));
 
   return `
   <div style="font-size:11.5px;color:var(--dim);text-align:center;margin-bottom:12px">Showing Player Stats by Match</div>
@@ -6886,7 +6892,7 @@ function renderD11StatsTab(matchId) {
         </div>
         <div style="font-size:11.5px;color:var(--dim)">${p.side==='A'?m_teamNameForStats(matchId,'A'):m_teamNameForStats(matchId,'B')}-${(p.role||'').toLowerCase()}</div>
       </div>
-      <div style="font-weight:800;font-size:19px;text-align:right;min-width:60px">${p.points||0}</div>
+      <div style="font-weight:800;font-size:19px;text-align:right;min-width:60px">${livePts.get(p.id)||0}</div>
     </div>`;
   }).join('')}
 
@@ -7247,7 +7253,11 @@ function renderD11PointsBreakup() {
   if (!d11m || !p) return `<div class="empty-state">Player not found. <button class="btn-secondary" onclick="tab='dream11Pool';render()" style="margin-top:10px">← Back</button></div>`;
 
   const rows = calcDream11PlayerPointsBreakdown(p.stats, ctx.matchId);
-  const totalPts = p.points || 0;
+  // Use the same calculation the rows came from, not the possibly-stale
+  // p.points field (which can lag behind live stats or hold a leftover
+  // value from a different recompute), so the header total always
+  // matches the sum of the rows shown below it.
+  const totalPts = calcDream11PlayerPoints(p.stats, ctx.matchId);
   const sideName = m_teamNameForStats(ctx.matchId, p.side);
   // "Selected by %" — share of all submitted teams for this match that picked this player
   const teamsForMatch = Object.values(dream11Teams).filter(t => t.matchId === ctx.matchId);
@@ -7402,7 +7412,11 @@ function calcDream11TeamPoints(team, d11m) {
   team.picks.forEach(pid => {
     const p = (d11m.players||[]).find(x => x.id === pid);
     if (!p) return;
-    let pts = p.points || 0;
+    // Recompute live rather than trusting p.points, which can still be
+    // stale for a brief window right after a sync (or if some other
+    // code path updated p.stats without recomputing p.points) — this is
+    // what actually decides contest rank/payout so it must never lag.
+    let pts = calcDream11PlayerPoints(p.stats, d11m.id || team.matchId);
     // captain/viceCaptain store the ORIGINAL player id the user chose. If that
     // player was auto-replaced by a backup (see d11ApplyBackupReplacements),
     // the multiplier still applies — it now lands on whichever id sits in the
@@ -12549,6 +12563,7 @@ async function d11SyncLiveMatchCb2(matchId, showToast) {
 
     let battersApplied = 0, bowlersApplied = 0;
     const fieldingRowsAll = [];
+    const unmatchedNames = []; // names from the feed that didn't map to any squad player — surfaced below instead of silently vanishing
 
     innings.forEach(inn => {
       const teamNameL = (inn.batteamname || inn.batteamsname || '').toLowerCase();
@@ -12558,11 +12573,24 @@ async function d11SyncLiveMatchCb2(matchId, showToast) {
         else if (_d11TeamNameMatches(teamNameL, m.teamB)) m.scoreB = scoreStr;
       }
       (inn.batsman || []).forEach(b => {
-        if (_d11ApplyLiveBattingRow(d11m, b)) battersApplied++;
+        const applied = _d11ApplyLiveBattingRow(d11m, b);
+        if (applied) battersApplied++;
+        else {
+          // Only flag rows that actually represent someone who batted —
+          // _d11ApplyLiveBattingRow also (correctly) skips 0-ball placeholder
+          // rows for squad members who never came out, and those aren't a
+          // matching failure worth reporting.
+          const ballsFaced = Number(b.balls ?? b.ballsFaced) || 0;
+          const outDesc = (b.outdec || b.outDesc || b.dismissal || '').toLowerCase();
+          const isOut = !!outDesc && outDesc !== 'not out' && outDesc !== 'batting';
+          if (ballsFaced > 0 || isOut) unmatchedNames.push(b.name || b.batName || b.batsmanName || '(unknown)');
+        }
         _d11ExtractLiveFieldingCredit(b, fieldingRowsAll);
       });
       (inn.bowler || []).forEach(bl => {
-        if (_d11ApplyLiveBowlingRow(d11m, bl)) bowlersApplied++;
+        const applied = _d11ApplyLiveBowlingRow(d11m, bl);
+        if (applied) bowlersApplied++;
+        else if ((parseFloat(bl.overs) || 0) > 0) unmatchedNames.push(bl.name || bl.bowlName || bl.bowlerName || '(unknown)');
       });
     });
 
@@ -12612,7 +12640,8 @@ async function d11SyncLiveMatchCb2(matchId, showToast) {
     }
 
     if (showToast) {
-      showNotif(`✅ Synced from Cricbuzz No 2 — ${battersApplied} batters, ${bowlersApplied} bowlers updated${isFinished ? ' — match marked completed 🏁' : ''}`);
+      const unmatchedMsg = unmatchedNames.length ? ` ⚠️ Not matched to any player: ${unmatchedNames.join(', ')} — check squad name spelling.` : '';
+      showNotif(`✅ Synced from Cricbuzz No 2 — ${battersApplied} batters, ${bowlersApplied} bowlers updated${isFinished ? ' — match marked completed 🏁' : ''}${unmatchedMsg}`, unmatchedNames.length ? 'error' : undefined);
     }
     render();
   } catch (e) {
@@ -30375,7 +30404,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.25.2";
+const APP_VERSION = "4.25.5";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
