@@ -2136,6 +2136,31 @@ async function _updateDream11MatchScoringFields(matchId, fields) {
     throw e;
   }
 }
+// Force-refetches ONE Dream11 match doc from Firestore and replaces this
+// tab's in-memory copy. Root-cause fix for admins seeing stale player
+// points/stats after "Sync Now": dream11Matches is only loaded once on app
+// open (via getDocs, not a live onSnapshot listener), so a browser tab left
+// open across a sync done from elsewhere (or done earlier in the same tab
+// but not re-fetched before opening Quick Score/Fetch Squad) can keep
+// showing 0s even though Firestore itself already has the fresh points.
+// Called on entry to Quick Score / Fetch Squad / Sync screens so those
+// always reflect the true current data before the admin edits anything.
+async function d11RefreshMatchFromFirestore(matchId) {
+  if (!window._fbDb || !window._fbFns || !matchId) return false;
+  try {
+    const { doc, getDoc } = window._fbFns;
+    const snap = await getDoc(doc(window._fbDb, 'pp_dream11_matches', matchId));
+    if (snap.exists()) {
+      dream11Matches[matchId] = snap.data();
+      try { localStorage.setItem('pp_dream11_matches_cache', JSON.stringify(dream11Matches)); } catch(e){}
+      return true;
+    }
+  } catch (e) {
+    console.error('d11RefreshMatchFromFirestore error:', e);
+  }
+  return false;
+}
+
 async function _loadAllDream11MatchesFromFirestore(forceRefresh, isAppOpen) {
   return _liveLoadCollection('pp_dream11_matches', () => dream11Matches, (v) => { dream11Matches = v; console.log('[D11] Matches loaded:', Object.keys(v).length); }, 'pp_dream11_matches_cache', { rerenderOnUpdate: true, skipDoneField: 'scored' }, forceRefresh, isAppOpen);
 }
@@ -12305,12 +12330,54 @@ async function d11FetchSquadFromCb2(matchId) {
   }
   showNotif('📥 Fetching squad from Cricbuzz No 2…');
   try {
-    const raw = await _cb2Fetch(`/mcenter/v1/${m.cb2MatchId}/teams`, null, { feature: 'Fetch Squad', matchId });
-    _d11Cb2DebugData = { cb2Raw: raw, cb2MatchId: m.cb2MatchId };
-    const team1 = raw?.team1 || {};
-    const team2 = raw?.team2 || {};
-    if (!Array.isArray(team1.players) && !Array.isArray(team2.players)) {
-      showNotif('📭 Cricbuzz No 2 hasn\'t published this squad yet (or the response shape was unexpected — check 🐛 View Raw Data). Try again closer to match time, or add players manually for now.', 'error');
+    let team1 = {}, team2 = {}, raw = null, usedCllFallback = false;
+    try {
+      raw = await _cb2Fetch(`/mcenter/v1/${m.cb2MatchId}/teams`, null, { feature: 'Fetch Squad', matchId });
+      _d11Cb2DebugData = { cb2Raw: raw, cb2MatchId: m.cb2MatchId };
+      team1 = raw?.team1 || {};
+      team2 = raw?.team2 || {};
+      if (!Array.isArray(team1.players) && !Array.isArray(team2.players)) {
+        throw new Error('Match squad not published yet on Cricbuzz No 2');
+      }
+    } catch (cb2SquadErr) {
+      // Cricbuzz No 2 has no confirmed series-squad endpoint of its own yet,
+      // so instead of guessing an untested schema, fall back to Cricket Live
+      // Line's series-squad fetch if this same match is ALSO linked there —
+      // that path is already confirmed working (see
+      // _d11CllFetchSeriesSquadFallback). This only helps matches linked to
+      // both providers; if not linked to CLL, the original cb2 error shows.
+      if (!m.cllMatchId) throw cb2SquadErr;
+      const cllFallback = await _d11CllFetchSeriesSquadFallback(matchId, m);
+      if (!cllFallback) throw cb2SquadErr;
+      usedCllFallback = true;
+      d11SyncTeamFlag(m.teamA, cllFallback.teamA.flag);
+      d11SyncTeamFlag(m.teamB, cllFallback.teamB.flag);
+      const existingNamesLowerCll = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+      let addedCll = 0;
+      const addCllSide = (teamObj, side) => {
+        (teamObj.player || []).forEach(p => {
+          const name = (p.name || '').trim();
+          if (!name || existingNamesLowerCll.has(name.toLowerCase())) return;
+          const roleText = p.play_role || '';
+          const isKeeper = /keeper/i.test(roleText);
+          const role = _d11MapCricbuzzRole(roleText, isKeeper);
+          const photo = (p.image || '').trim() || null;
+          const player = newDream11Player(name, role, side, { photo });
+          d11m.players.push(player);
+          d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
+          existingNamesLowerCll.add(name.toLowerCase());
+          addedCll++;
+        });
+      };
+      addCllSide(cllFallback.teamA, 'A');
+      addCllSide(cllFallback.teamB, 'B');
+      if (addedCll === 0) {
+        showNotif('No new players to add — squad already matches what\'s in your pool.');
+        render();
+        return;
+      }
+      await _saveDream11MatchToFirestore(matchId, d11m);
+      showNotif(`✅ Added ${addedCll} players via Cricket Live Line series squad (Cricbuzz No 2 squad wasn't published yet)!`);
       render();
       return;
     }
@@ -12460,15 +12527,16 @@ async function d11SyncLiveMatchCb2(matchId, showToast) {
     const mergedFieldingAll = {};
     fieldingRowsAll.forEach(r => {
       const key = r.name.toLowerCase();
-      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0 };
+      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0, lbwBowled: 0 };
       mergedFieldingAll[key].catches += r.catches;
       mergedFieldingAll[key].stumpings += r.stumpings;
       mergedFieldingAll[key].runOuts += r.runOuts;
+      mergedFieldingAll[key].lbwBowled += (r.lbwBowled||0);
     });
     Object.values(mergedFieldingAll).forEach(row => {
       const p = _d11FindPlayerByName(d11m, row.name);
       if (!p) return;
-      p.stats = { ...(p.stats||{}), catches: row.catches, stumpings: row.stumpings, runOuts: row.runOuts, isPlayingXI: true };
+      p.stats = { ...(p.stats||{}), catches: row.catches, stumpings: row.stumpings, runOuts: row.runOuts, lbwBowled: row.lbwBowled, isPlayingXI: true };
       p.isPlayingXI = true;
     });
 
@@ -12730,10 +12798,11 @@ async function d11SyncLiveMatchCll(matchId, showToast) {
     const mergedFieldingAll = {};
     fieldingRowsAll.forEach(r => {
       const key = r.name.toLowerCase();
-      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0 };
+      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0, lbwBowled: 0 };
       mergedFieldingAll[key].catches += r.catches;
       mergedFieldingAll[key].stumpings += r.stumpings;
       mergedFieldingAll[key].runOuts += r.runOuts;
+      mergedFieldingAll[key].lbwBowled += (r.lbwBowled||0);
     });
     let fieldersApplied = 0;
     Object.values(mergedFieldingAll).forEach(row => {
@@ -12743,6 +12812,7 @@ async function d11SyncLiveMatchCll(matchId, showToast) {
         catches: row.catches,
         stumpings: row.stumpings,
         runOuts: row.runOuts,
+        lbwBowled: row.lbwBowled,
         isPlayingXI: true
       };
       p.isPlayingXI = true;
@@ -12758,34 +12828,22 @@ async function d11SyncLiveMatchCll(matchId, showToast) {
     await _saveDream11MatchToFirestore(matchId, d11m);
     await d11RefreshLiveTeamPoints(matchId);
 
-    // This API's match_status field (from /matchInfo) is the authoritative
-    // "finished" signal — the scorecard endpoint alone doesn't say. Do a
-    // light extra check only when both innings are present, same
-    // double-confirm guard used for ESPN/Cricbuzz. The guard needs to see
-    // "completed" on two separate polls before it locks in — previously
-    // that meant two separate button taps from the admin (misread as "sync
-    // needs 3-4 clicks before it works"). Since this same info-check can
-    // just be repeated immediately, do that here so ONE tap can fully
-    // confirm a genuinely finished match, while a single stale/glitchy
-    // "completed" blip still can't finalize on its own.
+    // This provider's scorecard response includes its own authoritative
+    // "result" field once the match is over (confirmed live:
+    // data.result = "Lahore Qalandars won by 38 runs") — no need for a
+    // separate /info API call to check match_status, which was the
+    // previous approach and didn't reliably flip to "completed" even once
+    // the scorecard itself already showed a final result. Still keep the
+    // double-confirm guard (two consecutive syncs both showing a result)
+    // so a transient/glitchy response can't finalize a match on its own.
     let isFinished = false;
-    if (innings.length >= 2) {
-      try {
-        const pendingKey = matchId + '_cll';
-        for (let attempt = 0; attempt < 2 && !isFinished; attempt++) {
-          if (attempt > 0) await _d11Sleep(1500);
-          const infoRaw = await _cllFetch(`match/${m.cllMatchId}/info`, { feature: 'Finish Check', matchId });
-          const infoStatus = (Array.isArray(infoRaw?.data) ? infoRaw.data[0] : infoRaw?.data)?.match_status || '';
-          const looksFinished = /completed/i.test(infoStatus);
-          if (looksFinished) {
-            if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = infoStatus || m.resultText; }
-            else { _d11PendingFinish[pendingKey] = true; }
-          } else {
-            delete _d11PendingFinish[pendingKey];
-            break; // not finished — no point immediately re-polling again
-          }
-        }
-      } catch (e) { /* finish-check failure shouldn't block the sync itself */ }
+    const resultText = (data.result || '').trim();
+    if (innings.length >= 2 && resultText) {
+      const pendingKey = matchId + '_cll';
+      if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = resultText; }
+      else { _d11PendingFinish[pendingKey] = true; }
+    } else {
+      delete _d11PendingFinish[matchId + '_cll'];
     }
     if (isFinished) {
       m.status = 'completed';
@@ -12795,7 +12853,9 @@ async function d11SyncLiveMatchCll(matchId, showToast) {
       await _saveDream11MatchToFirestore(matchId, d11m);
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
-      if (battersApplied === 0 && bowlersApplied === 0) {
+      if (resultText) {
+        showNotif(`🏁 Result detected (${resultText}) — tap Sync Now once more to confirm and finalize the match.`);
+      } else if (battersApplied === 0 && bowlersApplied === 0) {
         showNotif('⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).', 'error');
       } else {
         showNotif(`✅ Live data synced — ${battersApplied} batting + ${bowlersApplied} bowling + ${fieldersApplied} fielding rows updated`);
@@ -13041,10 +13101,11 @@ async function d11SyncLiveMatchLl2(matchId, showToast) {
     const mergedFieldingAll = {};
     fieldingRowsAll.forEach(r => {
       const key = r.name.toLowerCase();
-      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0 };
+      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0, lbwBowled: 0 };
       mergedFieldingAll[key].catches += r.catches;
       mergedFieldingAll[key].stumpings += r.stumpings;
       mergedFieldingAll[key].runOuts += r.runOuts;
+      mergedFieldingAll[key].lbwBowled += (r.lbwBowled||0);
     });
     let fieldersApplied = 0;
     Object.values(mergedFieldingAll).forEach(row => {
@@ -13054,6 +13115,7 @@ async function d11SyncLiveMatchLl2(matchId, showToast) {
         catches: row.catches,
         stumpings: row.stumpings,
         runOuts: row.runOuts,
+        lbwBowled: row.lbwBowled,
         isPlayingXI: true
       };
       p.isPlayingXI = true;
@@ -13776,10 +13838,11 @@ async function d11SyncLiveMatchLl3(matchId, showToast) {
     const mergedFieldingAll = {};
     fieldingRowsAll.forEach(r => {
       const key = r.name.toLowerCase();
-      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0 };
+      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0, lbwBowled: 0 };
       mergedFieldingAll[key].catches += r.catches;
       mergedFieldingAll[key].stumpings += r.stumpings;
       mergedFieldingAll[key].runOuts += r.runOuts;
+      mergedFieldingAll[key].lbwBowled += (r.lbwBowled||0);
     });
     let fieldersApplied = 0;
     Object.values(mergedFieldingAll).forEach(row => {
@@ -13789,6 +13852,7 @@ async function d11SyncLiveMatchLl3(matchId, showToast) {
         catches: row.catches,
         stumpings: row.stumpings,
         runOuts: row.runOuts,
+        lbwBowled: row.lbwBowled,
         isPlayingXI: true
       };
       p.isPlayingXI = true;
@@ -14560,10 +14624,11 @@ async function d11SyncLiveMatchLl4(matchId, showToast) {
     const mergedFieldingAll = {};
     fieldingRowsAll.forEach(r => {
       const key = r.name.toLowerCase();
-      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0 };
+      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0, lbwBowled: 0 };
       mergedFieldingAll[key].catches += r.catches;
       mergedFieldingAll[key].stumpings += r.stumpings;
       mergedFieldingAll[key].runOuts += r.runOuts;
+      mergedFieldingAll[key].lbwBowled += (r.lbwBowled||0);
     });
     let fieldersApplied = 0;
     Object.values(mergedFieldingAll).forEach(row => {
@@ -14573,6 +14638,7 @@ async function d11SyncLiveMatchLl4(matchId, showToast) {
         catches: row.catches,
         stumpings: row.stumpings,
         runOuts: row.runOuts,
+        lbwBowled: row.lbwBowled,
         isPlayingXI: true
       };
       p.isPlayingXI = true;
@@ -16131,10 +16197,11 @@ async function d11SyncLiveMatch(matchId, showToast) {
     const mergedFieldingAll = {};
     fieldingRowsAll.forEach(r => {
       const key = r.name.toLowerCase();
-      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0 };
+      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0, lbwBowled: 0 };
       mergedFieldingAll[key].catches += r.catches;
       mergedFieldingAll[key].stumpings += r.stumpings;
       mergedFieldingAll[key].runOuts += r.runOuts;
+      mergedFieldingAll[key].lbwBowled += (r.lbwBowled||0);
     });
     let fieldersApplied = 0;
     Object.values(mergedFieldingAll).forEach(row => {
@@ -16144,6 +16211,7 @@ async function d11SyncLiveMatch(matchId, showToast) {
         catches: row.catches,
         stumpings: row.stumpings,
         runOuts: row.runOuts,
+        lbwBowled: row.lbwBowled,
         isPlayingXI: true
       };
       p.isPlayingXI = true;
@@ -16279,10 +16347,11 @@ async function d11SyncLiveMatchEspn(matchId, showToast) {
     const mergedFieldingAll = {};
     fieldingRowsAll.forEach(r => {
       const key = r.name.toLowerCase();
-      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0 };
+      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0, lbwBowled: 0 };
       mergedFieldingAll[key].catches += r.catches;
       mergedFieldingAll[key].stumpings += r.stumpings;
       mergedFieldingAll[key].runOuts += r.runOuts;
+      mergedFieldingAll[key].lbwBowled += (r.lbwBowled||0);
     });
     let fieldersApplied = 0;
     Object.values(mergedFieldingAll).forEach(row => {
@@ -16292,6 +16361,7 @@ async function d11SyncLiveMatchEspn(matchId, showToast) {
         catches: row.catches,
         stumpings: row.stumpings,
         runOuts: row.runOuts,
+        lbwBowled: row.lbwBowled,
         isPlayingXI: true
       };
       p.isPlayingXI = true;
@@ -16424,17 +16494,29 @@ function _d11ExtractLiveFieldingCredit(b, out) {
   const runOutMatch = dismissal.match(/run\s*out\s*\(([^)]+)\)/i);
   const catchAndBowlMatch = /^c\s*&\s*b\s+(.+)$/i.test(dismissal);
   const catchMatch = !catchAndBowlMatch && dismissal.match(/^c\s+(.+?)\s+b\s+/i);
+  // LBW ("lbw b <bowler>") and straight Bowled ("b <bowler>") dismissals
+  // both credit the bowler with an LBW/Bowled wicket for the LBW/Bowled
+  // Bonus scoring rule. Must be checked before/independently of the catch
+  // patterns above since "b <bowler>" with no "c "/"lbw " prefix is a
+  // clean bowled, and "lbw b <bowler>" is distinct from both.
+  const lbwMatch = dismissal.match(/^lbw\s+b\s+(.+)$/i);
+  const bowledMatch = !lbwMatch && !stMatch && !catchAndBowlMatch && !catchMatch && !runOutMatch
+    && dismissal.match(/^b\s+(.+)$/i);
   if (stMatch) {
-    out.push({ name: stMatch[1].trim(), catches: 0, stumpings: 1, runOuts: 0 });
+    out.push({ name: stMatch[1].trim(), catches: 0, stumpings: 1, runOuts: 0, lbwBowled: 0 });
   } else if (runOutMatch) {
     runOutMatch[1].split('/').map(n => n.trim()).filter(Boolean).forEach(fielderName => {
-      out.push({ name: fielderName, catches: 0, stumpings: 0, runOuts: 1 });
+      out.push({ name: fielderName, catches: 0, stumpings: 0, runOuts: 1, lbwBowled: 0 });
     });
   } else if (catchAndBowlMatch) {
     const bowlerName = dismissal.replace(/^c\s*&\s*b\s+/i, '').trim();
-    if (bowlerName) out.push({ name: bowlerName, catches: 1, stumpings: 0, runOuts: 0 });
+    if (bowlerName) out.push({ name: bowlerName, catches: 1, stumpings: 0, runOuts: 0, lbwBowled: 0 });
   } else if (catchMatch) {
-    out.push({ name: catchMatch[1].trim(), catches: 1, stumpings: 0, runOuts: 0 });
+    out.push({ name: catchMatch[1].trim(), catches: 1, stumpings: 0, runOuts: 0, lbwBowled: 0 });
+  } else if (lbwMatch) {
+    out.push({ name: lbwMatch[1].trim(), catches: 0, stumpings: 0, runOuts: 0, lbwBowled: 1 });
+  } else if (bowledMatch) {
+    out.push({ name: bowledMatch[1].trim(), catches: 0, stumpings: 0, runOuts: 0, lbwBowled: 1 });
   }
 }
 
@@ -24622,9 +24704,9 @@ function _d11AdminMatchCard(m) {
       </div>
       ${isOpen ? renderAdminD11ParticipantsPanel(m.id) : ''}
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn-secondary" style="flex:1;font-size:12px;padding:9px" onclick="d11ActiveMatchId='${m.id}';d11AdminTab='pool';tab='dream11Pool';render();window.scrollTo(0,0)">🏏 Player Pool</button>
+        <button class="btn-secondary" style="flex:1;font-size:12px;padding:9px" onclick="d11ActiveMatchId='${m.id}';d11AdminTab='pool';tab='dream11Pool';render();window.scrollTo(0,0);d11RefreshMatchFromFirestore('${m.id}').then(()=>render())">🏏 Player Pool</button>
         <button class="btn-secondary" style="flex:1;font-size:12px;padding:9px" onclick="d11ActiveMatchId='${m.id}';d11AdminTab='scoring';tab='dream11Pool';render();window.scrollTo(0,0)">📊 Scoring</button>
-        ${d11m ? `<button class="btn-secondary" style="flex:1;font-size:12px;padding:9px;background:rgba(124,58,237,0.15);color:#a78bfa;border-color:rgba(124,58,237,0.4)" onclick="d11QuickScoreMatchId='${m.id}';d11QsViewMode='table';d11ActiveMatchId='${m.id}';d11AdminTab='scoring';tab='dream11Pool';render();window.scrollTo(0,0)">${d11m.scored ? '⚡ Fix Score' : '⚡ Quick Score'}</button>` : ''}
+        ${d11m ? `<button class="btn-secondary" style="flex:1;font-size:12px;padding:9px;background:rgba(124,58,237,0.15);color:#a78bfa;border-color:rgba(124,58,237,0.4)" onclick="d11QuickScoreMatchId='${m.id}';d11QsViewMode='table';d11ActiveMatchId='${m.id}';d11AdminTab='scoring';tab='dream11Pool';render();window.scrollTo(0,0);d11RefreshMatchFromFirestore('${m.id}').then(()=>render())">${d11m.scored ? '⚡ Fix Score' : '⚡ Quick Score'}</button>` : ''}
         ${d11m ? `<button class="btn-secondary" style="flex:1;font-size:12px;padding:9px;${d11m.published?'color:#facc15;border-color:rgba(234,179,8,0.4)':'color:#4ade80;border-color:rgba(34,197,94,0.4)'}" onclick="d11TogglePublish('${m.id}')">${d11m.published?'🔒 Unpublish':'🟢 Publish'}</button>` : ''}
         ${d11m?.scored ? `<button class="btn-secondary" style="flex:1;font-size:12px;padding:9px;color:#4ade80;border-color:rgba(34,197,94,0.4)" onclick="d11RunAllPayouts('${m.id}')">💰 Payouts All</button>` : ''}
         <button class="btn-secondary" style="flex:1;font-size:12px;padding:9px;color:#f87171;border-color:rgba(220,38,38,0.4)" onclick="d11RunAllRefunds('${m.id}')">↩️ Refund All</button>
@@ -25832,7 +25914,7 @@ function renderD11QuickScoreSelector() {
         <div style="font-weight:700;font-size:13.5px">${mainM.teamA||d11m.teamA||'Team A'} vs ${mainM.teamB||d11m.teamB||'Team B'}</div>
         <span style="font-size:11px;color:#a78bfa;font-weight:700">${d11m.players.length} players</span>
       </div>
-      <button class="btn-primary btn-block" style="background:linear-gradient(135deg,#7c3aed,#4f46e5);font-size:12.5px;padding:10px" onclick="d11QuickScoreMatchId='${d11m.id}';d11QsViewMode='table';d11ActiveMatchId='${d11m.id}';tab='dream11Pool';d11AdminTab='scoring';render();window.scrollTo(0,0)">
+      <button class="btn-primary btn-block" style="background:linear-gradient(135deg,#7c3aed,#4f46e5);font-size:12.5px;padding:10px" onclick="d11QuickScoreMatchId='${d11m.id}';d11QsViewMode='table';d11ActiveMatchId='${d11m.id}';tab='dream11Pool';d11AdminTab='scoring';render();window.scrollTo(0,0);d11RefreshMatchFromFirestore('${d11m.id}').then(()=>render())">
         ⚡ Quick Score This Match
       </button>
     </div>`;
@@ -30172,7 +30254,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.21.0";
+const APP_VERSION = "4.23.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
