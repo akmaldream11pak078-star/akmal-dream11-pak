@@ -24175,28 +24175,27 @@ function renderDream11BuildTeam() {
     ${roleTab('BOWL', `BOWL (${sideAAll.concat(sideBAll).filter(p=>p.role==='BOWL').length})`)}
   </div>
 
-  <div class="d11-single-list">
-    <div class="d11-single-list-header">
-      <span>Player</span>
-      <span>Sel by</span>
-      <span>Credits</span>
-      <span></span>
+  <div class="d11-dual-col">
+    <div class="d11-dual-col-half">
+      <div class="d11-dual-header">
+        ${d11GetTeamSquad(m.teamA)?.flag ? `<img src="${d11GetTeamSquad(m.teamA).flag}" />` : ''}
+        <span>${m.teamA||'Team A'}</span>
+      </div>
+      ${sideA.length === 0
+        ? `<div class="empty-state" style="padding:16px 4px;font-size:11px">No players</div>`
+        : sideA.map((p,i) => d11DualPlayerCard(p, i+1, selCounts, selTotal)).join('')
+      }
     </div>
-    ${sideA.length === 0 && sideB.length === 0
-      ? `<div class="empty-state" style="padding:16px 4px;font-size:11px">No players</div>`
-      : `${sideA.length ? `<div class="d11-team-group-header">
-            ${d11GetTeamSquad(m.teamA)?.flag ? `<img src="${d11GetTeamSquad(m.teamA).flag}" style="width:20px;height:20px;border-radius:50%;object-fit:cover" />` : ''}
-            <span>${m.teamA||'Team A'}</span>
-            <span class="d11-team-group-count">${sideA.length} players</span>
-          </div>` : ''}
-        ${sideA.map((p,i) => d11SinglePlayerRow(p, i+1, m.teamA, selCounts, selTotal)).join('')}
-        ${sideB.length ? `<div class="d11-team-group-header">
-            ${d11GetTeamSquad(m.teamB)?.flag ? `<img src="${d11GetTeamSquad(m.teamB).flag}" style="width:20px;height:20px;border-radius:50%;object-fit:cover" />` : ''}
-            <span>${m.teamB||'Team B'}</span>
-            <span class="d11-team-group-count">${sideB.length} players</span>
-          </div>` : ''}
-        ${sideB.map((p,i) => d11SinglePlayerRow(p, i+1, m.teamB, selCounts, selTotal)).join('')}`
-    }
+    <div class="d11-dual-col-half">
+      <div class="d11-dual-header">
+        ${d11GetTeamSquad(m.teamB)?.flag ? `<img src="${d11GetTeamSquad(m.teamB).flag}" />` : ''}
+        <span>${m.teamB||'Team B'}</span>
+      </div>
+      ${sideB.length === 0
+        ? `<div class="empty-state" style="padding:16px 4px;font-size:11px">No players</div>`
+        : sideB.map((p,i) => d11DualPlayerCard(p, i+1, selCounts, selTotal)).join('')
+      }
+    </div>
   </div>
 
   ${d11TeamDraft.picks.length === D11_TEAM_SIZE ? `
@@ -30783,7 +30782,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.26.3";
+const APP_VERSION = "4.26.4";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
