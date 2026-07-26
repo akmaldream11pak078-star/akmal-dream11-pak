@@ -1232,6 +1232,58 @@ let d11CllImportResults = []; // filtered list of individual match objects from 
 let _d11CllDebugData = null; // { cllRaw } — raw last response, own debug modal
 let d11CllLinkPickerMatchId = null;
 
+// ── Sportbex (trial-api.sportbex.com) — SEVENTH, fully independent Live
+// Sync source, parallel to Cricbuzz/ESPN/CLL/CB2/LL2/LL3/LL4 above. A
+// Dream11 match links to exactly one of these providers (never more than
+// one), tracked by m.sbxMatchId. Same automation: Import / Fetch Squad /
+// Check Playing XI / Sync Now, all admin-triggered on demand.
+// Auth: header 'sportbex-api-key' (NOT RapidAPI headers). Base path is
+// /api/live-score/ (per docs "Cricket" section). Response shapes confirmed
+// via live sample JSON provided directly (NOT guessed):
+//   Get Series:              GET series?page=1&perPage=10
+//                             → { data: [ { month, result:[{_id,name,
+//                             startDate,endDate,year,month,isPopular}] } ],
+//                             pageInfo:{total,perPage,page} } — paginated,
+//                             grouped by month.
+//   Get All Matches for Series: GET matches/series/{seriesId} (assumed path
+//                             — matches by seriesId; each item has _id,
+//                             eventId, name, seriesId, seriesName, teams:
+//                             {t1,t2:{name,logo,score}}, format, ground,
+//                             isLive, status (NOT_STARTED/COMPLETED/LIVE),
+//                             startDate, result:{message,winnerTeamKey,
+//                             menOfTheMatchKey}, toss, weather).
+//   Get Match Data:           GET match/{matchId} → { data: {...same shape
+//                             as one match item above} }.
+//   Get Scorecard:            GET scorecard/{matchId} → { data: [ { result:
+//                             { teams, resultLine, inningsOrder, innings:[
+//                             { teamInfo:{teamName,shortName,runs,wickets,
+//                             overs,extras}, batting:[{playerKey,playerName,
+//                             ballsFaced,fours,sixes,runs,strikeRate,isOut,
+//                             outSummary}], bowling:[{playerKey,playerName,
+//                             runsConceded,maidens,wickets,economyRate,
+//                             overs}], fallOfWickets, yetToBat,
+//                             partnerships }], statusCode, targetRuns },
+//                             matchId, status } ] }.
+//   Get Match squad:          GET squad/{matchId} → { data:[{ match:{teams,
+//                             slugKey, playingXI_Team1[], substitutes_Team1,
+//                             bench_Team1[], playingXI_Team2[],
+//                             substitutes_Team2, bench_Team2[] } (each
+//                             player: {key,name,logo,role,isCaptain,
+//                             isWicketKeeper,isForeigner}) }, matchId,
+//                             status }] }.
+const SBX_API_KEY = "EF9QiqOJZCAY5hmAGSSqxTa8luscwFqA4uBFOTVc";
+const SBX_BASE = "https://trial-api.sportbex.com/api";
+let _d11SbxSearchResults = []; // last Sportbex matches shown in the "Link Match" picker
+let _d11SbxSearchLoading = false;
+let _d11SbxSearchError = null;
+let d11SbxImportPanelOpen = false;
+let d11SbxImportLoading = false;
+let d11SbxImportError = null;
+let d11SbxImportResults = []; // filtered list of individual match objects
+let _d11SbxDebugData = null; // { sbxRaw } — raw last response, own debug modal
+let d11SbxLinkPickerMatchId = null;
+let _d11SbxLastSyncedAt = {}; // { [matchId]: timestamp } — for the "Last synced" label in admin UI
+
 // ── Cricbuzz No 2 (cricbuzz-cricket2 on RapidAPI) — FOURTH, fully
 // independent Live Sync source, parallel to Cricbuzz (apidojo), ESPN
 // Cricinfo, and Cricket Live Line above. A Dream11 match links to Cricbuzz
@@ -1636,6 +1688,7 @@ function _ensureAdminDataLoaded() {
     typeof _loadLl2ApiLog === 'function' ? _loadLl2ApiLog() : Promise.resolve(),
     typeof _loadLl3ApiLog === 'function' ? _loadLl3ApiLog() : Promise.resolve(),
     typeof _loadLl4ApiLog === 'function' ? _loadLl4ApiLog() : Promise.resolve(),
+    typeof _loadSbxApiLog === 'function' ? _loadSbxApiLog() : Promise.resolve(),
   ]).then(() => render()).catch(() => {});
 }
 
@@ -5244,6 +5297,7 @@ function _renderInner() {
       ${tab==='dream11Ll2Hub' ? renderD11Ll2Hub() : ''}
       ${tab==='dream11Ll3Hub' ? renderD11Ll3Hub() : ''}
       ${tab==='dream11Ll4Hub' ? renderD11Ll4Hub() : ''}
+      ${tab==='dream11SbxHub' ? renderD11SbxHub() : ''}
       ${tab==='myMatches' ? renderD11MyMatchesPage() : ''}
       ${tab==='dream11Completed' ? renderDream11CompletedMatches() : ''}
       ${tab==='completedMatchDetail' ? renderCompletedMatchDetail() : ''}
@@ -5288,6 +5342,9 @@ function _renderInner() {
     ${d11Cb2ImportPanelOpen ? renderD11Cb2ImportPanelModal() : ''}
     ${d11Cb2LinkPickerMatchId ? renderD11Cb2LinkPickerModal() : ''}
     ${_d11Cb2DebugData ? renderD11Cb2DebugModal() : ''}
+    ${d11SbxImportPanelOpen ? renderD11SbxImportPanelModal() : ''}
+    ${d11SbxLinkPickerMatchId ? renderD11SbxLinkPickerModal() : ''}
+    ${_d11SbxDebugData ? renderD11SbxDebugModal() : ''}
     ${d11TeamPreviewOpen ? renderD11TeamPreviewModal() : ''}
     ${d11Ll2ImportPanelOpen ? renderD11Ll2ImportPanelModal() : ''}
     ${d11Ll2LinkPickerMatchId ? renderD11Ll2LinkPickerModal() : ''}
@@ -8029,6 +8086,12 @@ function goD11Cb2Hub() {
   window.scrollTo(0,0);
 }
 
+function goD11SbxHub() {
+  tab = 'dream11SbxHub';
+  render();
+  window.scrollTo(0,0);
+}
+
 function goD11Ll2Hub() {
   tab = 'dream11Ll2Hub';
   render();
@@ -8099,6 +8162,19 @@ function d11AdminCreateMatchForCll() {
 }
 
 // Same create-match form, but flags the draft so d11AdminSaveNewMatch opens
+// the Sportbex link picker immediately after saving — mirrors
+// d11AdminCreateMatchForCll exactly, for the Sportbex hub.
+function d11AdminCreateMatchForSbx() {
+  startNewMatch();
+  if (draftMatch) { draftMatch.sport = 'cricket'; draftMatch._linkToSbxAfterSave = true; }
+  adminTab = 'create';
+  tab = 'dream11';
+  d11AdminCreatePending = true;
+  render();
+  window.scrollTo(0,0);
+}
+
+// Same create-match form, but flags the draft so d11AdminSaveNewMatch opens
 // the Cricbuzz No 2 link picker immediately after saving — mirrors
 // d11AdminCreateMatchForCll exactly, for the Cricbuzz No 2 hub.
 function d11AdminCreateMatchForCb2() {
@@ -8161,6 +8237,7 @@ async function d11AdminSaveNewMatch() {
   const wantsLl2Link = !!draftMatch._linkToLl2AfterSave;
   const wantsLl3Link = !!draftMatch._linkToLl3AfterSave;
   const wantsLl4Link = !!draftMatch._linkToLl4AfterSave;
+  const wantsSbxLink = !!draftMatch._linkToSbxAfterSave;
   matches[mid] = { ...draftMatch, status: 'upcoming' };
   delete matches[mid]._linkToEspnAfterSave; // internal navigation flag only — never persisted
   delete matches[mid]._linkToCllAfterSave; // internal navigation flag only — never persisted
@@ -8168,6 +8245,7 @@ async function d11AdminSaveNewMatch() {
   delete matches[mid]._linkToLl2AfterSave; // internal navigation flag only — never persisted
   delete matches[mid]._linkToLl3AfterSave; // internal navigation flag only — never persisted
   delete matches[mid]._linkToLl4AfterSave; // internal navigation flag only — never persisted
+  delete matches[mid]._linkToSbxAfterSave; // internal navigation flag only — never persisted
   // Every match gets a permanent, sequential Match ID No (000100, 000101, ...)
   // at creation time — assigned before the first save so it's there from
   // the very first Firestore write, not patched in afterward.
@@ -8227,6 +8305,14 @@ async function d11AdminSaveNewMatch() {
     window.scrollTo(0,0);
     showNotif(`✅ Match created! Match ID No ${formatMatchSeqNo(matches[mid].matchSeqNo)} — now searching Cricket Live Line 4…`);
     d11OpenLl4LinkPicker(mid);
+    return;
+  }
+  if (wantsSbxLink) {
+    tab = 'dream11SbxHub';
+    render();
+    window.scrollTo(0,0);
+    showNotif(`✅ Match created! Match ID No ${formatMatchSeqNo(matches[mid].matchSeqNo)} — now searching Sportbex…`);
+    d11OpenSbxLinkPicker(mid);
     return;
   }
   d11AdminTab = 'pool';
@@ -11285,6 +11371,60 @@ async function _cllFetch(endpoint, callCtx) {
   return json;
 }
 
+// ── Sportbex — API call logging + fetch wrapper. Uses header auth
+// ('sportbex-api-key') instead of RapidAPI headers, GET-only endpoints.
+let sbxApiLog = []; // { at, month, feature, matchId, matchLabel, endpoint } — separate log so usage can be told apart from other providers
+async function _logSbxApiCall(feature, matchId, endpoint) {
+  const now = getDateTime();
+  const month = now.slice(0, 7);
+  const m = matchId ? matches[matchId] : null;
+  const entry = { at: now, month, feature, matchId: matchId || null, matchLabel: m ? `${m.teamA} vs ${m.teamB}` : null, endpoint };
+  sbxApiLog = [entry, ...sbxApiLog].filter(e => e.month === month);
+  try {
+    await setDoc(doc(window._fbDb, 'pp_meta', 'sbx_api_log'), { entries: sbxApiLog });
+  } catch (e) { console.warn('Could not persist Sportbex API log:', e.message); }
+}
+async function _loadSbxApiLog() {
+  try {
+    const snap = await getDoc(doc(window._fbDb, 'pp_meta', 'sbx_api_log'));
+    if (snap.exists()) {
+      const month = getDateTime().slice(0, 7);
+      sbxApiLog = (snap.data().entries || []).filter(e => e.month === month);
+    }
+  } catch (e) { console.warn('Could not load Sportbex API log:', e.message); }
+}
+async function _sbxFetch(endpoint, callCtx) {
+  if (!SBX_API_KEY) {
+    throw new Error('No Sportbex API key configured — paste an API key into SBX_API_KEY in the code to restore these features.');
+  }
+  const url = `${SBX_BASE}/${endpoint}`;
+  let res;
+  try {
+    res = await fetch(url, { headers: {
+      'Content-Type': 'application/json',
+      'sportbex-api-key': SBX_API_KEY
+    }});
+  } catch (e) {
+    throw new Error('Could not reach Sportbex API — check your internet connection and try again.');
+  }
+  if (res.status === 429) {
+    throw new Error('HTTP 429 — Sportbex API rate limit hit — wait a moment and try again.');
+  }
+  if (!res.ok) {
+    throw new Error(`Sportbex API returned HTTP ${res.status}`);
+  }
+  const text = await res.text();
+  if (!text) throw new Error('Sportbex API returned an empty response — likely a temporary hiccup, please try again.');
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`Sportbex API returned an unreadable response (${text.slice(0,60)}...) — please try again.`);
+  }
+  if (callCtx) _logSbxApiCall(callCtx.feature || '', callCtx.matchId, endpoint).catch(()=>{});
+  return json;
+}
+
 // ── Cricbuzz No 2 (cricbuzz-cricket2) — API call logging + fetch wrapper.
 // Same matchInfo/scorecard/squad shape as the original Cricbuzz API, but a
 // DIFFERENT RapidAPI host with its own key and its own path prefixes
@@ -12211,6 +12351,738 @@ function renderD11CllDebugModal() {
     </div>
   </div>`;
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Sportbex (SBX) — Import / Link / Squad / XI / Sync ──────────────────
+// Fully independent 7th provider. Never mixed with Cricbuzz/ESPN/CLL/CB2/
+// LL2/LL3/LL4 on the same match — every function here guards on
+// m.sbxMatchId and every hub filters out matches already linked elsewhere.
+// Sportbex has no single flat "upcoming matches" endpoint like the other
+// providers — it's organized as Series → Matches, so the import list
+// browses the most recent/current series page and flattens their matches.
+// ══════════════════════════════════════════════════════════════════════
+function _d11SbxFormatFromRaw(fmt) {
+  const f = (fmt || '').toUpperCase();
+  if (f.includes('TEST')) return 'Test';
+  if (f.includes('ODI')) return 'ODI';
+  if (f.includes('T10')) return 'T10';
+  return 'T20';
+}
+
+async function d11OpenSbxImportPanel() {
+  d11SbxImportPanelOpen = true;
+  d11SbxImportResults = [];
+  d11SbxImportError = null;
+  render();
+  d11FetchSbxImportList();
+}
+function d11CloseSbxImportPanel() {
+  d11SbxImportPanelOpen = false;
+  d11SbxImportResults = [];
+  d11SbxImportError = null;
+  render();
+}
+// Browses Sportbex's current series list (series?page=1&perPage=10 —
+// confirmed shape: { data:[{month, result:[{_id,name,startDate,endDate,
+// isPopular}]}], pageInfo }), takes the most relevant handful of series
+// (popular / soonest first), then fetches each series' matches
+// (matches/series/{seriesId}) and flattens them into one pickable list —
+// mirrors d11FetchCllImportList's filtering intent (drop finished/junior/
+// women's matches).
+async function d11FetchSbxImportList() {
+  d11SbxImportLoading = true;
+  d11SbxImportError = null;
+  render();
+  try {
+    const raw = await _sbxFetch('live-score/series?page=1&perPage=10', { feature: 'Import List (Series)', matchId: null });
+    _d11SbxDebugData = { sbxSeriesRaw: raw };
+    const groups = Array.isArray(raw?.data) ? raw.data : [];
+    const allSeries = groups.flatMap(g => Array.isArray(g.result) ? g.result : []);
+    if (allSeries.length === 0) {
+      throw new Error('Sportbex has no series listed right now — try again later, or create the match manually and link it instead.');
+    }
+
+    // Only keep series that are genuinely international: bilateral tours
+    // ("X tour of Y"), ICC events (World Cup, Champions Trophy, Asia Cup),
+    // or recognized international franchise leagues (BBL, CPL, PSL, IPL,
+    // The Hundred, LPL, MLC, etc). This excludes domestic first-class/list-A
+    // cricket (e.g. "Northamptonshire vs Warwickshire" / county one-day cup)
+    // and small regional T20 leagues (e.g. Pondicherry Premier League,
+    // Vidarbha Premier League, Baroda Premier League) which were previously
+    // slipping through since the old filter only excluded junior/women's
+    // series, not domestic/local ones.
+    const internationalLeagueTags = [
+      'big bash', 'caribbean premier league', 'the hundred', 'lanka premier league',
+      'pakistan super league', 'indian premier league', 'ipl', 'psl', 'bbl', 'cpl', 'lpl',
+      'major league cricket', 'mlc', 'global super league', 'super smash',
+      'asian legends league', 't10 league', 'world championship of legends',
+      'international league t20', 'ilt20', 'sa20', 'mzansi super league',
+      'shpageeza cricket league', 'afghanistan premier league'
+    ];
+    const domesticLocalTags = [
+      'premier league', // catches most regional/state T20 leagues by default
+      'trophy', 'domestic', 'county', 'ranji', 'plate', 'elite group',
+      'one-day cup', 'championship', 'shield', 'super league' // generic regional suffix
+    ];
+    const isInternationalSeries = (name) => {
+      const n = (name || '').toLowerCase();
+      if (internationalLeagueTags.some(t => n.includes(t))) return true; // known intl league, allow even if it also matches a domestic-sounding word
+      if (n.includes('tour of')) return true; // bilateral international tour
+      if (n.includes('world cup') || n.includes('champions trophy') || n.includes('asia cup') || n.includes('t20 world cup')) return true;
+      if (domesticLocalTags.some(t => n.includes(t))) return false; // regional/domestic league or first-class competition
+      return false; // default: exclude anything not explicitly recognized as international
+    };
+    const internationalOnlySeries = allSeries.filter(s => isInternationalSeries(s.name));
+    if (internationalOnlySeries.length === 0) {
+      throw new Error('Sportbex has no international series listed right now — try again later, or create the match manually and link it instead.');
+    }
+
+    // Prefer popular / currently-running series (startDate already passed,
+    // endDate not yet passed) first, then soonest-upcoming, capped to a
+    // handful of series so we don't hammer the matches endpoint.
+    const now = Date.now();
+    const scored = internationalOnlySeries.map(s => {
+      const start = new Date(s.startDate).getTime();
+      const end = new Date(s.endDate).getTime();
+      const isCurrent = !isNaN(start) && !isNaN(end) && start <= now && now <= end;
+      return { s, isCurrent, start };
+    }).sort((a,b) => (b.isCurrent - a.isCurrent) || (a.start - b.start));
+    const candidateSeries = scored.slice(0, 6).map(x => x.s);
+
+    const juniorWomenTags = ['women',' u19','u-19','u16','u-16','under-19','under 19',"women's",'girls'];
+    const seen = new Set();
+    const matchLists = await Promise.all(candidateSeries.map(s =>
+      _sbxFetch(`live-score/series/${s._id}`, { feature: 'Import List (Matches)', matchId: null }).catch(() => null)
+    ));
+    _d11SbxDebugData = { sbxSeriesRaw: raw, sbxMatchesRaw: matchLists };
+
+    let allMatches = [];
+    matchLists.forEach((mr, i) => {
+      const list = Array.isArray(mr?.data) ? mr.data : [];
+      list.forEach(mt => allMatches.push({ ...mt, _seriesName: candidateSeries[i]?.name || mt.seriesName }));
+    });
+
+    d11SbxImportResults = allMatches.filter(mt => {
+      const teamAName = mt.teams?.t1?.name || '';
+      const teamBName = mt.teams?.t2?.name || '';
+      if (!teamAName || !teamBName) return false;
+      const label = `${teamAName} vs ${teamBName}`;
+      if (seen.has(label)) return false;
+
+      const combinedText = `${teamAName} ${teamBName} ${mt._seriesName||''}`.toLowerCase();
+      if (juniorWomenTags.some(t => combinedText.includes(t))) return false;
+
+      if ((mt.status||'').toUpperCase() === 'COMPLETED') return false;
+
+      seen.add(label);
+      return true;
+    }).sort((a,b) => (new Date(a.startDate).getTime()||0) - (new Date(b.startDate).getTime()||0));
+
+    if (d11SbxImportResults.length === 0) {
+      throw new Error(`Sportbex returned matches, but none were current fixtures (all finished, or women's/junior, which are filtered). Try 🐛 View Raw Data to check, or create the match manually and link it instead.`);
+    }
+  } catch (e) {
+    console.error(e);
+    d11SbxImportError = 'Could not reach Sportbex API — ' + (e.message||'unknown error');
+  } finally {
+    d11SbxImportLoading = false;
+    render();
+  }
+}
+
+// One-tap import: creates the Dream11 match (unpublished), auto-fills team
+// names/deadline/format directly from Sportbex's own match data, then
+// fetches the squad right away. Mirrors d11ImportMatchFromCll exactly.
+async function d11ImportMatchFromSbx(mt) {
+  if (!mt || !mt._id) return;
+  const teamA = (mt.teams?.t1?.name || 'TBD').trim();
+  const teamB = (mt.teams?.t2?.name || 'TBD').trim();
+  const startMs = (() => { const ms = new Date(mt.startDate).getTime(); return isNaN(ms) ? Date.now() : ms; })();
+  const format = _d11SbxFormatFromRaw(mt.format);
+
+  const mid = 'm_' + Date.now() + '_' + Math.random().toString(36).slice(2,8);
+  matches[mid] = {
+    id: mid,
+    sport: 'cricket',
+    format,
+    teamA, teamB,
+    seriesName: mt._seriesName || mt.seriesName || '',
+    deadline: startMs,
+    status: 'upcoming',
+    questions: [],
+    matchSeqNo: await _nextMatchSeqNo(),
+    sbxMatchId: mt._id
+  };
+  await _saveMatchToFirestore(mid, matches[mid]);
+
+  dream11Matches[mid] = { players: [], scored: false, locked: false, published: false, megaPool: 0, freePool: 0 };
+  await _saveDream11MatchToFirestore(mid, dream11Matches[mid]);
+
+  d11SbxImportPanelOpen = false;
+  d11SbxImportResults = [];
+  showNotif(`✅ Created & linked "${teamA} vs ${teamB}" — fetching squad now...`);
+  d11ActiveMatchId = mid;
+  d11AdminTab = 'pool';
+  tab = 'dream11Pool';
+  render();
+  window.scrollTo(0,0);
+  d11FetchSquadFromSbx(mid).catch(e => console.warn('Auto squad fetch after Sportbex import failed:', e.message));
+}
+
+function renderD11SbxImportPanelModal() {
+  if (!d11SbxImportPanelOpen) return '';
+  return `<div style="position:fixed;inset:0;z-index:2000;background:rgba(5,10,20,0.82);backdrop-filter:blur(4px);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseSbxImportPanel()">
+    <div class="card" style="width:100%;max-width:600px;max-height:82vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:18px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="font-size:15px;font-weight:700">🎯 Import from Sportbex</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseSbxImportPanel()">✕</button>
+      </div>
+      <div style="font-size:11.5px;color:var(--dim);margin-bottom:14px">Upcoming/live fixtures from Sportbex — tap one to create + auto-link a Dream11 match in one step.</div>
+      ${_d11SbxDebugData ? `<button class="btn-secondary btn-block" style="font-size:11px;padding:7px;margin-bottom:10px;background:rgba(239,68,68,0.1);border-color:rgba(239,68,68,0.3);color:#fca5a5" onclick="d11OpenSbxDebugModal()">🐛 View Raw Data</button>` : ''}
+      ${d11SbxImportLoading ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">🔄 Loading fixtures…</div>` : ''}
+      ${d11SbxImportError ? `<div style="background:rgba(220,38,38,0.1);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:10px;font-size:12px;color:#f87171;margin-bottom:10px">${d11SbxImportError}</div>` : ''}
+      ${!d11SbxImportLoading ? d11SbxImportResults.map(mt => {
+        const title = `${mt.teams?.t1?.name||'TBD'} vs ${mt.teams?.t2?.name||'TBD'}`;
+        const sub = [mt.name, mt._seriesName].filter(Boolean).join(' · ');
+        const status = mt.status || '';
+        return `
+        <div style="background:var(--input-bg);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+          <div style="font-size:12.5px;font-weight:600;line-height:1.4;margin-bottom:2px">${title}</div>
+          <div style="font-size:10.5px;color:var(--dim);margin-bottom:2px">${sub}</div>
+          ${status ? `<div style="font-size:10px;color:var(--dim2);margin-bottom:8px">${status}</div>` : `<div style="margin-bottom:8px"></div>`}
+          <button class="btn-secondary btn-block" style="font-size:11px;padding:8px;background:linear-gradient(135deg,#e11d2d,#991b1b);color:#fff;border:none" onclick='d11ImportMatchFromSbx(${JSON.stringify(mt).replace(/'/g,"&#39;")})'>+ Create & Link</button>
+        </div>
+      `;
+      }).join('') : ''}
+      ${!d11SbxImportLoading && !d11SbxImportResults.length && !d11SbxImportError ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">No fixtures found</div>` : ''}
+      <button class="btn-secondary btn-block" style="margin-top:10px;font-size:12px" onclick="d11FetchSbxImportList()">🔄 Refresh</button>
+    </div>
+  </div>`;
+}
+
+// ── Link Match search — reuses the same series-browse pool as the import
+// list, scored by team-name match against the target match instead of
+// filtered/sorted for browsing.
+async function d11SearchLiveMatchSbx(matchId) {
+  const m = matches[matchId];
+  if (!m) return;
+  _d11SbxSearchLoading = true;
+  _d11SbxSearchError = null;
+  render();
+  try {
+    const raw = await _sbxFetch('live-score/series?page=1&perPage=10', { feature: 'Link Match Search', matchId });
+    const groups = Array.isArray(raw?.data) ? raw.data : [];
+    const allSeries = groups.flatMap(g => Array.isArray(g.result) ? g.result : []);
+    if (allSeries.length === 0) throw new Error('No series returned from Sportbex right now');
+
+    const now = Date.now();
+    const candidateSeries = allSeries.map(s => {
+      const start = new Date(s.startDate).getTime();
+      const end = new Date(s.endDate).getTime();
+      const isCurrent = !isNaN(start) && !isNaN(end) && start <= now && now <= end;
+      return { s, isCurrent, start };
+    }).sort((a,b) => (b.isCurrent - a.isCurrent) || (a.start - b.start)).slice(0, 8).map(x => x.s);
+
+    const matchLists = await Promise.all(candidateSeries.map(s =>
+      _sbxFetch(`live-score/series/${s._id}`, { feature: 'Link Match Search', matchId }).catch(() => null)
+    ));
+    const pool = [];
+    matchLists.forEach((mr, i) => {
+      const list = Array.isArray(mr?.data) ? mr.data : [];
+      list.forEach(mt => pool.push({ ...mt, _seriesName: candidateSeries[i]?.name }));
+    });
+    if (pool.length === 0) throw new Error('No matches returned from Sportbex right now');
+
+    const teamAWords = (m.teamA||'').toLowerCase().split(/\s+/).filter(w=>w.length>2);
+    const teamBWords = (m.teamB||'').toLowerCase().split(/\s+/).filter(w=>w.length>2);
+    const juniorWomenTags = ['women','u19','u-19','u16','u-16','under-19','under 19'];
+    const ourMatchIsJuniorWomen = juniorWomenTags.some(t => (m.teamA+' '+m.teamB).toLowerCase().includes(t));
+
+    const scored = pool.map(mt => {
+      const nameL = `${mt.teams?.t1?.name||''} ${mt.teams?.t2?.name||''} ${mt._seriesName||''}`.toLowerCase();
+      const isJuniorWomen = juniorWomenTags.some(t => nameL.includes(t));
+      if (isJuniorWomen && !ourMatchIsJuniorWomen) return { mt, score: -1 };
+      const aHit = teamAWords.some(w => nameL.includes(w));
+      const bHit = teamBWords.some(w => nameL.includes(w));
+      if (!aHit || !bHit) return { mt, score: 0 };
+      let score = 0;
+      teamAWords.forEach(w => { if (nameL.includes(w)) score++; });
+      teamBWords.forEach(w => { if (nameL.includes(w)) score++; });
+      if ((mt.status||'').toUpperCase() === 'LIVE') score += 0.5;
+      return { mt, score };
+    }).filter(x => x.score > 0).sort((a,b)=>b.score-a.score);
+
+    _d11SbxSearchResults = scored.slice(0, 8).map(x => x.mt);
+    if (_d11SbxSearchResults.length === 0) {
+      _d11SbxSearchError = 'No exact match found on Sportbex for both team names together. Showing recent matches instead — pick manually, or use manual paste if not listed.';
+      _d11SbxSearchResults = pool.slice(0, 15);
+    }
+  } catch (e) {
+    console.error(e);
+    _d11SbxSearchError = 'Could not reach Sportbex API — ' + (e.message||'unknown error');
+  } finally {
+    _d11SbxSearchLoading = false;
+    render();
+  }
+}
+
+function d11LinkSbxMatch(matchId, sbxMatchId) {
+  const m = matches[matchId];
+  if (!m) return;
+  m.sbxMatchId = sbxMatchId;
+  _saveMatchToFirestore(matchId, m);
+  _d11SbxSearchResults = [];
+  d11SbxLinkPickerMatchId = null;
+  showNotif('🔗 Linked to Sportbex! Fetching squad…');
+  render();
+  d11FetchSquadFromSbx(matchId).catch(e => console.warn('Auto squad fetch after Sportbex link failed:', e.message));
+}
+
+function d11UnlinkSbxMatch(matchId) {
+  const m = matches[matchId];
+  if (!m) return;
+  delete m.sbxMatchId;
+  _saveMatchToFirestore(matchId, m);
+  showNotif('Unlinked from Sportbex — switched back to manual paste');
+  render();
+}
+
+function d11OpenSbxLinkPicker(matchId) {
+  d11SbxLinkPickerMatchId = matchId;
+  _d11SbxSearchResults = [];
+  _d11SbxSearchError = null;
+  render();
+  d11SearchLiveMatchSbx(matchId);
+}
+function d11CloseSbxLinkPicker() {
+  d11SbxLinkPickerMatchId = null;
+  _d11SbxSearchResults = [];
+  render();
+}
+function renderD11SbxLinkPickerModal() {
+  if (!d11SbxLinkPickerMatchId) return '';
+  const m = matches[d11SbxLinkPickerMatchId];
+  if (!m) return '';
+  return `<div style="position:fixed;inset:0;z-index:2000;background:rgba(5,10,20,0.82);backdrop-filter:blur(4px);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseSbxLinkPicker()">
+    <div class="card" style="width:100%;max-width:600px;max-height:82vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:18px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div style="font-size:15px;font-weight:700">🔗 Link Sportbex Match</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseSbxLinkPicker()">✕</button>
+      </div>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:12px">Searching Sportbex for: <b>${m.teamA} vs ${m.teamB}</b></div>
+      ${_d11SbxSearchLoading ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">🔄 Searching…</div>` : ''}
+      ${_d11SbxSearchError ? `<div style="background:rgba(220,38,38,0.1);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:10px;font-size:12px;color:#f87171;margin-bottom:10px">${_d11SbxSearchError}</div>` : ''}
+      ${!_d11SbxSearchLoading ? _d11SbxSearchResults.map(mt => {
+        const title = `${mt.teams?.t1?.name||'TBD'} vs ${mt.teams?.t2?.name||'TBD'}`;
+        const sub = [mt.name, mt._seriesName].filter(Boolean).join(' · ');
+        const status = mt.status || '';
+        return `
+        <div style="background:var(--input-bg);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+          <div style="font-size:12.5px;font-weight:600;line-height:1.4;margin-bottom:2px">${title}</div>
+          <div style="font-size:10.5px;color:var(--dim);margin-bottom:2px">${sub}</div>
+          ${status ? `<div style="font-size:10px;color:var(--dim2);margin-bottom:8px">${status}</div>` : `<div style="margin-bottom:8px"></div>`}
+          <button class="btn-secondary btn-block" style="font-size:11px;padding:8px;background:linear-gradient(135deg,#e11d2d,#991b1b);color:#fff;border:none" onclick="d11LinkSbxMatch('${d11SbxLinkPickerMatchId}','${mt._id}')">Link this match</button>
+        </div>
+      `;
+      }).join('') : ''}
+      ${!_d11SbxSearchLoading && !_d11SbxSearchResults.length && !_d11SbxSearchError ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">No matches found</div>` : ''}
+      <button class="btn-secondary btn-block" style="margin-top:10px;font-size:12px" onclick="d11SearchLiveMatchSbx('${d11SbxLinkPickerMatchId}')">🔄 Search Again</button>
+    </div>
+  </div>`;
+}
+
+function d11OpenSbxDebugModal() { render(); }
+function d11CloseSbxDebugModal() { _d11SbxDebugData = null; render(); }
+function renderD11SbxDebugModal() {
+  if (!_d11SbxDebugData) return '';
+  const pretty = JSON.stringify(_d11SbxDebugData, null, 2);
+  return `<div style="position:fixed;inset:0;z-index:2100;background:rgba(5,10,20,0.9);display:flex;align-items:center;justify-content:center;padding:16px" onclick="if(event.target===this) d11CloseSbxDebugModal()">
+    <div class="card" style="width:100%;max-width:640px;max-height:82vh;overflow-y:auto;padding:16px" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-size:14px;font-weight:700">🐛 Raw Sportbex Response (debug)</div>
+        <div style="display:flex;gap:8px">
+          <button class="btn-secondary" style="width:auto;padding:6px 12px;font-size:11px;white-space:nowrap" onclick="d11CopyDebugText('d11-sbx-debug-text', this)">📋 Copy</button>
+          <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseSbxDebugModal()">✕</button>
+        </div>
+      </div>
+      <textarea id="d11-sbx-debug-text" readonly style="width:100%;height:400px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px" onclick="this.select()">${pretty}</textarea>
+    </div>
+  </div>`;
+}
+
+// ── Fetch Squad from Sportbex (squad/{matchId}) ──────────────────────────
+// Confirmed live shape: { data:[{ match:{ teams:{team1,team2}, slugKey,
+// playingXI_Team1:[{key,name,logo,role,isCaptain,isWicketKeeper,
+// isForeigner}], substitutes_Team1, bench_Team1:[...], playingXI_Team2,
+// substitutes_Team2, bench_Team2 } }] }. role is numeric (0=batter,
+// 1=bowler, 2=allrounder-batting-lean?, 3=allrounder, 4=bowling
+// allrounder per sample data) — mapped via _d11MapSbxRole below rather
+// than reusing _d11MapCricbuzzRole (which expects Cricbuzz's text role
+// strings, not Sportbex's numeric codes).
+function _d11MapSbxRole(roleNum, isWicketKeeper) {
+  if (isWicketKeeper) return 'WK';
+  const n = Number(roleNum);
+  if (n === 1) return 'BOWL';
+  if (n === 3 || n === 4) return 'AR';
+  return 'BAT';
+}
+
+async function d11FetchSquadFromSbx(matchId) {
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m) return;
+  if (!m.sbxMatchId) {
+    return showNotif('Link this match to Sportbex first (🔗 Link Sportbex), then try again', 'error');
+  }
+  showNotif('📥 Fetching squad from Sportbex…');
+  try {
+    const raw = await _sbxFetch(`live-score/match/${m.sbxMatchId}/squad`, { feature: 'Fetch Squad', matchId });
+    const entry = Array.isArray(raw?.data) ? raw.data[0] : raw?.data;
+    const match = entry?.match || {};
+    const xi1 = Array.isArray(match.playingXI_Team1) ? match.playingXI_Team1 : [];
+    const xi2 = Array.isArray(match.playingXI_Team2) ? match.playingXI_Team2 : [];
+    const bench1 = Array.isArray(match.bench_Team1) ? match.bench_Team1 : [];
+    const bench2 = Array.isArray(match.bench_Team2) ? match.bench_Team2 : [];
+    if (xi1.length === 0 && xi2.length === 0 && bench1.length === 0 && bench2.length === 0) {
+      _d11SbxDebugData = { sbxRaw: raw, sbxMatchId: m.sbxMatchId };
+      showNotif('📭 Sportbex hasn\'t published this squad yet (or the response shape was unexpected — check 🐛 View Raw Data). Try again closer to match time, or add players manually for now.', 'error');
+      render();
+      return;
+    }
+    // IMPORTANT: Before the actual Playing XI is announced, Sportbex dumps
+    // the ENTIRE squad pool (often 20+ players) into playingXI_Team1/2 and
+    // leaves bench_Team1/2 empty — the field name is misleading. Sportbex
+    // only splits the pool into a real 11-a-side XI vs bench once the
+    // official lineup is announced (bench_Team1/2 become non-empty at that
+    // point). So: only trust "isXI" when at least one side's bench array is
+    // populated; otherwise this is just the full unannounced squad and
+    // nobody should be marked Playing-XI-confirmed yet.
+    const xiIsGenuinelyAnnounced = bench1.length > 0 || bench2.length > 0;
+    if (!xiIsGenuinelyAnnounced) {
+      showNotif(`📋 Squad fetched, but Sportbex hasn't announced the Playing XI yet — added all ${xi1.length + xi2.length} players as pool/bench for now. Use "✔️ Check Playing XI" closer to match time to confirm the real XI.`);
+    }
+    _d11SbxDebugData = { sbxRaw: raw, sbxMatchId: m.sbxMatchId };
+    d11SyncTeamFlag(m.teamA, match.teams?.team1?.logo);
+    d11SyncTeamFlag(m.teamB, match.teams?.team2?.logo);
+
+    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    let addedCount = 0;
+    const addSide = (list, side, isXI) => {
+      list.forEach(p => {
+        const name = (p.name || '').trim();
+        if (!name || existingNamesLower.has(name.toLowerCase())) return;
+        const role = _d11MapSbxRole(p.role, p.isWicketKeeper);
+        const photo = (p.logo || '').trim() || null;
+        const player = newDream11Player(name, role, side, { photo });
+        if (isXI && xiIsGenuinelyAnnounced) player.isPlayingXI = true;
+        d11m.players.push(player);
+        d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
+        existingNamesLower.add(name.toLowerCase());
+        addedCount++;
+      });
+    };
+    addSide(xi1, 'A', true);
+    addSide(bench1, 'A', false);
+    addSide(xi2, 'B', true);
+    addSide(bench2, 'B', false);
+
+    if (addedCount === 0) {
+      showNotif('No new players to add — squad already matches what\'s in your pool.');
+      render();
+      return;
+    }
+
+    await _saveDream11MatchToFirestore(matchId, d11m);
+    showNotif(`✅ Added ${addedCount} players from Sportbex squad!`);
+    render();
+  } catch (e) {
+    console.error('Sportbex squad fetch failed:', e);
+    showNotif('Could not fetch squad from Sportbex — ' + (e.message||'unknown error'), 'error');
+    render();
+  }
+}
+
+// ── Playing XI check for Sportbex-linked matches ─────────────────────────
+// Sportbex's squad endpoint already marks Playing XI vs bench explicitly
+// (playingXI_Team1/2 arrays vs bench_Team1/2), so "checking" just re-fetches
+// the squad and (re)confirms XI status per player, mirroring the other
+// providers' d11CheckPlayingXIAnnounced* signature/behaviour.
+async function d11CheckPlayingXIAnnouncedSbx(matchId, silent) {
+  const notify = silent ? (()=>{}) : showNotif;
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m || !m.sbxMatchId) return;
+  notify('🔍 Checking Sportbex for Playing XI…');
+  try {
+    const raw = await _sbxFetch(`live-score/match/${m.sbxMatchId}/squad`, { feature: silent ? 'Auto Playing XI Check' : 'Check Playing XI', matchId });
+    _d11SbxDebugData = { sbxRaw: raw, sbxMatchId: m.sbxMatchId };
+    const entry = Array.isArray(raw?.data) ? raw.data[0] : raw?.data;
+    const match = entry?.match || {};
+    // Same caveat as d11FetchSquadFromSbx: before the real announcement,
+    // Sportbex puts the FULL squad pool into playingXI_Team1/2 and leaves
+    // bench_Team1/2 empty. Only treat it as a genuine XI announcement once
+    // at least one bench array is populated.
+    const bench1 = Array.isArray(match.bench_Team1) ? match.bench_Team1 : [];
+    const bench2 = Array.isArray(match.bench_Team2) ? match.bench_Team2 : [];
+    if (bench1.length === 0 && bench2.length === 0) {
+      notify('Playing XI not announced yet on Sportbex — try again closer to match time.', 'error');
+      return;
+    }
+    const namesInXI = new Set();
+    [match.playingXI_Team1, match.playingXI_Team2].forEach(list => {
+      (list || []).forEach(p => { const n = (p.name||'').trim(); if (n) namesInXI.add(n.toLowerCase()); });
+    });
+    if (namesInXI.size === 0) {
+      notify('Playing XI not announced yet on Sportbex — try again closer to match time.', 'error');
+      return;
+    }
+    let confirmedCount = 0, unconfirmedCount = 0;
+    (d11m.players || []).forEach(p => {
+      const inLatestXI = namesInXI.has(p.name.toLowerCase().trim());
+      if (inLatestXI && !p.isPlayingXI) { p.isPlayingXI = true; confirmedCount++; }
+      else if (!inLatestXI && p.isPlayingXI && !_d11PlayerHasActivity(p)) { p.isPlayingXI = false; unconfirmedCount++; }
+    });
+    if (confirmedCount > 0 || unconfirmedCount > 0) {
+      await _saveDream11MatchToFirestore(matchId, d11m);
+      d11ApplyBackupReplacements(matchId);
+      notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
+      render();
+    } else {
+      notify('No changes — latest Playing XI matches what was already confirmed.', 'error');
+    }
+  } catch (e) {
+    console.error('Sportbex Playing XI check failed:', e);
+    notify('Could not check Playing XI — ' + (e.message||'unknown error'), 'error');
+  }
+}
+
+// ── Live sync (scorecard/{matchId}) ──────────────────────────────────────
+// Confirmed live shape: { data:[{ result:{ teams, resultLine:{message},
+// inningsOrder, innings:[{ teamInfo:{teamName,shortName,runs,wickets,
+// overs,extras}, batting:[{playerName,ballsFaced,fours,sixes,runs,
+// strikeRate,isOut,outSummary}], bowling:[{playerName,runsConceded,
+// maidens,wickets,economyRate,overs}], fallOfWickets, yetToBat,
+// partnerships }], statusCode, targetRuns }, matchId, status }] }.
+// statusCode: 2 observed = "innings/match in progress with a result
+// available" per sample (2nd innings, target chased, result populated) —
+// treated the same way as Cricket Live Line's non-empty `result` string:
+// a double-confirm guard (two consecutive syncs both showing a
+// resultLine.message) before finalizing, so a transient response can't
+// finalize a match on its own.
+async function d11SyncLiveMatchSbx(matchId, showToast) {
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m || !m.sbxMatchId) return;
+  try {
+    const raw = await _sbxFetch(`live-score/match/${m.sbxMatchId}/scorecard`, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
+    _d11SyncDebugData = { matchId, fetchedAt: Date.now(), raw, source: 'Sportbex' };
+
+    const entry = Array.isArray(raw?.data) ? raw.data[0] : raw?.data;
+    const result = entry?.result || {};
+    const innings = Array.isArray(result.innings) ? result.innings : [];
+    if (innings.length === 0) {
+      if (showToast) showNotif('No scorecard data yet on Sportbex — try again once the match has started.', 'error');
+      return;
+    }
+
+    let battersApplied = 0, bowlersApplied = 0;
+    const fieldingRowsAll = [];
+
+    innings.forEach(inn => {
+      const teamInfo = inn.teamInfo || {};
+      const teamNameL = (teamInfo.teamName || teamInfo.shortName || '').toLowerCase();
+      if (teamInfo.runs !== undefined) {
+        const scoreStr = `${teamInfo.runs}/${teamInfo.wickets ?? 0} (${teamInfo.overs ?? 0})`;
+        if (_d11TeamNameMatches(teamNameL, m.teamA)) m.scoreA = scoreStr;
+        else if (_d11TeamNameMatches(teamNameL, m.teamB)) m.scoreB = scoreStr;
+      }
+
+      (inn.batting || []).forEach(b => {
+        const mapped = {
+          name: b.playerName,
+          runs: b.runs, balls: b.ballsFaced,
+          outdec: b.isOut ? (b.outSummary || 'out') : 'not out',
+          fours: b.fours, sixes: b.sixes,
+        };
+        if (_d11ApplyLiveBattingRow(d11m, mapped)) battersApplied++;
+        _d11ExtractLiveFieldingCredit(mapped, fieldingRowsAll);
+      });
+      (inn.bowling || []).forEach(bl => {
+        const mapped = {
+          name: bl.playerName,
+          overs: bl.overs, wickets: bl.wickets, maidens: bl.maidens,
+          runs: bl.runsConceded,
+        };
+        if (_d11ApplyLiveBowlingRow(d11m, mapped)) bowlersApplied++;
+      });
+    });
+
+    const mergedFieldingAll = {};
+    fieldingRowsAll.forEach(r => {
+      const key = r.name.toLowerCase();
+      if (!mergedFieldingAll[key]) mergedFieldingAll[key] = { name: r.name, catches: 0, stumpings: 0, runOuts: 0, lbwBowled: 0 };
+      mergedFieldingAll[key].catches += r.catches;
+      mergedFieldingAll[key].stumpings += r.stumpings;
+      mergedFieldingAll[key].runOuts += r.runOuts;
+      mergedFieldingAll[key].lbwBowled += (r.lbwBowled||0);
+    });
+    let fieldersApplied = 0;
+    Object.values(mergedFieldingAll).forEach(row => {
+      const p = _d11FindPlayerByName(d11m, row.name);
+      if (!p) return;
+      p.stats = { ...(p.stats||{}),
+        catches: row.catches,
+        stumpings: row.stumpings,
+        runOuts: row.runOuts,
+        lbwBowled: row.lbwBowled,
+        isPlayingXI: true
+      };
+      p.isPlayingXI = true;
+      fieldersApplied++;
+    });
+
+    (d11m.players || []).forEach(p => { if (p.stats) p.points = calcDream11PlayerPoints(p.stats, matchId); });
+    recalcDream11MatchPoints(d11m);
+
+    _d11SbxLastSyncedAt[matchId] = Date.now();
+    d11ApplyBackupReplacements(matchId);
+    await _saveMatchToFirestore(matchId, m);
+    await _saveDream11MatchToFirestore(matchId, d11m);
+    await d11RefreshLiveTeamPoints(matchId);
+
+    let isFinished = false;
+    const resultText = (result.resultLine?.message || '').trim();
+    if (innings.length >= 2 && resultText) {
+      const pendingKey = matchId + '_sbx';
+      if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = resultText; }
+      else { _d11PendingFinish[pendingKey] = true; }
+    } else {
+      delete _d11PendingFinish[matchId + '_sbx'];
+    }
+    if (isFinished) {
+      m.status = 'completed';
+      if (d11m) d11m.scored = true;
+      _d11MarkTeamsScoredForMatch(matchId);
+      await _saveMatchToFirestore(matchId, m);
+      await _saveDream11MatchToFirestore(matchId, d11m);
+      if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
+    } else if (showToast) {
+      if (resultText) {
+        showNotif(`🏁 Result detected (${resultText}) — tap Sync Now once more to confirm and finalize the match.`);
+      } else if (battersApplied === 0 && bowlersApplied === 0) {
+        showNotif('⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).', 'error');
+      } else {
+        showNotif(`✅ Live data synced — ${battersApplied} batting + ${bowlersApplied} bowling + ${fieldersApplied} fielding rows updated`);
+      }
+    }
+    render();
+  } catch (e) {
+    console.error('Sportbex live sync error:', e);
+    if (showToast) showNotif('Could not sync — ' + (e.message||'unknown error') + '. You can still paste manually.', 'error');
+  }
+}
+
+function _d11RenderSbxSyncRow(m) {
+  if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll3MatchId || m.ll4MatchId) return ''; // already on another provider
+  if (!m.sbxMatchId) {
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(225,29,45,0.08);border:1px solid rgba(225,29,45,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
+      <span style="font-size:11px;color:#fb7185;flex:1;min-width:140px">🎯 Sportbex: not linked</span>
+      <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:linear-gradient(135deg,#e11d2d,#991b1b);color:#fff;border:none" onclick="d11OpenSbxLinkPicker('${m.id}')">🔗 Link Sportbex</button>
+    </div>`;
+  }
+  const lastSync = _d11SbxLastSyncedAt[m.id];
+  const lastSyncStr = lastSync ? new Date(lastSync).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : 'not yet';
+  return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(225,29,45,0.08);border:1px solid rgba(225,29,45,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
+    <span style="font-size:11px;color:#fb7185;flex:1;min-width:140px">🎯 Linked to Sportbex · Last synced: ${lastSyncStr}</span>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchSbx('${m.id}', true)">🔄 Sync Now</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchSbx('${m.id}', true)">🏁 Fetch Final Result</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromSbx('${m.id}')">📥 Fetch Squad</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11CheckPlayingXIAnnouncedSbx('${m.id}')">🏏 Check Playing XI</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11ActiveMatchId='${m.id}';d11AdminTab='pool';tab='dream11Pool';d11StartPasteSquad();window.scrollTo(0,0)">✍️ Paste Playing XI</button>
+    ${_d11SbxDebugData ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11OpenSbxDebugModal()">🐛 View Raw Data</button>` : ''}
+    ${_d11SyncDebugData && _d11SyncDebugData.matchId === m.id ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.3);color:#fca5a5" onclick="d11OpenSyncDebugModal()">🐛 View Raw Sync Data</button>` : ''}
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(220,38,38,0.12);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11UnlinkSbxMatch('${m.id}')">✕ Unlink</button>
+  </div>`;
+}
+
+function renderD11SbxHub() {
+  const linked = Object.values(matches).filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && m.sbxMatchId);
+  const unlinkedEligible = Object.values(matches)
+    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.sbxMatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cllMatchId && !m.cb2MatchId && !m.ll2MatchId && !m.ll3MatchId && !m.ll4MatchId && !dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
+
+  function renderCard(m) {
+    const d11m = dream11Matches[m.id];
+    const playerCount = d11m ? d11m.players.length : 0;
+    const teamCount = Object.values(dream11Teams).filter(t => t.matchId === m.id).length;
+    const xiCount = d11m ? d11m.players.filter(p => p.isPlayingXI).length : 0;
+    const dLocked = isD11Locked(m.id);
+    const deadlineStr = m.deadline ? pkDateTime(m.deadline) : 'Not set';
+    return `
+    <div class="card mb14">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div class="match-teams" style="gap:8px">
+          <span class="team-name" style="font-size:14px">${m.teamA||'TBD'}</span>
+          <span class="vs-badge" style="font-size:10px;padding:2px 8px">VS</span>
+          <span class="team-name" style="font-size:14px">${m.teamB||'TBD'}</span>
+        </div>
+        ${d11m?.scored ? `<span class="match-status status-completed">SCORED</span>` : dLocked ? `<span class="match-status status-live">LOCKED</span>` : `<span class="match-status status-upcoming">OPEN</span>`}
+      </div>
+      <div style="margin-bottom:8px">
+        ${d11m?.published ? `<span class="match-status" style="background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.35)">🟢 PUBLISHED — visible to users</span>` : `<span class="match-status" style="background:rgba(234,179,8,0.15);color:#facc15;border:1px solid rgba(234,179,8,0.35)">🔒 NOT PUBLISHED — hidden from users</span>`}
+      </div>
+      <div style="font-size:11.5px;color:var(--dim);margin-bottom:6px">👥 ${playerCount} players · 🏏 ${xiCount} XI confirmed · 📋 ${teamCount} teams</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:var(--input-bg);border-radius:8px;padding:8px 10px">
+        <span style="font-size:11px;color:var(--orange);flex:1">⏰ Deadline: ${deadlineStr}${dLocked && !d11m?.locked ? ' (auto-locked)' : ''}</span>
+        <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11EditDeadline('${m.id}')">✏️ Change</button>
+      </div>
+      ${_d11RenderSbxSyncRow(m)}
+      <button class="btn-primary btn-block" style="font-size:12px;padding:10px;margin-bottom:8px;background:${d11m?.published ? 'linear-gradient(135deg,#dc2626,#b91c1c)' : 'linear-gradient(135deg,#16a34a,#15803d)'}" onclick="d11TogglePublish('${m.id}')">${d11m?.published ? '🚫 Unpublish (hide from users)' : '🚀 Publish (show to users)'}</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn-secondary" style="flex:1;font-size:12px;padding:10px" onclick="openDream11Match('${m.id}')">⚙️ Manage Pool</button>
+        ${teamCount > 0 ? `<button class="btn-secondary" style="flex:1;font-size:12px;padding:10px" onclick="openDream11Leaderboard('${m.id}')">🏅 Leaderboard</button>` : ''}
+        <button class="btn-secondary" style="font-size:12px;padding:10px;background:rgba(220,38,38,0.12);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11DeleteMatch('${m.id}')">🗑️</button>
+      </div>
+    </div>`;
+  }
+
+  const notScored = linked.filter(m => !dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
+  const scoredList = linked.filter(m => dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(b.deadline||0) - new Date(a.deadline||0));
+
+  return `
+  ${renderD11Hero('Live sync via Sportbex — Match Link, Squad, Playing 11 & Scoring, fully automatic')}
+  <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="tab='dream11';render();window.scrollTo(0,0)">← Back to Dream11</button>
+  <div class="section-title">🎯 Sportbex Matches</div>
+  <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#e11d2d,#991b1b)" onclick="d11OpenSbxImportPanel()">🎯 Import from Sportbex (Upcoming/Live)</button>
+  <button class="btn-secondary btn-block mb14" style="background:rgba(225,29,45,0.1);border-color:rgba(225,29,45,0.3);color:#fb7185" onclick="d11AdminCreateMatchForSbx()">➕ Create New Match & Link Manually</button>
+  <div class="empty-state" style="padding:6px 2px;font-size:11.5px;text-align:left;line-height:1.6;margin-bottom:14px">
+    Or link a match you already created (manually, or via another provider, if not covered there) using the list below.
+  </div>
+  ${unlinkedEligible.length > 0 ? `
+    <div class="section-title" style="font-size:13px">Link a match</div>
+    ${unlinkedEligible.slice(0, 10).map(m => `
+      <div class="card mb10" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <div>
+          <div style="font-weight:700;font-size:13px">${m.teamA||'TBD'} vs ${m.teamB||'TBD'}</div>
+          <div style="font-size:10.5px;color:var(--dim)">${m.deadline ? pkDateTime(m.deadline) : 'No deadline set'}</div>
+        </div>
+        <button class="btn-secondary" style="font-size:11px;padding:7px 12px;white-space:nowrap;background:linear-gradient(135deg,#e11d2d,#991b1b);color:#fff;border:none" onclick="d11OpenSbxLinkPicker('${m.id}')">🔗 Link</button>
+      </div>
+    `).join('')}
+  ` : ''}
+  <div class="section-title" style="font-size:13px;margin-top:${unlinkedEligible.length > 0 ? '18px' : '0'}">Linked matches</div>
+  ${notScored.length === 0 ? `<div class="empty-state"><div class="empty-icon">🎯</div>No Sportbex-linked matches yet.<br/>Pick a match above to link one.</div>` : notScored.map(renderCard).join('')}
+  ${scoredList.length > 0 ? `
+    <button class="btn-secondary btn-block mb14" style="font-size:12px;padding:10px" onclick="d11AdminShowCompleted=!d11AdminShowCompleted;render()">
+      ${d11AdminShowCompleted ? '▲' : '▼'} ✅ Completed / Scored Matches (${scoredList.length})
+    </button>
+    ${d11AdminShowCompleted ? scoredList.map(renderCard).join('') : ''}
+  ` : ''}
+  `;
+}
+
 
 // ══════════════════════════════════════════════════════════════════════
 // ── Cricket Live Line 2 (LL2) — Import / Link / Squad / XI / Sync ─────────────
@@ -13189,7 +14061,7 @@ async function d11SyncLiveMatchCll(matchId, showToast) {
 }
 
 function _d11RenderCllSyncRow(m) {
-  if (m.cricketDataMatchId || m.espnMatchId || m.ll2MatchId || m.ll3MatchId || m.ll4MatchId) return ''; // already on another provider
+  if (m.cricketDataMatchId || m.espnMatchId || m.ll2MatchId || m.ll3MatchId || m.ll4MatchId || m.sbxMatchId) return ''; // already on another provider
   if (!m.cllMatchId) {
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(14,165,165,0.08);border:1px solid rgba(14,165,165,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
       <span style="font-size:11px;color:#2dd4d4;flex:1;min-width:140px">🎯 Cricket Live Line: not linked</span>
@@ -13490,7 +14362,7 @@ async function d11SyncLiveMatchLl2(matchId, showToast) {
 }
 
 function _d11RenderLl2SyncRow(m) {
-  if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll3MatchId || m.ll4MatchId) return ''; // already on another provider
+  if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll3MatchId || m.ll4MatchId || m.sbxMatchId) return ''; // already on another provider
   if (!m.ll2MatchId) {
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
       <span style="font-size:11px;color:#fbbf24;flex:1;min-width:140px">⚡ Cricket Live Line 2: not linked</span>
@@ -13515,7 +14387,7 @@ function _d11RenderLl2SyncRow(m) {
 function renderD11Ll2Hub() {
   const linked = Object.values(matches).filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && m.ll2MatchId);
   const unlinkedEligible = Object.values(matches)
-    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.ll2MatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cllMatchId && !m.cb2MatchId && !m.ll3MatchId && !dream11Matches[m.id]?.scored)
+    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.ll2MatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cllMatchId && !m.cb2MatchId && !m.ll3MatchId && !m.sbxMatchId && !dream11Matches[m.id]?.scored)
     .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
 
   function renderCard(m) {
@@ -14271,7 +15143,7 @@ async function d11SyncLiveMatchLl3(matchId, showToast) {
 }
 
 function _d11RenderLl3SyncRow(m) {
-  if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll4MatchId) return ''; // already on another provider
+  if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll4MatchId || m.sbxMatchId) return ''; // already on another provider
   if (!m.ll3MatchId) {
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
       <span style="font-size:11px;color:#fbbf24;flex:1;min-width:140px">⚡ Cricket Live Line 3: not linked</span>
@@ -14296,7 +15168,7 @@ function _d11RenderLl3SyncRow(m) {
 function renderD11Ll3Hub() {
   const linked = Object.values(matches).filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && m.ll3MatchId);
   const unlinkedEligible = Object.values(matches)
-    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.ll3MatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cllMatchId && !m.cb2MatchId && !m.ll2MatchId && !dream11Matches[m.id]?.scored)
+    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.ll3MatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cllMatchId && !m.cb2MatchId && !m.ll2MatchId && !m.sbxMatchId && !dream11Matches[m.id]?.scored)
     .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
 
   function renderCard(m) {
@@ -15059,7 +15931,7 @@ async function d11SyncLiveMatchLl4(matchId, showToast) {
 }
 
 function _d11RenderLl4SyncRow(m) {
-  if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll3MatchId) return ''; // already on another provider
+  if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll3MatchId || m.sbxMatchId) return ''; // already on another provider
   if (!m.ll4MatchId) {
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
       <span style="font-size:11px;color:#fbbf24;flex:1;min-width:140px">⚡ Cricket Live Line 4: not linked</span>
@@ -15084,7 +15956,7 @@ function _d11RenderLl4SyncRow(m) {
 function renderD11Ll4Hub() {
   const linked = Object.values(matches).filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && m.ll4MatchId);
   const unlinkedEligible = Object.values(matches)
-    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.ll4MatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cllMatchId && !m.cb2MatchId && !m.ll2MatchId && !m.ll3MatchId && !dream11Matches[m.id]?.scored)
+    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.ll4MatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cllMatchId && !m.cb2MatchId && !m.ll2MatchId && !m.ll3MatchId && !m.sbxMatchId && !dream11Matches[m.id]?.scored)
     .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
 
   function renderCard(m) {
@@ -15223,7 +16095,7 @@ function renderD11Ll4PlayerRankingModal() {
 function renderD11CllHub() {
   const linked = Object.values(matches).filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && m.cllMatchId);
   const unlinkedEligible = Object.values(matches)
-    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.cllMatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cb2MatchId && !m.ll2MatchId && !m.ll3MatchId && !dream11Matches[m.id]?.scored)
+    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.cllMatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cb2MatchId && !m.ll2MatchId && !m.ll3MatchId && !m.sbxMatchId && !dream11Matches[m.id]?.scored)
     .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
 
   function renderCard(m) {
@@ -15299,7 +16171,7 @@ function renderD11CllHub() {
 }
 
 function _d11RenderCb2SyncRow(m) {
-  if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.ll2MatchId || m.ll3MatchId || m.ll4MatchId) return ''; // already on another provider
+  if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.ll2MatchId || m.ll3MatchId || m.ll4MatchId || m.sbxMatchId) return ''; // already on another provider
   if (!m.cb2MatchId) {
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(147,51,234,0.08);border:1px solid rgba(147,51,234,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
       <span style="font-size:11px;color:#c084fc;flex:1;min-width:140px">🏏 Cricbuzz No 2: not linked</span>
@@ -15324,7 +16196,7 @@ function _d11RenderCb2SyncRow(m) {
 function renderD11Cb2Hub() {
   const linked = Object.values(matches).filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && m.cb2MatchId);
   const unlinkedEligible = Object.values(matches)
-    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.cb2MatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cllMatchId && !m.ll2MatchId && !m.ll3MatchId && !dream11Matches[m.id]?.scored)
+    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.cb2MatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cllMatchId && !m.ll2MatchId && !m.ll3MatchId && !m.sbxMatchId && !dream11Matches[m.id]?.scored)
     .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
 
   function renderCard(m) {
@@ -16276,6 +17148,7 @@ const D11_XI_CHECK_PROVIDERS = [
   { linked: m => !!m.ll4MatchId, fn: d11CheckPlayingXIAnnouncedLl4 },
   { linked: m => !!m.cb2MatchId, fn: d11CheckPlayingXIAnnouncedCb2 },
   { linked: m => !!m.espnMatchId, fn: d11CheckPlayingXIAnnouncedEspn },
+  { linked: m => !!m.sbxMatchId, fn: d11CheckPlayingXIAnnouncedSbx },
 ];
 
 // ── Auto Playing XI check (deadline-proximity scheduler, ALL providers) ────
@@ -22152,7 +23025,7 @@ function renderD11Hero(subtitle) {
 // ── Live Sync status row shown on each Dream11 admin match card ──
 function _d11RenderLiveSyncRow(m) {
   if (!m.cricketDataMatchId) {
-    if (m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll3MatchId || m.ll4MatchId) return ''; // already on another provider
+    if (m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll3MatchId || m.ll4MatchId || m.sbxMatchId) return ''; // already on another provider
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
       <span style="font-size:11px;color:#4ade80;flex:1;min-width:140px">📡 Cricbuzz: not linked (manual paste mode)</span>
       <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;border:none" onclick="d11OpenLiveSyncPicker('${m.id}')">🔗 Link Live Match</button>
@@ -22180,7 +23053,7 @@ function _d11RenderLiveSyncRow(m) {
 // visual pattern as _d11RenderLiveSyncRow, red-tinted to visually
 // distinguish the provider at a glance.
 function _d11RenderEspnSyncRow(m) {
-  if (m.cricketDataMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll3MatchId || m.ll4MatchId) return ''; // already on another provider
+  if (m.cricketDataMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll3MatchId || m.ll4MatchId || m.sbxMatchId) return ''; // already on another provider
   if (!m.espnMatchId) {
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(220,38,38,0.08);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
       <span style="font-size:11px;color:#f87171;flex:1;min-width:140px">🏏 ESPN Cricinfo: not linked</span>
@@ -22465,6 +23338,7 @@ function renderDream11Hub() {
     <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#f59e0b,#d97706)" onclick="goD11Ll2Hub()">⚡ Cricket Live Line 2 Matches</button>
     <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#16a34a,#15803d)" onclick="goD11Ll3Hub()">⚡ Cricket Live Line 3 Matches</button>
     <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#e11d48,#be123c)" onclick="goD11Ll4Hub()">⚡ Cricket Live Line 4 Matches</button>
+    <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#e11d2d,#991b1b)" onclick="goD11SbxHub()">🎯 Sportbex Matches</button>
     <button class="btn-secondary btn-block mb14" style="background:rgba(22,163,74,0.1);border-color:rgba(22,163,74,0.3);color:#4ade80" onclick="d11OpenLl3PlayerRankingPanel()">🏆 Player Ranking (Cricket Live Line 3)</button>
     <button class="btn-secondary btn-block mb14" style="background:rgba(225,29,72,0.1);border-color:rgba(225,29,72,0.3);color:#fb7185" onclick="d11OpenLl4PlayerRankingPanel()">🏆 Player Ranking (Cricket Live Line 4)</button>
     <button class="btn-secondary btn-block mb14" style="background:rgba(168,85,247,0.1);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="goD11Tournaments()">🏆 Tournaments (multi-match contests)</button>
@@ -24645,7 +25519,7 @@ function renderSubAdminXIPanel() {
       const d11m = dream11Matches[m.id];
       const xiCount = (d11m.players||[]).filter(p=>p.isPlayingXI).length;
       const isLive = m.deadline && new Date(m.deadline).getTime() <= Date.now();
-      const linked = !!(m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll3MatchId || m.ll4MatchId);
+      const linked = !!(m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll3MatchId || m.ll4MatchId || m.sbxMatchId);
       const action = subAdminXIMatchPicker==='xi'
         ? (m.cricketDataMatchId ? `d11CheckPlayingXIAnnounced('${m.id}')`
           : m.espnMatchId ? `d11CheckPlayingXIAnnouncedEspn('${m.id}')`
@@ -24653,14 +25527,16 @@ function renderSubAdminXIPanel() {
           : m.cb2MatchId ? `d11CheckPlayingXIAnnouncedCb2('${m.id}')`
           : m.ll2MatchId ? `d11CheckPlayingXIAnnouncedLl2('${m.id}')`
           : m.ll3MatchId ? `d11CheckPlayingXIAnnouncedLl3('${m.id}')`
-          : m.ll4MatchId ? `d11CheckPlayingXIAnnouncedLl4('${m.id}')` : '')
+          : m.ll4MatchId ? `d11CheckPlayingXIAnnouncedLl4('${m.id}')`
+          : m.sbxMatchId ? `d11CheckPlayingXIAnnouncedSbx('${m.id}')` : '')
         : (m.cricketDataMatchId ? `d11SyncLiveMatch('${m.id}', true)`
           : m.espnMatchId ? `d11SyncLiveMatchEspn('${m.id}', true)`
           : m.cllMatchId ? `d11SyncLiveMatchCll('${m.id}', true)`
           : m.cb2MatchId ? `d11SyncLiveMatchCb2('${m.id}', true)`
           : m.ll2MatchId ? `d11SyncLiveMatchLl2('${m.id}', true)`
           : m.ll3MatchId ? `d11SyncLiveMatchLl3('${m.id}', true)`
-          : m.ll4MatchId ? `d11SyncLiveMatchLl4('${m.id}', true)` : '');
+          : m.ll4MatchId ? `d11SyncLiveMatchLl4('${m.id}', true)`
+          : m.sbxMatchId ? `d11SyncLiveMatchSbx('${m.id}', true)` : '');
       return `
       <div class="card mb10" style="${linked ? 'cursor:pointer' : 'opacity:0.55'}" ${linked ? `onclick="${action}"` : ''}>
         <div style="display:flex;justify-content:space-between;align-items:center">
@@ -30782,7 +31658,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.26.4";
+const APP_VERSION = "4.26.6";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
