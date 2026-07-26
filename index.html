@@ -509,6 +509,9 @@
   /* ── Single-column full-width player list (replaces old Team A|Team B split) ── */
   .d11-single-list { margin-bottom:14px; }
   .d11-single-list-header { display:flex; justify-content:space-between; padding:0 8px 6px; font-size:9.5px; color:var(--dim); text-transform:uppercase; letter-spacing:0.5px; }
+  .d11-team-group-header { display:flex; align-items:center; gap:8px; padding:10px 10px; margin:10px 0 6px; background:rgba(249,115,22,0.12); border:1px solid rgba(249,115,22,0.3); border-radius:10px; font-size:13px; font-weight:800; color:#fff; }
+  .d11-team-group-header:first-child { margin-top:0; }
+  .d11-team-group-count { margin-left:auto; font-size:10.5px; font-weight:600; color:var(--dim); text-transform:none; letter-spacing:0; }
   .d11-single-row { display:flex; align-items:center; gap:8px; padding:9px 10px; border-radius:12px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06); margin-bottom:7px; }
   .d11-single-row.picked { border-color:rgba(37,99,235,0.5); background:rgba(37,99,235,0.1); }
   .d11-single-row .d11-dual-toggle { position:static; width:24px; height:24px; }
@@ -10724,6 +10727,19 @@ function d11AutoDetectScoreFromText(matchId, text) {
     }
     if (matchedSide === 'A' && !scoreForTeamA) scoreForTeamA = scoreStr;
     else if (matchedSide === 'B' && !scoreForTeamB) scoreForTeamB = scoreStr;
+  }
+
+  // Fallback for results that don't sit cleanly on their own line in the
+  // paste (see the identical fallback + full rationale in
+  // d11AutoParseScorecard, which this mirrors).
+  if (!detectedResult) {
+    const blob = text.replace(/\s+/g, ' ');
+    const wonByMatch = blob.match(/([A-Za-z][A-Za-z0-9 .'-]{2,40}?\s+won by\s+[A-Za-z0-9 .'-]{2,40}?)(?=[.\n]|$)/i);
+    if (wonByMatch) detectedResult = wonByMatch[1].trim();
+    else {
+      const tiedMatch = blob.match(/match\s+tied[^.\n]{0,60}/i) || blob.match(/no\s+result[^.\n]{0,60}/i) || blob.match(/match\s+abandoned[^.\n]{0,60}/i);
+      if (tiedMatch) detectedResult = tiedMatch[0].trim();
+    }
   }
 
   if (!scoreForTeamA || !scoreForTeamB) {
@@ -23067,6 +23083,23 @@ function d11AutoParseScorecard(matchId) {
     if (!scoreForTeamA && lineHasTeam(lc, teamAWords)) { scoreForTeamA = scoreStr; }
     else if (!scoreForTeamB && lineHasTeam(lc, teamBWords)) { scoreForTeamB = scoreStr; }
   }
+  // Fallback: some Cricbuzz/ESPN copy-pastes (especially from a table/card
+  // layout rather than the plain article text) don't put the result on its
+  // own clean line — "won by" ends up mid-sentence, glued to surrounding
+  // text, or split by extra whitespace/tabs from the table cell structure.
+  // The per-line check above misses those. Search the whole pasted blob as
+  // one string instead and pull out just the "<Team> won by <margin>" (or
+  // tied/no-result/abandoned) phrase directly, trimming anything before or
+  // after it that came along from the surrounding table markup.
+  if (!detectedResult) {
+    const blob = text.replace(/\s+/g, ' ');
+    const wonByMatch = blob.match(/([A-Za-z][A-Za-z0-9 .'-]{2,40}?\s+won by\s+[A-Za-z0-9 .'-]{2,40}?)(?=[.\n]|$)/i);
+    if (wonByMatch) detectedResult = wonByMatch[1].trim();
+    else {
+      const tiedMatch = blob.match(/match\s+tied[^.\n]{0,60}/i) || blob.match(/no\s+result[^.\n]{0,60}/i) || blob.match(/match\s+abandoned[^.\n]{0,60}/i);
+      if (tiedMatch) detectedResult = tiedMatch[0].trim();
+    }
+  }
   if (!scoreForTeamA || !scoreForTeamB) {
     const allScores = [];
     const gRe = /(\d{1,3})[\/\-](\d{1,2})(\s*\([\d.]+\s*(?:ov|overs?)?\))?/gi;
@@ -24151,8 +24184,18 @@ function renderDream11BuildTeam() {
     </div>
     ${sideA.length === 0 && sideB.length === 0
       ? `<div class="empty-state" style="padding:16px 4px;font-size:11px">No players</div>`
-      : sideA.map((p,i) => d11SinglePlayerRow(p, i+1, m.teamA, selCounts, selTotal)).join('')
-        + sideB.map((p,i) => d11SinglePlayerRow(p, i+1, m.teamB, selCounts, selTotal)).join('')
+      : `${sideA.length ? `<div class="d11-team-group-header">
+            ${d11GetTeamSquad(m.teamA)?.flag ? `<img src="${d11GetTeamSquad(m.teamA).flag}" style="width:20px;height:20px;border-radius:50%;object-fit:cover" />` : ''}
+            <span>${m.teamA||'Team A'}</span>
+            <span class="d11-team-group-count">${sideA.length} players</span>
+          </div>` : ''}
+        ${sideA.map((p,i) => d11SinglePlayerRow(p, i+1, m.teamA, selCounts, selTotal)).join('')}
+        ${sideB.length ? `<div class="d11-team-group-header">
+            ${d11GetTeamSquad(m.teamB)?.flag ? `<img src="${d11GetTeamSquad(m.teamB).flag}" style="width:20px;height:20px;border-radius:50%;object-fit:cover" />` : ''}
+            <span>${m.teamB||'Team B'}</span>
+            <span class="d11-team-group-count">${sideB.length} players</span>
+          </div>` : ''}
+        ${sideB.map((p,i) => d11SinglePlayerRow(p, i+1, m.teamB, selCounts, selTotal)).join('')}`
     }
   </div>
 
@@ -30740,7 +30783,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.26.1";
+const APP_VERSION = "4.26.3";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
