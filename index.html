@@ -7324,6 +7324,28 @@ function d11SyncTeamFlag(teamName, flagUrl) {
   try { localStorage.setItem('pp_team_squads_cache', JSON.stringify(teamSquads)); } catch(e){}
 }
 
+// Fallback for when a match has real scores (m.scoreA/m.scoreB, typically
+// like "187/5 (100 Ov)") but m.resultText was never confirmed — e.g. the
+// live-sync's two-step "tap Sync Now again to confirm" flow only got its
+// first tap. Parses the total-runs number out of each score string and
+// declares the higher-scoring team the winner; falls back to a neutral
+// "Match completed" if either score can't be parsed (e.g. still just "—").
+function d11DeriveFallbackResultText(m) {
+  const parseRuns = (s) => {
+    if (!s) return null;
+    const match = String(s).trim().match(/^(\d+)/);
+    return match ? parseInt(match[1], 10) : null;
+  };
+  const runsA = parseRuns(m.scoreA);
+  const runsB = parseRuns(m.scoreB);
+  if (runsA === null || runsB === null || runsA === runsB) {
+    return 'Match completed';
+  }
+  const winner = runsA > runsB ? (m.teamA || 'Team A') : (m.teamB || 'Team B');
+  const margin = Math.abs(runsA - runsB);
+  return `${winner} won by ${margin} run${margin === 1 ? '' : 's'} (approx.)`;
+}
+
 // A team's `flag` field can be either a plain emoji/text (manually typed by
 // admin) or a full image URL (auto-filled from Cricket Live Line / Live
 // Line 2 squad data via d11SyncTeamFlag). This renders the right thing
@@ -8732,10 +8754,22 @@ function renderCompletedMatchDetail() {
 
       ${m.resultText
         ? `<div style="font-size:13px;font-weight:700;color:#4ade80;margin-bottom:6px">🏆 ${m.resultText}</div>`
-        : (!m.scoreA && !m.scoreB && !m.scorecardText
-            ? `<div style="font-size:11px;color:var(--dim);margin-bottom:6px">Result summary not added yet</div>`
-            : '')
+        : (m.scoreA || m.scoreB
+            // Fallback for matches marked completed where the live sync's
+            // two-step "confirm" (see d11SyncLiveMatchSbx / LL5 equivalents)
+            // never got its second Sync Now tap — resultText stays empty
+            // forever even though the match clearly finished with real
+            // scores. Rather than showing nothing, derive a best-effort
+            // summary from the parsed scores so the match doesn't look
+            // stuck/unfinished to the user.
+            ? `<div style="font-size:13px;font-weight:700;color:#4ade80;margin-bottom:6px">🏆 ${d11DeriveFallbackResultText(m)}</div>`
+            : (!m.scorecardText
+                ? `<div style="font-size:11px;color:var(--dim);margin-bottom:6px">Result summary not added yet</div>`
+                : '')
+          )
       }
+
+      ${(!m.resultText && (m.scoreA || m.scoreB)) ? `<div style="font-size:9.5px;color:var(--dim);margin-top:-4px;margin-bottom:6px">⚠️ Result not yet confirmed by provider sync — tap "Sync Now" once more below to confirm the final result text.</div>` : ''}
 
       ${dateStr ? `<div style="font-size:11px;color:var(--dim);margin-bottom:${m.scorecardText?'10px':'0'}">📅 ${dateStr}${m.format?' · '+m.format:''}${m.seriesName?' · '+m.seriesName:''}</div>` : ''}
       ${m.scorecardText ? `<div style="font-size:11px;color:#4ade80;font-weight:600;margin-top:6px">✅ Full Scorecard available — neeche button se dekho</div>` : ''}
@@ -13841,11 +13875,21 @@ async function d11SyncLiveMatchCb2(matchId, showToast) {
     // doesn't mean the match has actually finished). Still keep the
     // double-confirm guard (two consecutive syncs both showing a result)
     // so a transient/glitchy response can't finalize a match on its own.
+    //
+    // For Test/multi-day matches that are still in progress, this provider
+    // also sends a "status" field with a live summary (e.g. "Day 2: 2nd
+    // Session - Pakistan trail by 226 runs") — this is NOT a final result,
+    // so it must never trigger the finish/confirm logic below, but it's
+    // still worth showing the user instead of nothing. Store it separately
+    // as m.liveStatusText so the completed-match resultText logic is
+    // unaffected.
     let isFinished = false;
-    const resultText = (data.result || '').trim();
+    const resultText = (raw.result || '').trim();
+    const liveStatusText = (raw.status || '').trim();
+    if (liveStatusText && !resultText) m.liveStatusText = liveStatusText;
     if (innings.length >= 2 && resultText) {
       const pendingKey = matchId + '_cb2';
-      if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = resultText; }
+      if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = resultText; delete m.liveStatusText; }
       else { _d11PendingFinish[pendingKey] = true; }
     } else {
       delete _d11PendingFinish[matchId + '_cb2'];
@@ -23019,7 +23063,9 @@ function renderD11JoinContest() {
         ${m.scoreB ? `<div style="font-weight:800;font-size:15px;color:#fff;margin-top:4px">${m.scoreB}</div>` : ''}
       </div>
     </div>
-    ${m.resultText ? `<div style="text-align:center;margin-top:10px"><span style="display:inline-flex;align-items:center;gap:6px;background:rgba(74,222,128,0.18);color:#bbf7d0;font-weight:700;font-size:12.5px;padding:7px 14px;border-radius:20px">✅ ${m.resultText}</span></div>` : ''}
+    ${m.resultText ? `<div style="text-align:center;margin-top:10px"><span style="display:inline-flex;align-items:center;gap:6px;background:rgba(74,222,128,0.18);color:#bbf7d0;font-weight:700;font-size:12.5px;padding:7px 14px;border-radius:20px">✅ ${m.resultText}</span></div>`
+      : m.liveStatusText ? `<div style="text-align:center;margin-top:10px"><span style="display:inline-flex;align-items:center;gap:6px;background:rgba(220,38,38,0.18);color:#fecaca;font-weight:700;font-size:12.5px;padding:7px 14px;border-radius:20px">🔴 ${m.liveStatusText}</span></div>`
+      : ''}
     <div class="i11-contest-hero-timer">
       ${locked
         ? `<span>🔒 Locked</span>`
@@ -32757,7 +32803,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.29.3";
+const APP_VERSION = "4.29.5";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
