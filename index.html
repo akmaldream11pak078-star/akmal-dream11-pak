@@ -13885,8 +13885,26 @@ async function d11SyncLiveMatchCb2(matchId, showToast) {
     // unaffected.
     let isFinished = false;
     const resultText = (raw.result || '').trim();
-    const liveStatusText = (raw.status || '').trim();
-    if (liveStatusText && !resultText) m.liveStatusText = liveStatusText;
+    // NOTE: this provider's scorecard response has no "status" field at all
+    // (confirmed via raw response, 26 Jul 2026) — there is no live
+    // trail/lead summary sent to us directly. Instead, once we have both
+    // teams' scores parsed above, derive a simple "Team X trail by N runs"
+    // / "Team X lead by N runs" summary ourselves for display purposes only
+    // (never used to decide isFinished — that still strictly requires the
+    // real `result` field via the two-step confirm below).
+    if (!resultText && m.scoreA && m.scoreB) {
+      const runsA = parseInt(String(m.scoreA).match(/^(\d+)/)?.[1] || '', 10);
+      const runsB = parseInt(String(m.scoreB).match(/^(\d+)/)?.[1] || '', 10);
+      if (!isNaN(runsA) && !isNaN(runsB) && runsA !== runsB) {
+        const diff = Math.abs(runsA - runsB);
+        const behindTeam = runsA < runsB ? (m.teamA || 'Team A') : (m.teamB || 'Team B');
+        m.liveStatusText = `${behindTeam} trail by ${diff} run${diff===1?'':'s'}`;
+      } else {
+        delete m.liveStatusText;
+      }
+    } else if (resultText) {
+      delete m.liveStatusText;
+    }
     if (innings.length >= 2 && resultText) {
       const pendingKey = matchId + '_cb2';
       if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = resultText; delete m.liveStatusText; }
@@ -32803,7 +32821,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.29.5";
+const APP_VERSION = "4.29.6";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
