@@ -783,7 +783,19 @@ window.showBabarSplash = function(){
       const permission = await Notification.requestPermission();
       if (permission !== 'granted') return null;
 
-      const registration = await navigator.serviceWorker.ready;
+      // IMPORTANT: don't use navigator.serviceWorker.ready here. This page
+      // also registers ./sw.js for offline support, and on hosts that serve
+      // the site from a subpath (e.g. GitHub Pages project pages at
+      // /repo-name/) both sw.js and firebase-messaging-sw.js end up with the
+      // same scope. When two workers share a scope, `ready` can resolve to
+      // whichever one took control first — which may be sw.js, not the
+      // messaging worker — and getToken() then silently fails to produce a
+      // token. Register/look up firebase-messaging-sw.js explicitly instead.
+      let registration = await navigator.serviceWorker.getRegistration('./firebase-messaging-sw.js');
+      if (!registration) {
+        registration = await navigator.serviceWorker.register('./firebase-messaging-sw.js');
+      }
+      await navigator.serviceWorker.ready;
       const messaging = getMessaging(app);
       const token = await getToken(messaging, {
         vapidKey: VAPID_KEY,
@@ -32757,7 +32769,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.30.0";
+const APP_VERSION = "4.31.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
