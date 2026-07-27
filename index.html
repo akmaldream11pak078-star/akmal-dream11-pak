@@ -4795,14 +4795,22 @@ async function submitDeposit() {
 // the Firestore cache for everyone.
 async function _loadNewsFromFirestore() {
   try {
+    if (!window._fbDb || !window._fbFns) {
+      throw new Error('App is still connecting — please try again in a moment.');
+    }
+    const { doc, getDoc } = window._fbFns;
     const snap = await getDoc(doc(window._fbDb, 'pp_meta', 'news_cache'));
     if (snap.exists()) {
       const d = snap.data();
       newsArticles = Array.isArray(d.articles) ? d.articles : [];
       newsLastSyncedAt = d.syncedAt || null;
+    } else {
+      newsArticles = [];
     }
   } catch (e) {
     console.warn('Could not load cached news:', e.message);
+    newsError = 'Could not load news — ' + (e.message || 'unknown error') + (e.code ? ` (${e.code})` : '');
+    throw e;
   }
 }
 
@@ -4812,12 +4820,12 @@ async function loadNewsTab() {
   render();
   try {
     await _loadNewsFromFirestore();
-    if (newsArticles.length === 0) {
+    if (newsArticles.length === 0 && !newsError) {
       newsError = 'No news available yet — check back soon.';
     }
   } catch (e) {
     console.error(e);
-    newsError = 'Could not load news right now.';
+    if (!newsError) newsError = 'Could not load news right now.';
   } finally {
     newsLoading = false;
     render();
@@ -4847,6 +4855,8 @@ async function adminSyncNews() {
     }
     newsArticles = json.data;
     newsLastSyncedAt = getDateTime();
+    if (!window._fbDb || !window._fbFns) throw new Error('Firestore is not ready yet — try again in a moment.');
+    const { doc, setDoc } = window._fbFns;
     await setDoc(doc(window._fbDb, 'pp_meta', 'news_cache'), {
       articles: newsArticles,
       syncedAt: newsLastSyncedAt
@@ -4867,7 +4877,7 @@ function goNewsTab() {
   viewingNewsId = null;
   render();
   window.scrollTo(0,0);
-  if (newsArticles.length === 0) loadNewsTab();
+  loadNewsTab(); // always fetch fresh from Firestore — don't rely on stale in-memory cache from startup
 }
 
 function openNewsArticle(newsId) {
@@ -32878,7 +32888,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.32.1";
+const APP_VERSION = "4.32.4";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
