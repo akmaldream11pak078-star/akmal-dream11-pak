@@ -18024,17 +18024,18 @@ const D11_XI_CHECK_PROVIDERS = [
   { linked: m => !!m.ll2MatchId, fn: d11CheckPlayingXIAnnouncedLl2 },
   { linked: m => !!m.ll3MatchId, fn: d11CheckPlayingXIAnnouncedLl3 },
   { linked: m => !!m.ll4MatchId, fn: d11CheckPlayingXIAnnouncedLl4 },
+  { linked: m => !!m.ll5MatchId, fn: d11CheckPlayingXIAnnouncedLl5 },
   { linked: m => !!m.cb2MatchId, fn: d11CheckPlayingXIAnnouncedCb2 },
   { linked: m => !!m.espnMatchId, fn: d11CheckPlayingXIAnnouncedEspn },
   { linked: m => !!m.sbxMatchId, fn: d11CheckPlayingXIAnnouncedSbx },
 ];
 
 // ── Auto Playing XI check (deadline-proximity scheduler, ALL providers) ────
-// Runs off the existing 3-min background refresh loop (any signed-in user's
+// Runs off the existing 5-min background refresh loop (any signed-in user's
 // active tab can trigger it — no dedicated admin session needed). Works for
-// a match linked to ANY of the 6 live-sync providers (Cricbuzz, Cricket
-// Live Line, Cricket Live Line 2, Cricket Live Line 3, Cricbuzz No 2, ESPN
-// Cricinfo) — whichever one the match is actually linked to.
+// a match linked to ANY of the 8 live-sync providers (Cricbuzz, Cricket
+// Live Line, Cricket Live Line 2/3/4/5, Cricbuzz No 2, ESPN Cricinfo,
+// Sportbex) — whichever one the match is actually linked to.
 //
 // Fires at most 4 times per match — 20, 15, 10, and 5 minutes before the
 // deadline — each window tracked in d11m.autoXICheck = { w20, w15, w10, w5 }
@@ -23035,7 +23036,7 @@ function renderD11JoinContest() {
       // stays empty forever even though the match clearly finished with
       // real scores (this is exactly what was happening for Trent Rockets
       // vs London Spirit and the earlier West Indies vs Pakistan cases).
-      : (m.scoreA || m.scoreB) ? `<div style="text-align:center;margin-top:10px"><span style="display:inline-flex;align-items:center;gap:6px;background:rgba(74,222,128,0.18);color:#bbf7d0;font-weight:700;font-size:12.5px;padding:7px 14px;border-radius:20px">🏆 ${d11DeriveFallbackResultText(m)}</span></div>`
+      : (d11m.scored && (m.scoreA || m.scoreB)) ? `<div style="text-align:center;margin-top:10px"><span style="display:inline-flex;align-items:center;gap:6px;background:rgba(74,222,128,0.18);color:#bbf7d0;font-weight:700;font-size:12.5px;padding:7px 14px;border-radius:20px">🏆 ${d11DeriveFallbackResultText(m)}</span></div>`
       : ''}
     <div class="i11-contest-hero-timer">
       ${locked
@@ -32704,7 +32705,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.31.1";
+const APP_VERSION = "4.31.3";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
