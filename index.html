@@ -1113,6 +1113,19 @@ let forgotStep = 'name'; // 'name' (enter username+email+T-Pin) -> 'newpass' (se
 let forgotEmailPending = ''; // holds the email the OTP was sent to, across steps
 let authError = '';
 let adminTab = 'dream11admin';
+
+// ── News feature — admin syncs latest cricket news from an external news
+// API into Firestore; users browse a read-only list + detail view.
+const NEWS_API_HOST = "cricket-live-line4.p.rapidapi.com";
+const NEWS_API_URL = "https://cricket-live-line4.p.rapidapi.com/apiv5/news/586080c68703a2a19e2984fc323f0008";
+const NEWS_API_KEY = "a957688052msh0344d11d0be5533p1804f8jsnec67a9ab817f";
+let newsArticles = []; // [{news_id, title, description, image, pub_date, content:[html,...]}]
+let newsLoading = false;
+let newsError = null;
+let newsSyncing = false;
+let newsSyncError = null;
+let newsLastSyncedAt = null; // timestamp
+let viewingNewsId = null; // set when user opens a single article
 let activeMatchId = null;
 let predictionAnswers = {};
 let viewingPredictionEmail = null; // for viewing other user's predictions after match ends
@@ -1708,6 +1721,7 @@ function _ensureAdminDataLoaded() {
     typeof _loadLl2ApiLog === 'function' ? _loadLl2ApiLog() : Promise.resolve(),
     typeof _loadLl3ApiLog === 'function' ? _loadLl3ApiLog() : Promise.resolve(),
     typeof _loadLl4ApiLog === 'function' ? _loadLl4ApiLog() : Promise.resolve(),
+    typeof _loadNewsFromFirestore === 'function' ? _loadNewsFromFirestore() : Promise.resolve(),
     typeof _loadLl5ApiLog === 'function' ? _loadLl5ApiLog() : Promise.resolve(),
     typeof _loadSbxApiLog === 'function' ? _loadSbxApiLog() : Promise.resolve(),
   ]).then(() => render()).catch(() => {});
@@ -4776,6 +4790,161 @@ async function submitDeposit() {
   render();
 }
 
+// ── News: load cached articles from Firestore (fast, shown to all users),
+// and a separate admin-triggered sync that hits the news API and refreshes
+// the Firestore cache for everyone.
+async function _loadNewsFromFirestore() {
+  try {
+    const snap = await getDoc(doc(window._fbDb, 'pp_meta', 'news_cache'));
+    if (snap.exists()) {
+      const d = snap.data();
+      newsArticles = Array.isArray(d.articles) ? d.articles : [];
+      newsLastSyncedAt = d.syncedAt || null;
+    }
+  } catch (e) {
+    console.warn('Could not load cached news:', e.message);
+  }
+}
+
+async function loadNewsTab() {
+  newsLoading = true;
+  newsError = null;
+  render();
+  try {
+    await _loadNewsFromFirestore();
+    if (newsArticles.length === 0) {
+      newsError = 'No news available yet — check back soon.';
+    }
+  } catch (e) {
+    console.error(e);
+    newsError = 'Could not load news right now.';
+  } finally {
+    newsLoading = false;
+    render();
+  }
+}
+
+async function adminSyncNews() {
+  newsSyncing = true;
+  newsSyncError = null;
+  render();
+  try {
+    let res;
+    try {
+      res = await fetch(NEWS_API_URL, {
+        headers: {
+          'x-rapidapi-host': NEWS_API_HOST,
+          'x-rapidapi-key': NEWS_API_KEY
+        }
+      });
+    } catch (e) {
+      throw new Error('Could not reach the news API — check your internet connection and try again.');
+    }
+    if (!res.ok) throw new Error(`News API returned HTTP ${res.status}`);
+    const json = await res.json();
+    if (!json || json.status !== true || !Array.isArray(json.data)) {
+      throw new Error('News API returned an unexpected response shape.');
+    }
+    newsArticles = json.data;
+    newsLastSyncedAt = getDateTime();
+    await setDoc(doc(window._fbDb, 'pp_meta', 'news_cache'), {
+      articles: newsArticles,
+      syncedAt: newsLastSyncedAt
+    });
+    showNotif(`✅ Synced ${newsArticles.length} news articles!`);
+  } catch (e) {
+    console.error('News sync failed:', e);
+    newsSyncError = e.message || 'Unknown error';
+    showNotif('Could not sync news — ' + newsSyncError, 'error');
+  } finally {
+    newsSyncing = false;
+    render();
+  }
+}
+
+function goNewsTab() {
+  tab = 'news';
+  viewingNewsId = null;
+  render();
+  window.scrollTo(0,0);
+  if (newsArticles.length === 0) loadNewsTab();
+}
+
+function openNewsArticle(newsId) {
+  viewingNewsId = newsId;
+  render();
+  window.scrollTo(0,0);
+}
+
+function closeNewsArticle() {
+  viewingNewsId = null;
+  render();
+  window.scrollTo(0,0);
+}
+
+function renderNewsTab() {
+  if (viewingNewsId != null) return renderNewsArticleDetail();
+
+  return `
+  <div class="section-title">📰 Latest Cricket News</div>
+  <button class="btn-secondary btn-block mb14" style="font-size:12px;padding:9px" onclick="loadNewsTab()">🔄 Refresh</button>
+  ${newsLoading ? `<div class="empty-state"><div class="empty-icon">📰</div>Loading news…</div>` : ''}
+  ${newsError && !newsLoading ? `<div class="empty-state"><div class="empty-icon">📭</div>${newsError}</div>` : ''}
+  ${!newsLoading ? newsArticles.map(a => `
+    <div class="card mb14" style="padding:0;overflow:hidden;cursor:pointer" onclick="openNewsArticle(${a.news_id})">
+      ${a.image ? `<img src="${a.image}" style="width:100%;height:150px;object-fit:cover;display:block" onerror="this.style.display='none'" />` : ''}
+      <div style="padding:12px 14px">
+        <div style="font-size:13.5px;font-weight:700;line-height:1.4;margin-bottom:6px">${a.title || ''}</div>
+        ${a.description ? `<div style="font-size:11.5px;color:var(--dim);line-height:1.5;margin-bottom:8px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${a.description}</div>` : ''}
+        <div style="font-size:10.5px;color:var(--dim2)">🕒 ${a.pub_date || ''}</div>
+      </div>
+    </div>
+  `).join('') : ''}
+  `;
+}
+
+function renderNewsArticleDetail() {
+  const a = newsArticles.find(x => String(x.news_id) === String(viewingNewsId));
+  if (!a) return `<div class="empty-state"><div class="empty-icon">📭</div>Article not found.</div>
+    <button class="btn-secondary btn-block" onclick="closeNewsArticle()">← Back to News</button>`;
+  const bodyHtml = Array.isArray(a.content) ? a.content.join('') : (a.content || '');
+  return `
+  <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="closeNewsArticle()">← Back to News</button>
+  ${a.image ? `<img src="${a.image}" style="width:100%;max-height:220px;object-fit:cover;border-radius:12px;margin-bottom:14px;display:block" onerror="this.style.display='none'" />` : ''}
+  <div style="font-size:17px;font-weight:800;line-height:1.4;margin-bottom:8px">${a.title || ''}</div>
+  <div style="font-size:11px;color:var(--dim2);margin-bottom:16px">🕒 ${a.pub_date || ''}</div>
+  <div class="news-article-body" style="font-size:13.5px;line-height:1.75;color:var(--text)">${bodyHtml}</div>
+  `;
+}
+
+function renderAdminNews() {
+  return `
+  <div class="section-title">📰 News Sync</div>
+  <div class="card mb14">
+    <div style="font-size:12px;color:var(--dim);margin-bottom:10px">
+      Pulls the latest articles from the news API and publishes them to all users.
+      ${newsLastSyncedAt ? `<br/>Last synced: <b style="color:var(--text)">${newsLastSyncedAt}</b>` : '<br/>Never synced yet.'}
+      <br/>Currently cached: <b style="color:var(--text)">${newsArticles.length}</b> article(s).
+    </div>
+    ${newsSyncError ? `<div style="background:rgba(220,38,38,0.1);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:10px;font-size:12px;color:#f87171;margin-bottom:10px">${newsSyncError}</div>` : ''}
+    <button class="btn-primary btn-block" style="background:linear-gradient(135deg,#eab308,#ca8a04)" onclick="adminSyncNews()" ${newsSyncing ? 'disabled' : ''}>${newsSyncing ? '🔄 Syncing…' : '🔄 Sync Latest News Now'}</button>
+  </div>
+  ${newsArticles.length > 0 ? `
+  <div class="section-title" style="font-size:13px">Cached Articles</div>
+  ${newsArticles.slice(0, 20).map(a => `
+    <div class="card mb10" style="display:flex;gap:10px;align-items:center">
+      ${a.image ? `<img src="${a.image}" style="width:52px;height:52px;object-fit:cover;border-radius:8px;flex-shrink:0" onerror="this.style.display='none'" />` : ''}
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:700;line-height:1.4;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${a.title||''}</div>
+        <div style="font-size:10px;color:var(--dim2)">${a.pub_date||''}</div>
+      </div>
+    </div>
+  `).join('')}
+  ` : ''}
+  `;
+}
+
+
 async function submitWithdraw() {
   const method = document.getElementById('wd-method')?.value;
   const isUsdt = method === 'usdt_bep20';
@@ -5351,6 +5520,7 @@ function _renderInner() {
       ${tab==='compareStats' ? renderCompareStats() : ''}
       ${tab==='deposit' ? renderDeposit() : ''}
       ${tab==='withdraw' ? renderWithdraw() : ''}
+      ${tab==='news' ? renderNewsTab() : ''}
       ${tab==='history' ? renderHistory() : ''}
       ${tab==='referral' ? renderReferral() : ''}
     </div>
@@ -5515,6 +5685,7 @@ function renderHome() {
         <button onclick="goTab('withdraw')" style="background:rgba(220,38,38,0.12);border:1px solid rgba(220,38,38,0.3);color:#f87171;padding:9px 14px;border-radius:10px;font-size:12px;font-weight:700">⬆ Withdraw</button>
       </div>
     </div>
+    <button onclick="goNewsTab()" style="width:100%;margin-top:12px;background:rgba(234,179,8,0.12);border:1px solid rgba(234,179,8,0.3);color:#facc15;padding:10px 14px;border-radius:10px;font-size:12.5px;font-weight:700">📰 News</button>
   </div>
 
   ${(() => {
@@ -26796,6 +26967,7 @@ function renderAdminPanel() {
     <button class="admin-tab ${adminTab==='dream11admin'?'active':''}" onclick="adminTab='dream11admin';render()">🎮 Dream11</button>
     <button class="admin-tab ${adminTab==='recyclebin'?'active':''}" onclick="adminTab='recyclebin';render()">🗑️ Recycle Bin${Array.from(new Set([...Object.keys(deletedMatches), ...Object.keys(deletedDream11Matches)])).length>0 ? ` (${Array.from(new Set([...Object.keys(deletedMatches), ...Object.keys(deletedDream11Matches)])).length})` : ''}</button>
     <button class="admin-tab ${adminTab==='cleanup'?'active':''}" onclick="adminTab='cleanup';render()">🧹 Cleanup</button>
+    <button class="admin-tab ${adminTab==='news'?'active':''}" onclick="adminTab='news';render()">📰 News</button>
   </div>
 
   ${adminTab==='pending' ? renderAdminPending(pendingDep, pendingWd) : ''}
@@ -26805,6 +26977,7 @@ function renderAdminPanel() {
   ${adminTab==='dream11admin' ? renderAdminDream11Section() : ''}
   ${adminTab==='recyclebin' ? renderAdminRecycleBin() : ''}
   ${adminTab==='cleanup' ? renderAdminDuplicateCleanup() : ''}
+  ${adminTab==='news' ? renderAdminNews() : ''}
   `;
 }
 
@@ -32705,7 +32878,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.31.3";
+const APP_VERSION = "4.32.1";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
