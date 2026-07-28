@@ -2612,15 +2612,13 @@ async function _saveD11TournamentToFirestore(tId, data) {
   return setDoc(doc(window._fbDb, 'pp_dream11_tournaments', tId), data)
     .catch(e => { console.error('Dream11 tournament save error:', e); throw e; });
 }
-const D11_CACHE_MAX_AGE_MS = 30 * 1000; // non-admin cache is only used if fresher than this
 async function _loadAllD11TournamentsFromFirestore(forceRefresh) {
   if (!window._fbDb || !window._fbFns) return false;
   const isAdminUser = typeof isAdmin === 'function' && isAdmin();
   if (!forceRefresh && !isAdminUser) {
     try {
-      const cachedAt = Number(localStorage.getItem('pp_dream11_tournaments_cache_at') || 0);
       const cached = localStorage.getItem('pp_dream11_tournaments_cache');
-      if (cached && (Date.now() - cachedAt) < D11_CACHE_MAX_AGE_MS) { d11Tournaments = JSON.parse(cached); return true; }
+      if (cached) { d11Tournaments = JSON.parse(cached); return true; }
     } catch(e){}
   }
   const { collection, getDocs } = window._fbFns;
@@ -2628,10 +2626,7 @@ async function _loadAllD11TournamentsFromFirestore(forceRefresh) {
     const snap = await getDocs(collection(window._fbDb, 'pp_dream11_tournaments'));
     d11Tournaments = {};
     snap.forEach(d => { d11Tournaments[d.id] = d.data(); });
-    try {
-      localStorage.setItem('pp_dream11_tournaments_cache', JSON.stringify(d11Tournaments));
-      localStorage.setItem('pp_dream11_tournaments_cache_at', String(Date.now()));
-    } catch(e){}
+    try { localStorage.setItem('pp_dream11_tournaments_cache', JSON.stringify(d11Tournaments)); } catch(e){}
     return true;
   } catch(e){ return false; }
 }
@@ -2652,9 +2647,8 @@ async function _loadAllUtTournamentsFromFirestore(forceRefresh) {
   const isAdminUser = typeof isAdmin === 'function' && isAdmin();
   if (!forceRefresh && !isAdminUser) {
     try {
-      const cachedAt = Number(localStorage.getItem('pp_ut_tournaments_cache_at') || 0);
       const cached = localStorage.getItem('pp_ut_tournaments_cache');
-      if (cached && (Date.now() - cachedAt) < D11_CACHE_MAX_AGE_MS) { utTournaments = JSON.parse(cached); return true; }
+      if (cached) { utTournaments = JSON.parse(cached); return true; }
     } catch(e){}
   }
   const { collection, getDocs } = window._fbFns;
@@ -2674,10 +2668,7 @@ async function _loadAllUtTournamentsFromFirestore(forceRefresh) {
       }
       utTournaments[d.id] = tData;
     });
-    try {
-      localStorage.setItem('pp_ut_tournaments_cache', JSON.stringify(utTournaments));
-      localStorage.setItem('pp_ut_tournaments_cache_at', String(Date.now()));
-    } catch(e){}
+    try { localStorage.setItem('pp_ut_tournaments_cache', JSON.stringify(utTournaments)); } catch(e){}
     return true;
   } catch(e){ return false; }
 }
@@ -2706,9 +2697,8 @@ async function _loadAllUtTeamsFromFirestore(forceRefresh) {
   const isAdminUser = typeof isAdmin === 'function' && isAdmin();
   if (!forceRefresh && !isAdminUser) {
     try {
-      const cachedAt = Number(localStorage.getItem('pp_ut_teams_cache_at') || 0);
       const cached = localStorage.getItem('pp_ut_teams_cache');
-      if (cached && (Date.now() - cachedAt) < D11_CACHE_MAX_AGE_MS) { utTeams = JSON.parse(cached); return true; }
+      if (cached) { utTeams = JSON.parse(cached); return true; }
     } catch(e){}
   }
   const { collection, getDocs } = window._fbFns;
@@ -2716,10 +2706,7 @@ async function _loadAllUtTeamsFromFirestore(forceRefresh) {
     const snap = await getDocs(collection(window._fbDb, 'pp_ut_teams'));
     utTeams = {};
     snap.forEach(d => { utTeams[d.id] = d.data(); });
-    try {
-      localStorage.setItem('pp_ut_teams_cache', JSON.stringify(utTeams));
-      localStorage.setItem('pp_ut_teams_cache_at', String(Date.now()));
-    } catch(e){}
+    try { localStorage.setItem('pp_ut_teams_cache', JSON.stringify(utTeams)); } catch(e){}
     return true;
   } catch(e){ return false; }
 }
@@ -2941,38 +2928,6 @@ async function handleLogin() {
     if (isAdmin()) _ensureAdminDataLoaded();
     render();
   });
-
-  _startBackgroundAutoRefresh();
-}
-
-// Keeps every logged-in user's screen (not just admin) in sync with
-// Firestore automatically — every 30s, silently, without touching the
-// "🔄 Refresh" button's spinner or interrupting whatever the user is doing.
-let _bgAutoRefreshTimer = null;
-function _startBackgroundAutoRefresh() {
-  if (_bgAutoRefreshTimer) return; // already running
-  _bgAutoRefreshTimer = setInterval(async () => {
-    if (!currentUser) return; // logged out — nothing to refresh
-    try {
-      await Promise.all([
-        typeof _loadAllMatchesFromFirestore === 'function' ? _loadAllMatchesFromFirestore(true) : Promise.resolve(),
-        typeof _loadAllDream11MatchesFromFirestore === 'function' ? _loadAllDream11MatchesFromFirestore(true) : Promise.resolve(),
-        typeof _loadAllDream11TeamsFromFirestore === 'function' ? _loadAllDream11TeamsFromFirestore(true) : Promise.resolve(),
-        typeof _loadAllD11TournamentsFromFirestore === 'function' ? _loadAllD11TournamentsFromFirestore(true) : Promise.resolve(),
-        typeof _loadAllUtTournamentsFromFirestore === 'function' ? _loadAllUtTournamentsFromFirestore(true) : Promise.resolve(),
-        typeof _loadAllUtTeamsFromFirestore === 'function' ? _loadAllUtTeamsFromFirestore(true) : Promise.resolve(),
-      ]);
-      if (currentUser && currentUser.email && typeof users !== 'undefined' && users[currentUser.email]) {
-        currentUser = { ...users[currentUser.email], email: currentUser.email };
-      }
-      render();
-    } catch (e) {
-      console.error('Background auto-refresh failed', e);
-    }
-  }, 30 * 1000); // every 30 seconds
-}
-function _stopBackgroundAutoRefresh() {
-  if (_bgAutoRefreshTimer) { clearInterval(_bgAutoRefreshTimer); _bgAutoRefreshTimer = null; }
 }
 
 async function handleRefreshApp() {
@@ -16977,30 +16932,10 @@ async function d11AutoCheckLl5PlayingXI() {
     }
     if (!windowHit) continue;
 
-    // Atomic claim — same reasoning as the post-deadline sync function
-    // below: prevents two users opening the app in the same instant from
-    // both winning the same window and both calling the paid API.
-    let wonClaim = false;
-    try {
-      const { doc: _doc, runTransaction: _runTx } = window._fbFns;
-      await _runTx(window._fbDb, async (tx) => {
-        const ref = _doc(window._fbDb, 'pp_dream11_matches', m.id);
-        const snap = await tx.get(ref);
-        const serverD11m = snap.exists() ? snap.data() : {};
-        const serverDone = serverD11m.autoLl5PreDeadlineXI || {};
-        if (serverDone[windowHit]) { wonClaim = false; return; }
-        const newDone = { ...serverDone };
-        LL5_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsToDeadline <= w.mins) newDone[w.key] = true; });
-        tx.update(ref, { autoLl5PreDeadlineXI: newDone });
-        wonClaim = true;
-      });
-    } catch (e) {
-      console.warn('Auto LL5 pre-deadline XI claim failed for', m.id, e.message);
-      wonClaim = false;
-    }
-    if (!wonClaim) continue; // another user's tab already won this window
-
-    d11m.autoLl5PreDeadlineXI = { ...done, [windowHit]: true };
+    const newDone = { ...done };
+    LL5_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsToDeadline <= w.mins) newDone[w.key] = true; });
+    d11m.autoLl5PreDeadlineXI = newDone;
+    await _saveDream11MatchToFirestore(m.id, d11m);
     try {
       await d11CheckPlayingXIAnnouncedLl5(m.id, /*silent=*/true);
     } catch (e) {
@@ -17045,41 +16980,15 @@ async function d11AutoSyncLl5PostDeadline() {
     }
     if (!windowHit) continue;
 
-    // Atomic claim via Firestore transaction — if two users open the app
-    // in the same instant, both may see the same window as "due" from
-    // their local (possibly slightly stale) copy of dream11Matches. A
-    // plain read-then-write here would let both win and both call the
-    // paid RapidAPI endpoint. The transaction re-reads the doc from the
-    // server at commit time and only succeeds for whichever caller
-    // commits first; the loser's transaction sees the fields already
-    // updated and its own write becomes a no-op down to "nothing new to
-    // mark", so it skips the API call entirely.
-    let wonClaim = false;
-    try {
-      const { doc: _doc, runTransaction: _runTx } = window._fbFns;
-      await _runTx(window._fbDb, async (tx) => {
-        const ref = _doc(window._fbDb, 'pp_dream11_matches', m.id);
-        const snap = await tx.get(ref);
-        const serverD11m = snap.exists() ? snap.data() : {};
-        const serverDone = serverD11m.autoLl5PostDeadline || {};
-        if (serverDone[windowHit]) {
-          // Someone else already claimed this exact window between our
-          // read and this transaction — nothing to do.
-          wonClaim = false;
-          return;
-        }
-        const newDone = { ...serverDone };
-        LL5_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsSinceDeadline >= w.mins) newDone[w.key] = true; });
-        tx.update(ref, { autoLl5PostDeadline: newDone });
-        wonClaim = true;
-      });
-    } catch (e) {
-      console.warn('Auto LL5 post-deadline claim failed for', m.id, e.message);
-      wonClaim = false;
-    }
-    if (!wonClaim) continue; // another user's tab already won this window — skip the API call
-
-    d11m.autoLl5PostDeadline = { ...done, [windowHit]: true };
+    // Mark every due window (not just the one we're about to fire) as done
+    // FIRST — before the async call — so (a) a second tab running this same
+    // loop a few seconds later doesn't double-fire, and (b) we don't leave
+    // older due windows sitting there to be caught by a later tick and
+    // fire redundantly right after this fresher sync.
+    const newDone = { ...done };
+    LL5_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsSinceDeadline >= w.mins) newDone[w.key] = true; });
+    d11m.autoLl5PostDeadline = newDone;
+    await _saveDream11MatchToFirestore(m.id, d11m);
     try {
       // Sync Now only — NOT Playing XI. Post-deadline the XI is already
       // locked in from the pre-deadline checks; all that's needed now is
@@ -32943,12 +32852,6 @@ async function initApp() {
     // right here on the very next app open (by ANY user or admin) to catch
     // up immediately instead of waiting up to 5 more minutes for the
     // background loop's own next tick.
-    //
-    // Any signed-in user (admin or not) can trigger this catch-up sync.
-    // Firestore rules allow any signed-in user to write the specific
-    // score/XI/points fields this touches (see pp_matches / pp_dream11_matches
-    // rules), so this now succeeds regardless of who happens to open the
-    // app first — not just the admin.
     if (typeof d11AutoCheckLl5PlayingXI === 'function') d11AutoCheckLl5PlayingXI().catch(function(){});
     if (typeof d11AutoSyncLl5PostDeadline === 'function') d11AutoSyncLl5PostDeadline().catch(function(){});
   }).catch(err => {
@@ -33003,8 +32906,6 @@ if ('serviceWorker' in navigator) {
     if(currentUser&&currentUser.email&&users[currentUser.email])
       currentUser={...users[currentUser.email],email:currentUser.email};
     render();
-    // Any signed-in user can run this now — Firestore rules allow any
-    // signed-in user to write the scoped score/XI fields.
     if (typeof d11AutoCheckLl5PlayingXI === 'function') d11AutoCheckLl5PlayingXI().catch(function(){});
     if (typeof d11AutoSyncLl5PostDeadline === 'function') d11AutoSyncLl5PostDeadline().catch(function(){});
     // d11AutoFetchFinalResult removed — final result is now always fetched
@@ -33109,7 +33010,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.39.0";
+const APP_VERSION = "4.35.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
