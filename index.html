@@ -32804,22 +32804,6 @@ async function initApp() {
   ]).then(() => {
     window._homeDataSyncDone = true;
     render();
-    // Catch-up trigger for Cricket Live Line 5 automatic sync (both the
-    // pre-deadline Playing XI check and the post-deadline scorecard sync).
-    // Deliberately wired to THIS fast, 2-collection promise — not the
-    // slower ~13-collection Promise.all further below — because these two
-    // schedulers only ever need `matches` and `dream11Matches`, both of
-    // which are guaranteed populated the moment this .then() runs. Tying it
-    // to the slower Promise.all instead meant that on a poor connection, or
-    // if any one of those other ~11 unrelated collection reads was slow,
-    // the catch-up could be delayed or never fire in that session at all —
-    // while the home screen had already painted stale scores from cache
-    // moments earlier via this same fast path, giving the user nothing to
-    // prompt a wait. This runs for EVERY signed-in user's app open, not
-    // just admin's — that's what actually reaches regular users instead of
-    // only updating when admin's own device happens to be open.
-    if (typeof d11AutoCheckLl5PlayingXI === 'function') d11AutoCheckLl5PlayingXI().catch(function(){});
-    if (typeof d11AutoSyncLl5PostDeadline === 'function') d11AutoSyncLl5PostDeadline().catch(function(){});
   }).catch(() => {
     window._homeDataSyncDone = true; // don't get stuck loading forever even if this pair fails
     render();
@@ -32860,11 +32844,16 @@ async function initApp() {
     }
     window._homeDataSyncDone = true; // real Firestore data has landed — 0/empty now means genuinely empty
     render(); // Re-render with fresh data (silent update)
-    // Note: the Cricket Live Line 5 catch-up trigger (Playing XI +
-    // post-deadline sync) is NOT called here — it already fired above, off
-    // the faster _homeMatchesReady promise, the moment `matches` and
-    // `dream11Matches` were ready (which is all it needs). Calling it again
-    // here would just be a redundant duplicate run every app open.
+    // Catch-up trigger for Cricket Live Line 5 automatic sync (both the
+    // pre-deadline Playing XI check and the post-deadline scorecard sync)
+    // — see each function's own comment for why this exists: the normal
+    // 5-min background loop only runs while some tab is open, so if every
+    // user's app was closed through one or more due windows, this fires
+    // right here on the very next app open (by ANY user or admin) to catch
+    // up immediately instead of waiting up to 5 more minutes for the
+    // background loop's own next tick.
+    if (typeof d11AutoCheckLl5PlayingXI === 'function') d11AutoCheckLl5PlayingXI().catch(function(){});
+    if (typeof d11AutoSyncLl5PostDeadline === 'function') d11AutoSyncLl5PostDeadline().catch(function(){});
   }).catch(err => {
     console.error('[initApp] background Firestore sync failed:', err);
     window._homeDataSyncDone = true; // sync failed, but stop showing a loading skeleton forever — fall back to whatever we have
@@ -33021,7 +33010,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.36.0";
+const APP_VERSION = "4.35.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
