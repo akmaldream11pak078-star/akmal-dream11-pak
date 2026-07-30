@@ -158,15 +158,15 @@
   @keyframes refreshSpin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
 
   /* ── Page ── */
-  .page { padding:18px 16px 10px; max-width:600px; margin:0 auto; animation:fadeIn 0.3s; }
+  .page { padding:14px 13px 8px; max-width:600px; margin:0 auto; animation:fadeIn 0.3s; }
   @keyframes fadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
   .mb10{margin-bottom:10px}.mb14{margin-bottom:14px}.mb18{margin-bottom:18px}.mb22{margin-bottom:22px}
 
   /* ── Cards ── */
   .card {
-    background:var(--card); border:1px solid var(--card-b); border-radius:18px; padding:18px;
+    background:var(--card); border:1px solid var(--card-b); border-radius:15px; padding:14px;
     position:relative;
-    box-shadow:0 8px 24px rgba(0,0,0,0.18);
+    box-shadow:0 6px 18px rgba(0,0,0,0.16);
   }
   .card::before {
     content:''; position:absolute; top:0; left:16px; right:16px; height:1px;
@@ -174,7 +174,7 @@
     border-radius:1px; pointer-events:none;
   }
   html[data-theme="light"] .card::before { background:linear-gradient(90deg, transparent, rgba(184,134,11,0.4), transparent); }
-  .section-title { font-size:13px; font-weight:700; color:var(--dim); text-transform:uppercase; letter-spacing:1px; margin-bottom:12px; display:flex; align-items:center; gap:7px; }
+  .section-title { font-size:12px; font-weight:700; color:var(--dim); text-transform:uppercase; letter-spacing:0.8px; margin-bottom:10px; display:flex; align-items:center; gap:6px; }
 
   /* ── Horizontal scroll row for match cards ── */
   .hscroll-row { display:flex; gap:12px; overflow-x:auto; -webkit-overflow-scrolling:touch; padding-bottom:6px; margin-bottom:14px; scroll-snap-type:x proximity; }
@@ -185,25 +185,25 @@
 
   /* ── Buttons ── */
   .btn-primary {
-    width:100%; padding:15px; border:none; border-radius:14px; font-size:15px; font-weight:700;
+    width:100%; padding:12px; border:none; border-radius:12px; font-size:13.5px; font-weight:700;
     font-family:Rajdhani,sans-serif; letter-spacing:0.4px; color:#0a1f16;
     background:linear-gradient(135deg,#e8c766,#c9a227);
-    box-shadow:0 6px 18px rgba(212,175,55,0.4); transition:transform 0.15s;
+    box-shadow:0 5px 14px rgba(212,175,55,0.35); transition:transform 0.15s;
   }
   .btn-primary:active { transform:scale(0.97); }
-  .btn-orange { background:linear-gradient(135deg,var(--orange),#ea580c); box-shadow:0 6px 18px rgba(249,115,22,0.35); }
+  .btn-orange { background:linear-gradient(135deg,var(--orange),#ea580c); box-shadow:0 5px 14px rgba(249,115,22,0.3); }
   .btn-secondary {
-    width:100%; padding:13px; border:1px solid var(--card-b); border-radius:14px; font-size:14px;
+    width:100%; padding:11px; border:1px solid var(--card-b); border-radius:12px; font-size:12.5px;
     font-weight:600; color:var(--text); background:var(--input-bg);
   }
   .btn-block { width:100%; }
   .btn-disabled { opacity:0.4; pointer-events:none; }
 
   /* ── Inputs ── */
-  .label { font-size:12px; font-weight:600; color:var(--dim); margin-bottom:7px; display:block; }
+  .label { font-size:11.5px; font-weight:600; color:var(--dim); margin-bottom:6px; display:block; }
   .input {
-    width:100%; padding:13px 15px; border-radius:12px; border:1px solid var(--card-b);
-    background:var(--input-bg); color:var(--text); font-size:14.5px; font-family:inherit;
+    width:100%; padding:11px 13px; border-radius:11px; border:1px solid var(--card-b);
+    background:var(--input-bg); color:var(--text); font-size:13.5px; font-family:inherit;
   }
   .input:focus { outline:none; border-color:rgba(212,175,55,0.6); }
   .input::placeholder { color:var(--dim2); }
@@ -258,10 +258,10 @@
   .input-wrap { position:relative; }
 
   /* ── Stat boxes ── */
-  .stat-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-  .stat-box { background:var(--card); border:1px solid var(--card-b); border-radius:16px; padding:16px; text-align:center; }
-  .stat-val { font-family:Rajdhani,sans-serif; font-weight:700; font-size:25px; }
-  .stat-lbl { font-size:11px; color:var(--dim); margin-top:3px; font-weight:600; }
+  .stat-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .stat-box { background:var(--card); border:1px solid var(--card-b); border-radius:13px; padding:12px; text-align:center; }
+  .stat-val { font-family:Rajdhani,sans-serif; font-weight:700; font-size:19px; }
+  .stat-lbl { font-size:10px; color:var(--dim); margin-top:2px; font-weight:600; }
 
   /* ── Match card (signature element: prediction slip) ── */
   .match-slip {
@@ -568,19 +568,19 @@
 .i11-section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
 .i11-section-title{font-size:15px;font-weight:800;color:var(--text);}
 .i11-section-link{font-size:12px;font-weight:700;color:#dc2626;}
-.i11-match-banner{border-radius:14px;overflow:hidden;background:#161b2e;border:1px solid rgba(255,255,255,0.08);box-shadow:0 2px 10px rgba(0,0,0,0.25);margin-bottom:14px;}
+.i11-match-banner{border-radius:12px;overflow:hidden;background:#161b2e;border:1px solid rgba(255,255,255,0.08);box-shadow:0 2px 10px rgba(0,0,0,0.25);margin-bottom:10px;}
 html[data-theme="light"] .i11-match-banner{background:#fff;border-color:rgba(15,23,42,0.08);box-shadow:0 2px 10px rgba(0,0,0,0.06);}
-.i11-match-banner-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:linear-gradient(115deg,#dc2626 46%,#111827 46%);}
-.i11-match-banner-title{display:flex;align-items:center;gap:8px;color:#fff;font-weight:800;font-size:14px;}
-.i11-match-banner-body{padding:12px 14px;}
-.i11-team-row{display:flex;align-items:center;gap:12px;background:rgba(220,38,38,0.12);border-radius:10px;padding:10px 12px;margin-bottom:8px;}
+.i11-match-banner-head{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;background:linear-gradient(115deg,#dc2626 46%,#111827 46%);}
+.i11-match-banner-title{display:flex;align-items:center;gap:8px;color:#fff;font-weight:800;font-size:12.5px;}
+.i11-match-banner-body{padding:10px 12px;}
+.i11-team-row{display:flex;align-items:center;gap:10px;background:rgba(220,38,38,0.12);border-radius:9px;padding:7px 10px;margin-bottom:6px;}
 html[data-theme="light"] .i11-team-row{background:rgba(220,38,38,0.06);}
 .i11-team-row:last-child{margin-bottom:0;}
-.i11-team-flag{font-size:24px;line-height:1;width:30px;text-align:center;}
-.i11-team-name{font-weight:800;font-size:14.5px;color:var(--text);flex:1;}
-.i11-team-code{font-weight:800;font-size:13px;color:var(--text);width:34px;}
-.i11-countdown-badge{font-size:11px;font-weight:700;color:#dc2626;}
-.i11-status-pill{font-size:10.5px;font-weight:800;padding:4px 10px;border-radius:8px;background:#dc2626;color:#fff;}
+.i11-team-flag{font-size:19px;line-height:1;width:24px;text-align:center;}
+.i11-team-name{font-weight:800;font-size:12.5px;color:var(--text);flex:1;}
+.i11-team-code{font-weight:800;font-size:11px;color:var(--text);width:28px;}
+.i11-countdown-badge{font-size:10px;font-weight:700;color:#dc2626;}
+.i11-status-pill{font-size:9.5px;font-weight:800;padding:3px 8px;border-radius:7px;background:#dc2626;color:#fff;}
 .i11-status-pill.live{background:#16a34a;}
 .i11-status-pill.finished{background:#64748b;}
 .i11-fair-play{display:flex;align-items:center;gap:6px;font-size:11px;color:#16a34a;font-weight:700;padding:10px 14px;border-top:1px solid rgba(255,255,255,0.06);}
@@ -598,9 +598,9 @@ html[data-theme="light"] .i11-fair-play{border-top-color:rgba(15,23,42,0.06);}
 .i11-contest-hero-vs{width:30px;height:30px;border-radius:50%;background:rgba(0,0,0,0.25);color:#fff;font-weight:800;font-size:11px;display:flex;align-items:center;justify-content:center;}
 .i11-contest-hero-timer{display:flex;justify-content:center;margin-top:12px;}
 .i11-contest-hero-timer span{background:rgba(0,0,0,0.2);color:#fde68a;font-weight:700;font-size:12px;padding:6px 14px;border-radius:20px;}
-.i11-contest-tabs{display:flex;background:rgba(255,255,255,0.06);border-radius:12px;padding:4px;margin-bottom:14px;}
+.i11-contest-tabs{display:flex;background:rgba(255,255,255,0.06);border-radius:11px;padding:3px;margin-bottom:10px;}
 html[data-theme="light"] .i11-contest-tabs{background:rgba(15,23,42,0.04);}
-.i11-contest-tab{flex:1;text-align:center;padding:10px 6px;font-size:12.5px;font-weight:700;border:none;background:transparent;border-radius:9px;cursor:pointer;color:var(--dim);}
+.i11-contest-tab{flex:1;text-align:center;padding:8px 6px;font-size:11.5px;font-weight:700;border:none;background:transparent;border-radius:8px;cursor:pointer;color:var(--dim);}
 .i11-contest-tab.active{background:#dc2626;color:#fff;}
 .i11-prize-card{border-radius:14px;background:#161b2e;border:1px solid rgba(255,255,255,0.08);box-shadow:0 2px 10px rgba(0,0,0,0.2);padding:14px;margin-bottom:14px;}
 html[data-theme="light"] .i11-prize-card{background:#fff;border-color:rgba(15,23,42,0.08);box-shadow:0 2px 10px rgba(0,0,0,0.05);}
@@ -5718,15 +5718,15 @@ function renderHome() {
   <div class="card mb18" style="background:linear-gradient(135deg,rgba(37,99,235,0.13),rgba(249,115,22,0.08));border-color:rgba(37,99,235,0.3)">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <div>
-        <div style="font-size:12px;color:var(--dim);font-weight:600">Wallet Balance</div>
-        <div class="display" style="font-size:26px;color:var(--text);margin-top:2px">Rs ${(u.balance||0).toFixed(2)}</div>
+        <div style="font-size:11px;color:var(--dim);font-weight:600">Wallet Balance</div>
+        <div class="display" style="font-size:20px;color:var(--text);margin-top:2px">Rs ${(u.balance||0).toFixed(2)}</div>
       </div>
-      <div style="display:flex;gap:8px">
-        <button onclick="goTab('deposit')" style="background:rgba(22,163,74,0.15);border:1px solid rgba(22,163,74,0.35);color:#4ade80;padding:9px 14px;border-radius:10px;font-size:12px;font-weight:700">⬇ Deposit</button>
-        <button onclick="goTab('withdraw')" style="background:rgba(220,38,38,0.12);border:1px solid rgba(220,38,38,0.3);color:#f87171;padding:9px 14px;border-radius:10px;font-size:12px;font-weight:700">⬆ Withdraw</button>
+      <div style="display:flex;gap:6px">
+        <button onclick="goTab('deposit')" style="background:rgba(22,163,74,0.15);border:1px solid rgba(22,163,74,0.35);color:#4ade80;padding:7px 11px;border-radius:9px;font-size:11px;font-weight:700">⬇ Deposit</button>
+        <button onclick="goTab('withdraw')" style="background:rgba(220,38,38,0.12);border:1px solid rgba(220,38,38,0.3);color:#f87171;padding:7px 11px;border-radius:9px;font-size:11px;font-weight:700">⬆ Withdraw</button>
       </div>
     </div>
-    <button onclick="goNewsTab()" style="width:100%;margin-top:12px;background:rgba(234,179,8,0.12);border:1px solid rgba(234,179,8,0.3);color:#facc15;padding:10px 14px;border-radius:10px;font-size:12.5px;font-weight:700">📰 News</button>
+    <button onclick="goNewsTab()" style="width:100%;margin-top:10px;background:rgba(234,179,8,0.12);border:1px solid rgba(234,179,8,0.3);color:#facc15;padding:8px 12px;border-radius:9px;font-size:11.5px;font-weight:700">📰 News</button>
   </div>
 
   ${(() => {
@@ -25607,7 +25607,8 @@ function renderDream11Hub() {
   ${(() => {
     const completedCount = eligible.filter(m => {
       const d11m = dream11Matches[m.id];
-      return d11m && d11m.published && d11m.scored;
+      if (!d11m || !d11m.published || !d11m.scored) return false;
+      return Object.values(dream11Teams).some(t => t.matchId === m.id && t.userEmail === currentUser.email);
     }).length;
     return `<button class="btn-secondary btn-block mb14" style="background:rgba(74,222,128,0.1);border-color:rgba(74,222,128,0.3);color:#4ade80" onclick="tab='dream11Completed';render();window.scrollTo(0,0)">🏁 Completed Matches${completedCount > 0 ? ` (${completedCount})` : ''}</button>`;
   })()}
@@ -25692,14 +25693,15 @@ function renderDream11CompletedMatches() {
   const eligible = Object.values(matches).filter(m => m.sport === 'cricket' || dream11Matches[m.id]);
   const completed = eligible.filter(m => {
     const d11m = dream11Matches[m.id];
-    return d11m && d11m.published && d11m.scored;
+    if (!d11m || !d11m.published || !d11m.scored) return false;
+    return Object.values(dream11Teams).some(t => t.matchId === m.id && t.userEmail === currentUser.email);
   }).sort((a,b) => new Date(b.deadline||0) - new Date(a.deadline||0));
 
   return `
   <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="goDream11Hub()">← Back to Dream11</button>
   <div class="section-title">🏁 Completed Matches</div>
 
-  ${completed.length === 0 ? `<div class="empty-state"><div class="empty-icon">🏁</div>No completed matches yet.<br/>Results will appear here once a contest finishes.</div>` : `
+  ${completed.length === 0 ? `<div class="empty-state"><div class="empty-icon">🏁</div>No completed matches yet.<br/>Matches you joined will appear here once results are out.</div>` : `
   <div class="hscroll-row">${completed.map(m => {
     const d11m = dream11Matches[m.id];
     const myTeam = Object.values(dream11Teams).find(t => t.matchId === m.id && t.userEmail === currentUser.email);
@@ -33810,7 +33812,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.37.0";
+const APP_VERSION = "4.38.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
