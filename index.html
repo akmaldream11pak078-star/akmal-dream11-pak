@@ -19805,6 +19805,38 @@ function d11ConfirmPasteStats() {
 // in-progress scores aren't final yet and would pollute the history with
 // numbers that later change.
 const PLAYER_HISTORY_MAX_ENTRIES = 10; // keep a bit more than the 3 we display, in case that's ever increased
+// ── User: "Last Match Playing 11" — for a team name (e.g. "India"), finds
+// that team's most recent OTHER scored match and returns its confirmed
+// Playing XI, so a user picking today's team can see who played last time.
+// Matched purely by team name string (case-insensitive) since squads are
+// per-match player pools with no shared player IDs across matches.
+function d11LastPlayingXIForTeam(teamName, excludeMatchId) {
+  const name = (teamName || '').trim().toLowerCase();
+  if (!name) return null;
+  let best = null; // { matchLabel, matchDate, side, players: [...] }
+  Object.keys(dream11Matches).forEach(mid => {
+    if (mid === excludeMatchId) return;
+    const d11m = dream11Matches[mid];
+    const m = matches[mid];
+    if (!d11m || !m || !d11m.scored) return;
+    const isA = (m.teamA || '').trim().toLowerCase() === name;
+    const isB = (m.teamB || '').trim().toLowerCase() === name;
+    if (!isA && !isB) return;
+    const matchDate = m.deadline || 0;
+    if (best && matchDate <= best.matchDate) return;
+    const side = isA ? 'A' : 'B';
+    const xi = (d11m.players || []).filter(p => p.side === side && p.isPlayingXI);
+    if (!xi.length) return; // no confirmed XI recorded for that match — not useful to show
+    best = {
+      matchLabel: `${m.teamA||'Team A'} vs ${m.teamB||'Team B'}`,
+      matchDate,
+      side,
+      players: xi
+    };
+  });
+  return best;
+}
+
 function d11RecordPlayerHistoryForMatch(matchId) {
   const m = matches[matchId];
   const d11m = dream11Matches[matchId];
@@ -19977,6 +20009,12 @@ async function d11RunAllRefunds(matchId) {
     localStorage.setItem('pp_dream11_h2h_cache', JSON.stringify(d11h2hContests));
   } catch(e){}
 
+  if (d11m) {
+    d11m.payoutsAllDone = false;
+    d11m.payoutsAllDoneAt = null;
+    await _saveDream11MatchToFirestore(matchId, d11m);
+  }
+
   render();
   showNotif(`✅ Refunds complete — ${refundCount} entries refunded 💰`);
 }
@@ -20095,6 +20133,10 @@ async function d11UndoAllPayouts(matchId) {
     localStorage.setItem('pp_dream11_custom_contests_cache', JSON.stringify(d11CustomContests));
   } catch(e){}
 
+  d11m.payoutsAllDone = false;
+  d11m.payoutsAllDoneAt = null;
+  await _saveDream11MatchToFirestore(matchId, d11m);
+
   render();
   if (reversedCount === 0) {
     showNotif('Kuch reverse karne ko nahi mila — is match par koi winning prize pehle se distributed nahi hai.', 'error');
@@ -20175,6 +20217,10 @@ async function d11RunAllPayouts(matchId) {
   await finalizeD11TrioContests(matchId);
   await finalizeD11CustomContests(matchId);
   await d11CheckTournamentsForMatch(matchId);
+
+  d11m.payoutsAllDone = true;
+  d11m.payoutsAllDoneAt = getDateTime();
+  await _saveDream11MatchToFirestore(matchId, d11m);
 
   render();
   showNotif('✅ Payouts complete — Mega, H2H & Custom Contest winners ko amount mil gaya 💰');
@@ -26392,7 +26438,14 @@ function renderDream11BuildTeam() {
 
   const sideAAll = d11SortXIFirst(d11m.players.filter(p => p.side === 'A'));
   const sideBAll = d11SortXIFirst(d11m.players.filter(p => p.side === 'B'));
-  const matchesTab = (p) => d11BuildTeamRoleTab === 'ALL' || p.role === d11BuildTeamRoleTab;
+  const lastXIA = d11LastPlayingXIForTeam(m.teamA, d11TeamDraft.matchId);
+  const lastXIB = d11LastPlayingXIForTeam(m.teamB, d11TeamDraft.matchId);
+  const lastXINameSet = new Set([
+    ...((lastXIA?.players)||[]).map(p => (p.name||'').trim().toLowerCase()),
+    ...((lastXIB?.players)||[]).map(p => (p.name||'').trim().toLowerCase())
+  ]);
+  const hasLastXIData = lastXINameSet.size > 0;
+  const matchesTab = (p) => d11BuildTeamRoleTab === 'ALL' || (d11BuildTeamRoleTab === 'LAST11' ? lastXINameSet.has((p.name||'').trim().toLowerCase()) : p.role === d11BuildTeamRoleTab);
   const sideA = sideAAll.filter(matchesTab);
   const sideB = sideBAll.filter(matchesTab);
   const maxRows = Math.max(sideA.length, sideB.length);
@@ -26433,6 +26486,7 @@ function renderDream11BuildTeam() {
 
   <div class="d11-role-tabs">
     ${roleTab('ALL', `All (${d11m.players.length})`)}
+    ${hasLastXIData ? roleTab('LAST11', `📋 Last 11 (${lastXINameSet.size})`) : ''}
     ${roleTab('WK', `WK (${sideAAll.concat(sideBAll).filter(p=>p.role==='WK').length})`)}
     ${roleTab('BAT', `BAT (${sideAAll.concat(sideBAll).filter(p=>p.role==='BAT').length})`)}
     ${roleTab('AR', `AR (${sideAAll.concat(sideBAll).filter(p=>p.role==='AR').length})`)}
@@ -27426,8 +27480,9 @@ function _d11AdminMatchCard(m) {
         ${d11m?.scored ? `<span class="match-status status-completed">✅ SCORED</span>` : dLocked ? `<span class="match-status status-live">LOCKED</span>` : `<span class="match-status status-upcoming">OPEN</span>`}
       </div>
       ${m.seriesName ? `<div style="font-size:10.5px;font-weight:700;color:#c084fc;margin-bottom:6px">🏆 ${m.seriesName}</div>` : ''}
-      <div style="margin-bottom:8px">
+      <div style="margin-bottom:8px;display:flex;flex-wrap:wrap;gap:6px">
         ${d11m?.published ? `<span class="match-status" style="background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.35)">🟢 PUBLISHED</span>` : `<span class="match-status" style="background:rgba(234,179,8,0.15);color:#facc15;border:1px solid rgba(234,179,8,0.35)">🔒 UNPUBLISHED</span>`}
+        ${(d11m?.payoutsAllDone || d11m?.megaDistributed || d11m?.miniMegaDistributed || d11m?.slot20Distributed) ? `<span class="match-status" style="background:rgba(74,222,128,0.15);color:#4ade80;border:1px solid rgba(74,222,128,0.35)" title="${d11m.payoutsAllDoneAt||''}">💰 PAYOUTS DONE</span>` : ''}
       </div>
       <div style="font-size:11px;color:var(--dim);margin-bottom:8px">
         👥 ${playerCount} players &nbsp;|&nbsp; 🏏 ${xiCount} XI &nbsp;|&nbsp; 📋 ${tc} teams &nbsp;|&nbsp; ⏰ ${deadlineStr}
