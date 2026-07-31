@@ -6369,10 +6369,21 @@ function renderHome() {
   </div>
 
   ${(() => {
-    // Show published Dream11 matches on home screen, split into Upcoming / Live / Completed tabs
+    // Show published Dream11 matches on home screen, split into Upcoming / Live / Completed tabs.
+    // IMPORTANT: matches loaded via the summary doc (pp_dream11_summary) only
+    // carry `playersCount` (a number), not the full `players[]` array — that
+    // only exists once d11EnsureFullMatch() has loaded the real doc for a
+    // specific match (e.g. when its detail screen is opened). Checking
+    // `.players.length` here silently dropped every summary-only match from
+    // Home (players was undefined), which is why Home showed 0 upcoming/live
+    // matches even though the Admin Panel showed them as published. Falling
+    // back to playersCount fixes this without requiring a full-doc load just
+    // to show the home list.
     const publishedD11 = Object.values(matches).filter(m => {
       const d11m = dream11Matches[m.id];
-      return d11m && d11m.published && d11m.players.length >= D11_TEAM_SIZE;
+      if (!d11m || !d11m.published) return false;
+      const count = d11m.players ? d11m.players.length : (d11m.playersCount || 0);
+      return count >= D11_TEAM_SIZE;
     });
     const homeUpcoming = publishedD11.filter(m => m.status !== 'live' && !isD11Locked(m.id) && !dream11Matches[m.id].scored)
       .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0)); // soonest upcoming first
@@ -26281,7 +26292,9 @@ function renderDream11Hub() {
   ${(() => {
     const visible = eligible.filter(m => {
       const d11m = dream11Matches[m.id];
-      return d11m && d11m.published && d11m.players.length >= D11_TEAM_SIZE && !d11m.scored;
+      if (!d11m || !d11m.published || d11m.scored) return false;
+      const count = d11m.players ? d11m.players.length : (d11m.playersCount || 0);
+      return count >= D11_TEAM_SIZE;
     });
     if (visible.length === 0) return `<div class="empty-state"><div class="empty-icon">🎮</div>No active Dream11 contests right now.<br/>Check Completed Matches above, or new contests coming soon!</div>`;
     return `<div class="hscroll-row">${visible.map(m => {
@@ -33125,7 +33138,8 @@ function renderUtDashboard() {
       // hasn't passed) and not already scored/completed. Previously any
       // published match was listed here regardless of status, so a UT owner
       // could add a match that had already gone live or finished.
-      return d11m && d11m.published && d11m.players && d11m.players.length >= D11_TEAM_SIZE
+      const count = d11m && d11m.players ? d11m.players.length : (d11m ? (d11m.playersCount || 0) : 0);
+      return d11m && d11m.published && count >= D11_TEAM_SIZE
           && !t.matches[m.id] && !d11m.scored && !isD11Locked(m.id);
     });
     return `
@@ -34514,7 +34528,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.42.3";
+const APP_VERSION = "4.42.4";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
