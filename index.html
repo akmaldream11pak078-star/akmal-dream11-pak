@@ -6314,6 +6314,34 @@ function renderHome() {
   const d11PointsSum = d11Stats.history.reduce((sum, h) => sum + (h.points || 0), 0);
   const totalPoints = (u.points || 0) + d11PointsSum;
 
+  // ── RACE-CONDITION SELF-HEAL ──────────────────────────────────────────
+  // Home's numbers depend on THREE async loads landing (match summaries,
+  // this user's teams, and any _summaryOnly match maturing into a full
+  // doc). Each fires its own render() when it resolves, but that render()
+  // paints whichever tab is CURRENT at that moment — if the person left
+  // Home and came back before a load resolved, that load's render() call
+  // still happens, but it's not guaranteed to be the render() that draws
+  // Home with the fresh data already in memory (confirmed bug: Home shows
+  // 0/0 on direct arrival, then correct numbers after navigating away and
+  // back — the data was already in memory both times, it just never got
+  // painted the first time). Rather than chase the exact interleaving,
+  // detect "this paint of Home still looks empty while data may already
+  // be in flight or has just landed" and schedule one extra repaint shortly
+  // after — cheap (just a repaint, 0 extra reads) and self-corrects
+  // regardless of which async path was the one that raced.
+  if (d11Stats.totalPlayed === 0 && !window._homeSelfHealScheduled) {
+    const hasAnyTeams = Object.keys(dream11Teams||{}).some(k => dream11Teams[k]?.userEmail === currentUser.email);
+    const stillLoading = (typeof _d11TeamsUserFetchInFlight !== 'undefined' && _d11TeamsUserFetchInFlight.has(currentUser.email))
+      || !window._homeDataSyncDone;
+    if (hasAnyTeams || stillLoading) {
+      window._homeSelfHealScheduled = true;
+      setTimeout(() => {
+        window._homeSelfHealScheduled = false;
+        if (typeof tab !== 'undefined' && tab === 'home') { try { render(); } catch(e){} }
+      }, 900);
+    }
+  }
+
   return `
   <div class="stat-grid mb14">
     <div class="stat-box">
@@ -34486,7 +34514,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.42.1";
+const APP_VERSION = "4.42.2";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
