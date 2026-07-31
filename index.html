@@ -2455,11 +2455,130 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
 async function _loadAllMatchesFromFirestore(forceRefresh, isAppOpen) {
   return _liveLoadCollection('pp_matches', () => matches, (v) => { matches = v; }, 'pp_matches_cache', { rerenderOnUpdate: true }, forceRefresh, isAppOpen);
 }
+// ── READS-QUOTA FIX: generic full-doc summary aggregator ──────────────────
+// Same pattern as pp_dream11_summary/main (see _updateDream11SummaryEntry
+// above), generalized for any small-doc collection. Since these docs are
+// already lightweight (no heavy players[]-style array), the summary stores
+// each entry's FULL data rather than a stripped subset — list screens read
+// this ONE document (1 read) instead of one read per entry. Kept in sync
+// automatically because every collection's single save/delete function
+// (below) calls this right after the real write succeeds. If a collection
+// grows into the thousands-of-entries range, revisit this (1MB doc size
+// limit) — fine for normal H2H/custom-contest volumes.
+const _genericSummaryCache = {}; // { collectionName: { entries: {...} } }
+async function _updateGenericSummaryEntry(summaryCollection, entryId, data) {
+  if (!window._fbDb || !window._fbFns) return;
+  try {
+    const { doc, getDoc, setDoc } = window._fbFns;
+    const ref = doc(window._fbDb, summaryCollection, 'main');
+    if (!_genericSummaryCache[summaryCollection]) {
+      const snap = await getDoc(ref);
+      _genericSummaryCache[summaryCollection] = snap.exists() ? (snap.data().entries || {}) : {};
+    }
+    _genericSummaryCache[summaryCollection][entryId] = data;
+    await setDoc(ref, { entries: _genericSummaryCache[summaryCollection], updatedAt: Date.now() });
+  } catch(e) {
+    console.warn(summaryCollection + ' summary sync skipped:', e.message);
+  }
+}
+async function _removeGenericSummaryEntry(summaryCollection, entryId) {
+  if (!window._fbDb || !window._fbFns) return;
+  try {
+    const { doc, getDoc, setDoc } = window._fbFns;
+    const ref = doc(window._fbDb, summaryCollection, 'main');
+    if (!_genericSummaryCache[summaryCollection]) {
+      const snap = await getDoc(ref);
+      _genericSummaryCache[summaryCollection] = snap.exists() ? (snap.data().entries || {}) : {};
+    }
+    delete _genericSummaryCache[summaryCollection][entryId];
+    await setDoc(ref, { entries: _genericSummaryCache[summaryCollection], updatedAt: Date.now() });
+  } catch(e) {
+    console.warn(summaryCollection + ' summary removal skipped:', e.message);
+  }
+}
+// Loads the ENTIRE collection in exactly 1 read via its summary doc. Falls
+// back (returns null) if unreachable — caller should keep using whatever's
+// already cached locally in that case, never block rendering on this.
+async function _loadGenericSummary(summaryCollection, forceRefresh) {
+  if (_genericSummaryCache[summaryCollection] && !forceRefresh) return _genericSummaryCache[summaryCollection];
+  if (!window._fbDb || !window._fbFns) return null;
+  try {
+    const { doc, getDoc } = window._fbFns;
+    const snap = await getDoc(doc(window._fbDb, summaryCollection, 'main'));
+    _genericSummaryCache[summaryCollection] = snap.exists() ? (snap.data().entries || {}) : {};
+    return _genericSummaryCache[summaryCollection];
+  } catch(e) {
+    console.warn(summaryCollection + ' summary load failed:', e.message);
+    return null;
+  }
+}
+// Summary-first loader for a small-doc collection — mirrors
+// d11LoadMatchesSummaryFirst's shape (including one-time backfill from the
+// full collection if the summary doc doesn't exist yet), generalized so it
+// doesn't have to be re-written per collection. `realCollectionName` is the
+// actual data collection (e.g. 'pp_h2h'); `summaryCollectionName` is where
+// the aggregate doc lives (e.g. 'pp_h2h_summary'); `targetSetter`/`targetGetter`
+// read/write the in-memory object (e.g. h2hContests); `backfillFlagKey` is a
+// unique window.* flag name so the one-time backfill can't double-run.
+async function _loadGenericSummaryFirst(realCollectionName, summaryCollectionName, targetGetter, targetSetter, cacheKey, backfillFlagKey, forceRefresh) {
+  let summary = await _loadGenericSummary(summaryCollectionName, forceRefresh);
+  if (summary === null) {
+    if (!window._fbDb || !window._fbFns) return false;
+  }
+  if (!summary || Object.keys(summary).length === 0) {
+    // ── ONE-TIME BACKFILL ── same rationale as d11LoadMatchesSummaryFirst:
+    // summary doc missing/empty (first run after this feature shipped, or a
+    // genuinely empty collection) — do a single full-collection read, build
+    // the summary from it, write it back. Every future load (this device
+    // and every other device/user) becomes a 1-read summary fetch after this.
+    const inFlightKey = backfillFlagKey + 'InFlight';
+    const doneKey = backfillFlagKey + 'Done';
+    if (window[doneKey] || window[inFlightKey]) return false;
+    window[inFlightKey] = true;
+    try {
+      if (!window._fbDb || !window._fbFns || !window._fbFns.collection || !window._fbFns.getDocs) return false;
+      const { collection, getDocs } = window._fbFns;
+      const snap = await getDocs(collection(window._fbDb, realCollectionName));
+      const obj = {};
+      snap.forEach(d => { obj[d.id] = d.data(); });
+      targetSetter(obj);
+      try { localStorage.setItem(cacheKey, JSON.stringify(obj)); } catch(e){}
+      _genericSummaryCache[summaryCollectionName] = { ...obj };
+      const { doc, setDoc } = window._fbFns;
+      await setDoc(doc(window._fbDb, summaryCollectionName, 'main'), { entries: obj, updatedAt: Date.now() });
+      window[doneKey] = true;
+      return true;
+    } catch(e) {
+      console.warn(realCollectionName + ' summary backfill failed:', e.message);
+      return false;
+    } finally {
+      window[inFlightKey] = false;
+    }
+  }
+  targetSetter({ ...summary });
+  try { localStorage.setItem(cacheKey, JSON.stringify(summary)); } catch(e){}
+  return true;
+}
+
 async function _saveH2HToFirestore(h2hId, data) {
   if (!window._fbDb || !window._fbFns) return;
   const { doc, setDoc } = window._fbFns;
-  return setDoc(doc(window._fbDb, 'pp_h2h', h2hId), _stampUpdatedAt(data))
+  const stamped = _stampUpdatedAt(data);
+  return setDoc(doc(window._fbDb, 'pp_h2h', h2hId), stamped)
+    .then(() => _updateGenericSummaryEntry('pp_h2h_summary', h2hId, stamped))
     .catch(e => { console.error('H2H save error:', e); throw e; });
+}
+async function _deleteH2HFromFirestore(h2hId) {
+  if (!window._fbDb || !window._fbFns) return;
+  const { doc, deleteDoc } = window._fbFns;
+  try { await deleteDoc(doc(window._fbDb, 'pp_h2h', h2hId)); } catch(e){}
+  _removeGenericSummaryEntry('pp_h2h_summary', h2hId);
+}
+// Preferred entry point for the H2H list screen — 1 read via summary
+// instead of 1 read per H2H contest. _loadAllH2HFromFirestore below still
+// works unchanged for anything that genuinely needs a live listener.
+async function loadH2HSummaryFirst(forceRefresh) {
+  return _loadGenericSummaryFirst('pp_h2h', 'pp_h2h_summary', () => h2hContests, (v) => { h2hContests = v; }, 'pp_h2h_cache', '_h2hSummaryBackfill', forceRefresh);
 }
 async function _loadAllH2HFromFirestore(forceRefresh, isAppOpen) {
   return _liveLoadCollection('pp_h2h', () => h2hContests, (v) => { h2hContests = v; }, 'pp_h2h_cache', { rerenderOnUpdate: true }, forceRefresh, isAppOpen);
@@ -2467,8 +2586,19 @@ async function _loadAllH2HFromFirestore(forceRefresh, isAppOpen) {
 async function _saveCustomContestToFirestore(ccId, data) {
   if (!window._fbDb || !window._fbFns) return;
   const { doc, setDoc } = window._fbFns;
-  return setDoc(doc(window._fbDb, 'pp_custom_contests', ccId), _stampUpdatedAt(data))
+  const stamped = _stampUpdatedAt(data);
+  return setDoc(doc(window._fbDb, 'pp_custom_contests', ccId), stamped)
+    .then(() => _updateGenericSummaryEntry('pp_custom_contests_summary', ccId, stamped))
     .catch(e => { console.error('Custom contest save error:', e); throw e; });
+}
+async function _deleteCustomContestFromFirestore(ccId) {
+  if (!window._fbDb || !window._fbFns) return;
+  const { doc, deleteDoc } = window._fbFns;
+  try { await deleteDoc(doc(window._fbDb, 'pp_custom_contests', ccId)); } catch(e){}
+  _removeGenericSummaryEntry('pp_custom_contests_summary', ccId);
+}
+async function loadCustomContestsSummaryFirst(forceRefresh) {
+  return _loadGenericSummaryFirst('pp_custom_contests', 'pp_custom_contests_summary', () => customContests, (v) => { customContests = v; }, 'pp_custom_contests_cache', '_ccSummaryBackfill', forceRefresh);
 }
 async function _loadAllCustomContestsFromFirestore(forceRefresh, isAppOpen) {
   return _liveLoadCollection('pp_custom_contests', () => customContests, (v) => { customContests = v; }, 'pp_custom_contests_cache', { rerenderOnUpdate: true }, forceRefresh, isAppOpen);
@@ -2477,7 +2607,92 @@ async function _saveDream11MatchToFirestore(matchId, data) {
   if (!window._fbDb || !window._fbFns) return;
   const { doc, setDoc } = window._fbFns;
   return setDoc(doc(window._fbDb, 'pp_dream11_matches', matchId), _stampUpdatedAt(data))
+    .then(() => _updateDream11SummaryEntry(matchId, data))
     .catch(e => { console.error('Dream11 match save error:', e); throw e; });
+}
+
+// ── READS-QUOTA FIX: aggregation pattern for the Dream11 matches LIST ────
+// Home / Dream11 hub / admin match lists only ever need a handful of small
+// fields per match (published/scored flags + 4 participant counts) to draw
+// each card — never the full match doc, which also carries the entire
+// `players[]` squad array (often 500KB+ once photos/stats are in there).
+// Reading the full collection just to draw list cards was the 2nd biggest
+// driver of the project's read volume after the teams-collection fix.
+//
+// Fix: maintain ONE small document, pp_dream11_summary/main, holding a
+// { [matchId]: { published, scored, playersCount, megaCount,
+// miniMegaCount, freeCount, updatedAt } } map for every Dream11 match.
+// List screens read this ONE document (1 read) instead of the whole
+// collection (1 read per match). Opening a specific match still reads
+// that match's own full document directly — this does not change.
+//
+// Kept in sync automatically: every write to a match's Dream11 doc already
+// funnels through _saveDream11MatchToFirestore or
+// _updateDream11MatchScoringFields (112 + 4 call sites respectively) — both
+// now call this after the real write succeeds, so no other code needs to
+// know the summary document exists.
+function _d11SummaryFieldsFor(data) {
+  return {
+    published: !!data.published,
+    scored: !!data.scored,
+    playersCount: (data.players || []).length,
+    megaCount: (data.megaParticipants || []).length,
+    miniMegaCount: (data.miniMegaParticipants || []).length,
+    freeCount: (data.freeParticipants || []).length,
+    updatedAt: Date.now(),
+  };
+}
+let _d11SummaryCache = null; // in-memory mirror of pp_dream11_summary/main's `matches` map, so repeated updates in the same session don't need a getDoc first
+async function _updateDream11SummaryEntry(matchId, data) {
+  if (!window._fbDb || !window._fbFns) return;
+  try {
+    const { doc, getDoc, setDoc } = window._fbFns;
+    const ref = doc(window._fbDb, 'pp_dream11_summary', 'main');
+    if (!_d11SummaryCache) {
+      const snap = await getDoc(ref);
+      _d11SummaryCache = snap.exists() ? (snap.data().matches || {}) : {};
+    }
+    _d11SummaryCache[matchId] = _d11SummaryFieldsFor(data);
+    await setDoc(ref, { matches: _d11SummaryCache, updatedAt: Date.now() });
+  } catch(e) {
+    // Summary is a read-optimization only, never the source of truth — if
+    // this write fails for any reason, silently skip it rather than
+    // blocking or failing the real match save that already succeeded above.
+    console.warn('Dream11 summary sync skipped:', e.message);
+  }
+}
+async function _removeDream11SummaryEntry(matchId) {
+  if (!window._fbDb || !window._fbFns) return;
+  try {
+    const { doc, getDoc, setDoc } = window._fbFns;
+    const ref = doc(window._fbDb, 'pp_dream11_summary', 'main');
+    if (!_d11SummaryCache) {
+      const snap = await getDoc(ref);
+      _d11SummaryCache = snap.exists() ? (snap.data().matches || {}) : {};
+    }
+    delete _d11SummaryCache[matchId];
+    await setDoc(ref, { matches: _d11SummaryCache, updatedAt: Date.now() });
+  } catch(e) {
+    console.warn('Dream11 summary removal skipped:', e.message);
+  }
+}
+// Loads the ENTIRE Dream11 matches list in exactly 1 read, for list screens
+// that only need card-level fields. Falls back gracefully (returns null) if
+// the summary doc doesn't exist yet or Firebase isn't ready — callers
+// should fall back to whatever's already in the local `dream11Matches`
+// cache in that case, not block rendering.
+async function _loadDream11Summary(forceRefresh) {
+  if (_d11SummaryCache && !forceRefresh) return _d11SummaryCache;
+  if (!window._fbDb || !window._fbFns) return null;
+  try {
+    const { doc, getDoc } = window._fbFns;
+    const snap = await getDoc(doc(window._fbDb, 'pp_dream11_summary', 'main'));
+    _d11SummaryCache = snap.exists() ? (snap.data().matches || {}) : {};
+    return _d11SummaryCache;
+  } catch(e) {
+    console.warn('Dream11 summary load failed:', e.message);
+    return null;
+  }
 }
 // Scoped partial update for the scoring/live-update path — writes ONLY the
 // fields that path actually changes (players/scored/lastLiveUpdateAt/
@@ -2495,6 +2710,13 @@ async function _updateDream11MatchScoringFields(matchId, fields) {
   const { doc, updateDoc } = window._fbFns;
   try {
     await updateDoc(doc(window._fbDb, 'pp_dream11_matches', matchId), { ...fields, updatedAt: Date.now() });
+    // Use the merged LOCAL copy (not just the partial `fields` passed in)
+    // since scoring updates often only touch players[]/scored and this
+    // function doesn't receive megaParticipants/freeParticipants etc —
+    // dream11Matches[matchId] should already reflect the merged state by
+    // the time this save fires (it's applied locally first, same as every
+    // other write in this app).
+    if (dream11Matches[matchId]) _updateDream11SummaryEntry(matchId, dream11Matches[matchId]);
   } catch(e) {
     console.error('Dream11 match scoring-fields update error:', e.code || e.message, e);
     throw e;
@@ -2527,6 +2749,132 @@ async function d11RefreshMatchFromFirestore(matchId) {
 
 async function _loadAllDream11MatchesFromFirestore(forceRefresh, isAppOpen) {
   return _liveLoadCollection('pp_dream11_matches', () => dream11Matches, (v) => { dream11Matches = v; console.log('[D11] Matches loaded:', Object.keys(v).length); }, 'pp_dream11_matches_cache', { rerenderOnUpdate: true, skipDoneField: 'scored' }, forceRefresh, isAppOpen);
+}
+
+// ── READS-QUOTA FIX: summary-first loading for the Dream11 matches LIST ──
+// _loadAllDream11MatchesFromFirestore() above still exists and still works
+// exactly as before — nothing that calls it breaks. But it reads the WHOLE
+// collection (1 read per match, each carrying a full players[] squad
+// array) just to draw list cards that only need a few small fields.
+//
+// This is the preferred entry point for list/hub screens instead: it reads
+// the 1-document pp_dream11_summary/main (built by
+// _updateDream11SummaryEntry, kept in sync automatically on every match
+// save/score/delete — see that function for details) and merges those
+// lightweight fields onto whatever's already in dream11Matches, WITHOUT
+// touching or clearing any players[] array a detail screen may have
+// already loaded for a specific match. Cards render off count fields only
+// (playersCount, megaCount, etc — see _d11SummaryFieldsFor), so a summary-
+// only entry (no players[] yet) renders identically to a fully-loaded one.
+//
+// Any screen that needs the REAL players[] array (team builder, admin
+// pool/scoring) must call d11EnsureFullMatch(matchId) before reading
+// dream11Matches[matchId].players — this is already wired into the same
+// entry points patched for the teams-collection fix (openDream11Match,
+// the central render() hook, etc), see below.
+async function d11LoadMatchesSummaryFirst(forceRefresh) {
+  let summary = await _loadDream11Summary(forceRefresh);
+  if (summary === null) {
+    // Firestore genuinely unreachable (offline, not-yet-initialized SDK) —
+    // caller should fall back to whatever's already cached locally.
+    if (!window._fbDb || !window._fbFns) return false;
+  }
+  if (!summary || Object.keys(summary).length === 0) {
+    // ── ONE-TIME BACKFILL ──────────────────────────────────────────────
+    // pp_dream11_summary/main doesn't exist yet (first run after this
+    // feature shipped) or is empty — every match saved BEFORE this update
+    // has no summary entry. Rather than silently hiding every existing
+    // match from the list forever (until an admin happens to re-save
+    // each one), do a single full-collection read here, build the
+    // complete summary from it, and write it back — a one-time cost
+    // that then makes every future load (this device and every other
+    // device/user) a 1-read summary fetch from then on. Guarded so this
+    // backfill itself can only ever run once per app-lifetime (session
+    // flag), even if this function is called many times before it
+    // resolves.
+    if (window._d11SummaryBackfillDone || window._d11SummaryBackfillInFlight) return false;
+    window._d11SummaryBackfillInFlight = true;
+    try {
+      console.log('[D11] Summary doc missing/empty — running one-time backfill from full collection…');
+      await _loadAllDream11MatchesFromFirestore(true);
+      const built = {};
+      Object.keys(dream11Matches).forEach(mid => { built[mid] = _d11SummaryFieldsFor(dream11Matches[mid]); });
+      _d11SummaryCache = built;
+      if (window._fbDb && window._fbFns) {
+        const { doc, setDoc } = window._fbFns;
+        await setDoc(doc(window._fbDb, 'pp_dream11_summary', 'main'), { matches: built, updatedAt: Date.now() });
+      }
+      window._d11SummaryBackfillDone = true;
+      return true; // dream11Matches is already fully populated from the backfill read itself
+    } catch(e) {
+      console.warn('Dream11 summary backfill failed:', e.message);
+      return false;
+    } finally {
+      window._d11SummaryBackfillInFlight = false;
+    }
+  }
+  let changed = false;
+  Object.keys(summary).forEach(matchId => {
+    const s = summary[matchId];
+    const existing = dream11Matches[matchId];
+    if (existing && !existing._summaryOnly) {
+      // Already have (or are loading) the FULL doc for this match — just
+      // refresh the count fields in case they've drifted, keep players[].
+      existing.published = s.published;
+      existing.scored = s.scored;
+      existing.megaParticipants = existing.megaParticipants || [];
+      existing.miniMegaParticipants = existing.miniMegaParticipants || [];
+      existing.freeParticipants = existing.freeParticipants || [];
+      return;
+    }
+    const prevPlayersCount = existing?._summaryPlayersCount;
+    if (existing && prevPlayersCount === s.playersCount && existing.scored === s.scored && existing.published === s.published) return; // unchanged, skip
+    dream11Matches[matchId] = {
+      ...(existing || {}),
+      id: matchId,
+      published: s.published,
+      scored: s.scored,
+      players: existing?.players || [], // real array filled in lazily by d11EnsureFullMatch when the match is actually opened
+      megaParticipants: new Array(s.megaCount).fill(null), // placeholder arrays — only .length is used by list cards; real contents come from d11EnsureFullMatch
+      miniMegaParticipants: new Array(s.miniMegaCount).fill(null),
+      freeParticipants: new Array(s.freeCount).fill(null),
+      _summaryOnly: true,
+      _summaryPlayersCount: s.playersCount,
+    };
+    changed = true;
+  });
+  return changed;
+}
+// Fetches the FULL Dream11 match document (real players[] array, real
+// participant lists) for one specific match — the on-demand counterpart to
+// d11LoadMatchesSummaryFirst above. Cheap (1 read) and session-cached, same
+// pattern as d11EnsureTeamsForMatch.
+const _d11FullMatchLoaded = new Set();
+const _d11FullMatchInFlight = new Set();
+async function d11EnsureFullMatch(matchId, forceRefresh) {
+  if (!matchId) return false;
+  const existing = dream11Matches[matchId];
+  if (existing && !existing._summaryOnly && !forceRefresh) return false; // already have the real doc
+  if (_d11FullMatchLoaded.has(matchId) && !forceRefresh) return false;
+  if (_d11FullMatchInFlight.has(matchId)) return false;
+  if (!window._fbDb || !window._fbFns || !window._fbFns.doc || !window._fbFns.getDoc) return false;
+  _d11FullMatchInFlight.add(matchId);
+  try {
+    const { doc, getDoc } = window._fbFns;
+    const snap = await getDoc(doc(window._fbDb, 'pp_dream11_matches', matchId));
+    if (snap.exists()) {
+      dream11Matches[matchId] = snap.data();
+      _d11FullMatchLoaded.add(matchId);
+      try { localStorage.setItem('pp_dream11_matches_cache', JSON.stringify(dream11Matches)); } catch(e){}
+      return true;
+    }
+    return false;
+  } catch(e) {
+    console.warn('d11EnsureFullMatch failed for ' + matchId + ':', e.message);
+    return false;
+  } finally {
+    _d11FullMatchInFlight.delete(matchId);
+  }
 }
 // One doc per player (keyed by the same lowercase-name key used in
 // playerMatchHistory), so updating one player's history after a match is
@@ -2697,8 +3045,13 @@ async function d11EnsureTeamsForUser(email, forceRefresh) {
 async function _saveD11H2HToFirestore(h2hId, data) {
   if (!window._fbDb || !window._fbFns) return;
   const { doc, setDoc } = window._fbFns;
-  return setDoc(doc(window._fbDb, 'pp_dream11_h2h', h2hId), _stampUpdatedAt(data))
+  const stamped = _stampUpdatedAt(data);
+  return setDoc(doc(window._fbDb, 'pp_dream11_h2h', h2hId), stamped)
+    .then(() => _updateGenericSummaryEntry('pp_dream11_h2h_summary', h2hId, stamped))
     .catch(e => { console.error('Dream11 H2H save error:', e); throw e; });
+}
+async function loadD11H2HSummaryFirst(forceRefresh) {
+  return _loadGenericSummaryFirst('pp_dream11_h2h', 'pp_dream11_h2h_summary', () => d11h2hContests, (v) => { d11h2hContests = v; }, 'pp_dream11_h2h_cache', '_d11H2HSummaryBackfill', forceRefresh);
 }
 async function _loadAllD11H2HFromFirestore(forceRefresh, isAppOpen) {
   return _liveLoadCollection('pp_dream11_h2h', () => d11h2hContests, (v) => { d11h2hContests = v; }, 'pp_dream11_h2h_cache', { rerenderOnUpdate: true, skipDoneField: 'status', skipDoneValue: 'completed' }, forceRefresh, isAppOpen);
@@ -2706,8 +3059,13 @@ async function _loadAllD11H2HFromFirestore(forceRefresh, isAppOpen) {
 async function _saveD11TrioToFirestore(trioId, data) {
   if (!window._fbDb || !window._fbFns) return;
   const { doc, setDoc } = window._fbFns;
-  return setDoc(doc(window._fbDb, 'pp_dream11_trio', trioId), _stampUpdatedAt(data))
+  const stamped = _stampUpdatedAt(data);
+  return setDoc(doc(window._fbDb, 'pp_dream11_trio', trioId), stamped)
+    .then(() => _updateGenericSummaryEntry('pp_dream11_trio_summary', trioId, stamped))
     .catch(e => { console.error('Dream11 Trio save error:', e); throw e; });
+}
+async function loadD11TrioSummaryFirst(forceRefresh) {
+  return _loadGenericSummaryFirst('pp_dream11_trio', 'pp_dream11_trio_summary', () => d11trioContests, (v) => { d11trioContests = v; }, 'pp_dream11_trio_cache', '_d11TrioSummaryBackfill', forceRefresh);
 }
 async function _loadAllD11TrioFromFirestore(forceRefresh, isAppOpen) {
   return _liveLoadCollection('pp_dream11_trio', () => d11trioContests, (v) => { d11trioContests = v; }, 'pp_dream11_trio_cache', { rerenderOnUpdate: true, skipDoneField: 'status', skipDoneValue: 'completed' }, forceRefresh, isAppOpen);
@@ -2715,8 +3073,13 @@ async function _loadAllD11TrioFromFirestore(forceRefresh, isAppOpen) {
 async function _saveD11CustomContestToFirestore(ccId, data) {
   if (!window._fbDb || !window._fbFns) return;
   const { doc, setDoc } = window._fbFns;
-  return setDoc(doc(window._fbDb, 'pp_dream11_custom_contests', ccId), _stampUpdatedAt(data))
+  const stamped = _stampUpdatedAt(data);
+  return setDoc(doc(window._fbDb, 'pp_dream11_custom_contests', ccId), stamped)
+    .then(() => _updateGenericSummaryEntry('pp_dream11_custom_contests_summary', ccId, stamped))
     .catch(e => { console.error('Dream11 custom contest save error:', e); throw e; });
+}
+async function loadD11CustomContestsSummaryFirst(forceRefresh) {
+  return _loadGenericSummaryFirst('pp_dream11_custom_contests', 'pp_dream11_custom_contests_summary', () => d11CustomContests, (v) => { d11CustomContests = v; }, 'pp_dream11_custom_contests_cache', '_d11CcSummaryBackfill', forceRefresh);
 }
 async function _loadAllD11CustomContestsFromFirestore(forceRefresh, isAppOpen) {
   return _liveLoadCollection('pp_dream11_custom_contests', () => d11CustomContests, (v) => { d11CustomContests = v; }, 'pp_dream11_custom_contests_cache', { rerenderOnUpdate: true, skipDoneField: 'status', skipDoneValue: 'completed' }, forceRefresh, isAppOpen);
@@ -2733,7 +3096,8 @@ async function d11ManualRefresh(evt) {
   if (btn) { btn.disabled = true; btn.textContent = '🔄 Refreshing…'; }
   try {
     await Promise.all([
-      _loadAllDream11MatchesFromFirestore(true),
+      typeof d11LoadMatchesSummaryFirst === 'function' ? d11LoadMatchesSummaryFirst(true) : _loadAllDream11MatchesFromFirestore(true),
+      d11ActiveMatchId ? d11EnsureFullMatch(d11ActiveMatchId, true) : Promise.resolve(),
       d11ActiveMatchId ? d11RefreshTeamsForMatch(d11ActiveMatchId) : Promise.resolve(),
       _loadAllD11H2HFromFirestore(true),_loadAllD11TrioFromFirestore(true),
       _loadAllD11CustomContestsFromFirestore(true),
@@ -3058,10 +3422,14 @@ async function handleLogin() {
   if (window.showBabarSplash) window.showBabarSplash();
 
   Promise.all([
-    _loadAllMatchesFromFirestore(),_loadAllDream11MatchesFromFirestore(),
+    _loadAllMatchesFromFirestore(),
+    typeof d11LoadMatchesSummaryFirst === 'function' ? d11LoadMatchesSummaryFirst() : _loadAllDream11MatchesFromFirestore(),
     _loadAllTeamSquadsFromFirestore(),
-    _loadAllH2HFromFirestore(),_loadAllD11H2HFromFirestore(),_loadAllD11TrioFromFirestore(),
-    _loadAllCustomContestsFromFirestore(),_loadAllD11CustomContestsFromFirestore(),
+    typeof loadH2HSummaryFirst === 'function' ? loadH2HSummaryFirst() : _loadAllH2HFromFirestore(),
+    typeof loadD11H2HSummaryFirst === 'function' ? loadD11H2HSummaryFirst() : _loadAllD11H2HFromFirestore(),
+    typeof loadD11TrioSummaryFirst === 'function' ? loadD11TrioSummaryFirst() : _loadAllD11TrioFromFirestore(),
+    typeof loadCustomContestsSummaryFirst === 'function' ? loadCustomContestsSummaryFirst() : _loadAllCustomContestsFromFirestore(),
+    typeof loadD11CustomContestsSummaryFirst === 'function' ? loadD11CustomContestsSummaryFirst() : _loadAllD11CustomContestsFromFirestore(),
     _loadAllD11TournamentsFromFirestore(),_loadAllUtTournamentsFromFirestore(),
     _loadAllUtTeamsFromFirestore(),
   ]).then(() => {
@@ -3082,7 +3450,8 @@ async function handleRefreshApp() {
     await Promise.all([
       typeof _loadAllUsersFromFirestore === 'function' ? _loadAllUsersFromFirestore(true) : Promise.resolve(),
       typeof _loadAllMatchesFromFirestore === 'function' ? _loadAllMatchesFromFirestore(true) : Promise.resolve(),
-      typeof _loadAllDream11MatchesFromFirestore === 'function' ? _loadAllDream11MatchesFromFirestore(true) : Promise.resolve(),
+      typeof d11LoadMatchesSummaryFirst === 'function' ? d11LoadMatchesSummaryFirst(true) : (typeof _loadAllDream11MatchesFromFirestore === 'function' ? _loadAllDream11MatchesFromFirestore(true) : Promise.resolve()),
+      (typeof d11EnsureFullMatch === 'function' && typeof d11ActiveMatchId !== 'undefined' && d11ActiveMatchId) ? d11EnsureFullMatch(d11ActiveMatchId, true) : Promise.resolve(),
       (typeof d11RefreshTeamsForMatch === 'function' && typeof d11ActiveMatchId !== 'undefined' && d11ActiveMatchId) ? d11RefreshTeamsForMatch(d11ActiveMatchId) : Promise.resolve(),
       typeof _loadAllTeamSquadsFromFirestore === 'function' ? _loadAllTeamSquadsFromFirestore(true) : Promise.resolve(),
       typeof _loadAllH2HFromFirestore === 'function' ? _loadAllH2HFromFirestore(true) : Promise.resolve(),
@@ -4527,6 +4896,7 @@ function getUserD11MatchHistoryStats(email) {
   const matchIds = Array.from(new Set([
     ...Object.keys(dream11Matches).filter(mId => {
       const d11m = dream11Matches[mId];
+      if (d11m._summaryOnly) return false; // placeholder data not loaded yet
       return (d11m.freeParticipants||[]).includes(email) || (d11m.megaParticipants||[]).includes(email) || (d11m.miniMegaParticipants||[]).includes(email) || (d11m.slot20Participants||[]).includes(email);
     }),
     ...teamMatchIds.filter(mId => !!dream11Matches[mId])
@@ -5601,6 +5971,19 @@ function render() {
     if (typeof tab !== 'undefined' && _d11TeamScreens.includes(tab) && typeof d11ActiveMatchId !== 'undefined' && d11ActiveMatchId && typeof d11EnsureTeamsForMatch === 'function') {
       d11EnsureTeamsForMatch(d11ActiveMatchId).then(hadNewData => { if (hadNewData) render(); }).catch(()=>{});
     }
+    // Same idea for the FULL match doc (real players[]/participant lists)
+    // — list screens run fine on the cheap summary-only data, but these
+    // detail screens need the real thing.
+    if (typeof tab !== 'undefined' && _d11TeamScreens.includes(tab) && typeof d11ActiveMatchId !== 'undefined' && d11ActiveMatchId && typeof d11EnsureFullMatch === 'function') {
+      d11EnsureFullMatch(d11ActiveMatchId).then(hadNewData => { if (hadNewData) render(); }).catch(()=>{});
+    }
+    // List/hub screens: populate dream11Matches from the 1-read summary
+    // doc instead of the full collection. Safe to call on every render —
+    // internally no-ops (0 reads) once already loaded this session.
+    const _d11ListScreens = ['home','dream11','dream11Completed'];
+    if (typeof tab !== 'undefined' && _d11ListScreens.includes(tab) && typeof d11LoadMatchesSummaryFirst === 'function') {
+      d11LoadMatchesSummaryFirst().then(hadNewData => { if (hadNewData) render(); }).catch(()=>{});
+    }
     // Home + Profile show cross-match win-history stats for the logged-in
     // user (getUserD11MatchHistoryStats) — ensure that user's teams are
     // loaded (once per session) via the cheap user-scoped query above.
@@ -5756,7 +6139,7 @@ function goTab(t) {
   // Auto-refresh Dream11 data from Firestore when user opens the Dream11 tab
   // so admin publish/unpublish is visible immediately without a full page reload
   if (t === 'dream11') {
-    _loadAllDream11MatchesFromFirestore().then(() => render()).catch(() => {});
+    (typeof d11LoadMatchesSummaryFirst === 'function' ? d11LoadMatchesSummaryFirst(true) : _loadAllDream11MatchesFromFirestore()).then(() => render()).catch(() => {});
   }
 }
 </script>
@@ -5949,7 +6332,7 @@ function renderHome() {
                    </div>`
                 : `<div style="text-align:center;font-size:12px;color:var(--dim);padding:8px">🔒 Contest locked — joining closed</div>`
           }
-          <button class="btn-block" style="font-size:12px;padding:9px;margin-top:8px;border:none;border-radius:10px;background:linear-gradient(135deg,#f97316,#dc2626);color:#fff;font-weight:700;cursor:pointer" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">${!isCompletedCard && !dLocked ? '🎪 Join Mega / H2H / Custom Contest' : '🎪 View Contests'}</button>
+          <button class="btn-block" style="font-size:12px;padding:9px;margin-top:8px;border:none;border-radius:10px;background:linear-gradient(135deg,#f97316,#dc2626);color:#fff;font-weight:700;cursor:pointer" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);d11EnsureFullMatch('${m.id}',true).then(()=>render()).catch(()=>{})">${!isCompletedCard && !dLocked ? '🎪 Join Mega / H2H / Custom Contest' : '🎪 View Contests'}</button>
           ${(() => {
             const badges = [];
             if ((d11m.freeParticipants||[]).includes(currentUser.email)) {
@@ -8439,7 +8822,7 @@ function goDream11Hub() {
   window.scrollTo(0,0);
   // Always refresh Dream11 match data from Firestore so publish/unpublish by admin
   // is immediately visible to users without needing a full page reload.
-  _loadAllDream11MatchesFromFirestore().then(() => render()).catch(() => {});
+  (typeof d11LoadMatchesSummaryFirst === 'function' ? d11LoadMatchesSummaryFirst(true) : _loadAllDream11MatchesFromFirestore()).then(() => render()).catch(() => {});
   // If user came back after building team with a pending join code, pre-fill search
   if (window._pendingJoinCode) {
     const el = document.getElementById('d11-global-code');
@@ -8768,6 +9151,7 @@ async function d11DeleteMatch(matchId) {
     const { doc, deleteDoc } = window._fbFns;
     try { await deleteDoc(doc(window._fbDb, 'pp_dream11_matches', matchId)); } catch(e){}
   }
+  _removeDream11SummaryEntry(matchId);
 
   // Remove live user teams for this match
   for (const tid of teamIds) {
@@ -8925,6 +9309,7 @@ function d11EditFormat(matchId) {
 function openDream11Match(matchId) {
   d11ActiveMatchId = matchId;
   d11EnsureTeamsForMatch(matchId).then(() => render()).catch(()=>{});
+  d11EnsureFullMatch(matchId).then(() => render()).catch(()=>{});
   if (isAdmin()) {
     if (!dream11Matches[matchId]) {
       dream11Matches[matchId] = newDream11MatchTemplate(matchId);
@@ -10604,9 +10989,16 @@ function masterTeamsPropagatePhoto(playerName, photo) {
   const nameLower = (playerName || '').toLowerCase();
   if (!nameLower) return;
   // Dream11 matches
+  // NOTE: matches still in "_summaryOnly" placeholder state (players: [])
+  // are silently skipped here — their real players[] hasn't loaded yet, so
+  // there's nothing to update in memory, and .forEach on an empty array is
+  // a safe no-op rather than a crash. This does mean a match that hasn't
+  // been opened yet this session won't get this photo propagated until
+  // it's next opened AND saved by an admin. Acceptable trade-off for a
+  // cosmetic photo-sync convenience feature; not data-destructive either way.
   Object.keys(dream11Matches).forEach(matchId => {
     const d11m = dream11Matches[matchId];
-    if (!d11m || !d11m.players) return;
+    if (!d11m || !d11m.players || d11m._summaryOnly) return;
     let changed = false;
     d11m.players.forEach(p => { if (p.name.toLowerCase() === nameLower) { p.photo = photo; changed = true; } });
     if (changed) _saveDream11MatchToFirestore(matchId, d11m);
@@ -21578,9 +21970,9 @@ async function d11SubmitTeam() {
     tab = 'dream11JoinContest';
     render();
     window.scrollTo(0,0);
-    // Refresh dream11 match data so freeParticipants/megaParticipants counts
-    // are always fresh u2014 avoids stale cache showing "0 joined".
-    _loadAllDream11MatchesFromFirestore().then(() => render()).catch(() => {});
+    // Refresh this match's data so freeParticipants/megaParticipants counts
+    // are always fresh — avoids stale cache showing "0 joined".
+    d11EnsureFullMatch(d11TeamDraft.matchId, true).then(() => render()).catch(() => {});
   } catch(e) {
     delete dream11Teams[d11TeamDraft.id];
     d11TeamSaveFailed = true;
@@ -25823,7 +26215,7 @@ function renderDream11Hub() {
           <button class="btn-primary btn-block" style="font-size:12px;padding:10px" onclick="openDream11Match('${m.id}')">🎮 Build My Team</button>
         ` : `<div class="empty-state" style="padding:10px;font-size:12px">Contest is locked, joining is closed now</div>`}
       </div>
-      ${!dLocked ? `<button class="btn-primary btn-block mb0" style="font-size:12px;padding:10px;margin-top:8px;background:linear-gradient(135deg,#f59e0b,#ea580c)" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">🏟️ Join Mega / H2H / Custom Contest</button>` : ''}
+      ${!dLocked ? `<button class="btn-primary btn-block mb0" style="font-size:12px;padding:10px;margin-top:8px;background:linear-gradient(135deg,#f59e0b,#ea580c)" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);d11EnsureFullMatch('${m.id}',true).then(()=>render()).catch(()=>{})">🏟️ Join Mega / H2H / Custom Contest</button>` : ''}
       ${isLiveScoring ? `<button class="btn-secondary btn-block mb0" style="font-size:12px;padding:10px;margin-top:8px" onclick="openDream11Leaderboard('${m.id}')">🏅 View Live Leaderboard</button>` : ''}
       ${m.scorecardText ? `<button class="btn-primary btn-block mb0" style="background:linear-gradient(135deg,#0f766e,#0d9488);font-size:12px;padding:10px;margin-top:8px" onclick="openD11ScorecardPage('${m.id}')">📋 Full Batting & Bowling Scorecard Dekho →</button>` : (d11m.players||[]).some(p => p.stats) ? `<button class="btn-primary btn-block mb0" style="background:linear-gradient(135deg,#0f766e,#0d9488);font-size:12px;padding:10px;margin-top:8px" onclick="openD11LiveScorecard('${m.id}')">📋 Full Batting & Bowling Scorecard Dekho →</button>` : ''}
     </div></div>`;
@@ -27295,7 +27687,7 @@ function renderD11TeamPicker() {
 
   ${slots}
 
-  ${myTeams.length > 0 ? `<button class="btn-primary btn-block" style="margin-top:8px" onclick="d11ContestMatchId='${matchId}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">🎪 Join Mega / H2H / Custom Contest</button>` : ''}
+  ${myTeams.length > 0 ? `<button class="btn-primary btn-block" style="margin-top:8px" onclick="d11ContestMatchId='${matchId}';tab='dream11JoinContest';render();window.scrollTo(0,0);d11EnsureFullMatch('${matchId}',true).then(()=>render()).catch(()=>{})">🎪 Join Mega / H2H / Custom Contest</button>` : ''}
   `;
 }
 
@@ -28793,9 +29185,21 @@ function scanD11Duplicates() {
     h2h: [],      // { matchId, label, email, contestIds: [...] }
     custom: []    // { matchId, label, creatorEmail, contests: [...], affectsOtherUsers }
   };
+  // SAFETY: this scans participant array CONTENTS (not just .length), and
+  // runD11DuplicateCleanup() below writes deduped arrays straight back to
+  // Firestore. A match still in "_summaryOnly" placeholder state (see the
+  // reads-quota aggregation fix — dream11Matches populated cheaply from
+  // pp_dream11_summary/main, real players[]/participant arrays fetched
+  // lazily) has participant arrays full of `null` placeholders, not real
+  // emails. Scanning/fixing those would report fake duplicates and could
+  // overwrite the real participant list with garbage. Skip any such match
+  // here — renderAdminDuplicateCleanup() below triggers a full-collection
+  // load when this admin screen opens specifically so this list becomes
+  // complete moments later and the screen re-renders.
 
   // --- Mega & Free duplicates: same email appearing 2+ times in the array ---
   Object.entries(dream11Matches).forEach(([matchId, d11m]) => {
+    if (d11m._summaryOnly) return; // placeholder data — see safety note above, skip until the real doc loads
     const m = matches[matchId];
     const label = m ? `${m.teamA||'TBD'} vs ${m.teamB||'TBD'}` : matchId;
 
@@ -28984,6 +29388,20 @@ async function runCompleteReset() {
 }
 
 function renderAdminDuplicateCleanup() {
+  // This screen scans EVERY Dream11 match's real participant data — the
+  // one legitimate case where a full-collection read is actually needed
+  // (not just one match). Trigger it here; scanD11Duplicates() above
+  // already skips any match still in placeholder "_summaryOnly" state so
+  // this is safe even before the full load resolves — it'll just be an
+  // incomplete report for a moment, then re-render complete.
+  if (!window._d11DuplicateCleanupFullLoadDone && !window._d11DuplicateCleanupFullLoadInFlight) {
+    window._d11DuplicateCleanupFullLoadInFlight = true;
+    _loadAllDream11MatchesFromFirestore(true).then(() => {
+      window._d11DuplicateCleanupFullLoadDone = true;
+      window._d11DuplicateCleanupFullLoadInFlight = false;
+      render();
+    }).catch(() => { window._d11DuplicateCleanupFullLoadInFlight = false; });
+  }
   const report = scanD11Duplicates();
   const stuckH2H = scanD11StuckH2H();
   const stuckH2HTotal = stuckH2H.reduce((s,r) => s + r.emails.length * r.refundEach, 0);
@@ -29098,6 +29516,13 @@ function renderAdminDuplicateCleanup() {
 
 // Executes the actual fix: refunds + data correction, then saves to Firestore.
 async function runD11DuplicateCleanup() {
+  // Defensive second guard (renderAdminDuplicateCleanup already triggers
+  // this on screen-open) — never dedupe/write participant arrays without
+  // confirming every match's REAL data is loaded first.
+  if (!window._d11DuplicateCleanupFullLoadDone) {
+    await _loadAllDream11MatchesFromFirestore(true);
+    window._d11DuplicateCleanupFullLoadDone = true;
+  }
   const report = scanD11Duplicates();
   let fixedCount = 0, totalRefunded = 0;
 
@@ -30095,6 +30520,7 @@ function getUserAdminContestBreakdown(email) {
   const matchIds = Array.from(new Set([
     ...Object.keys(dream11Matches).filter(mId => {
       const d11m = dream11Matches[mId];
+      if (d11m._summaryOnly) return false; // placeholder data not loaded yet
       return (d11m.freeParticipants||[]).includes(email) || (d11m.megaParticipants||[]).includes(email) || (d11m.miniMegaParticipants||[]).includes(email) || (d11m.slot20Participants||[]).includes(email);
     }),
     ...teamMatchIds.filter(mId => !!dream11Matches[mId])
@@ -33751,7 +34177,7 @@ async function initApp() {
   // the only thing that forces a real re-read.
   const _homeMatchesReady = Promise.all([
     _loadAllMatchesFromFirestore(false, true),
-    _loadAllDream11MatchesFromFirestore(false, true),
+    typeof d11LoadMatchesSummaryFirst === 'function' ? d11LoadMatchesSummaryFirst() : _loadAllDream11MatchesFromFirestore(false, true),
   ]).then(() => {
     window._homeDataSyncDone = true;
     render();
@@ -33762,10 +34188,12 @@ async function initApp() {
 
   Promise.all([
     _loadAllUsersFromFirestore(false),_homeMatchesReady,
-    _loadAllH2HFromFirestore(false, true),_loadAllCustomContestsFromFirestore(false, true),
+    typeof loadH2HSummaryFirst === 'function' ? loadH2HSummaryFirst() : _loadAllH2HFromFirestore(false, true),
+    typeof loadCustomContestsSummaryFirst === 'function' ? loadCustomContestsSummaryFirst() : _loadAllCustomContestsFromFirestore(false, true),
     _loadAllTeamSquadsFromFirestore(),
-    _loadAllD11H2HFromFirestore(false, true),_loadAllD11TrioFromFirestore(false, true),
-    _loadAllD11CustomContestsFromFirestore(false, true),_loadAllD11TournamentsFromFirestore(),
+    typeof loadD11H2HSummaryFirst === 'function' ? loadD11H2HSummaryFirst() : _loadAllD11H2HFromFirestore(false, true),
+    typeof loadD11TrioSummaryFirst === 'function' ? loadD11TrioSummaryFirst() : _loadAllD11TrioFromFirestore(false, true),
+    typeof loadD11CustomContestsSummaryFirst === 'function' ? loadD11CustomContestsSummaryFirst() : _loadAllD11CustomContestsFromFirestore(false, true),_loadAllD11TournamentsFromFirestore(),
     _loadAllUtTournamentsFromFirestore(),_loadAllUtTeamsFromFirestore(),
     _loadAllPlayerHistoryFromFirestore(false, true),
   ]).then(async () => {
@@ -33961,7 +34389,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.40.0";
+const APP_VERSION = "4.42.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
