@@ -34387,36 +34387,34 @@ async function initApp() {
     typeof loadD11CustomContestsSummaryFirst === 'function' ? loadD11CustomContestsSummaryFirst() : _loadAllD11CustomContestsFromFirestore(false, true),_loadAllD11TournamentsFromFirestore(),
     _loadAllUtTournamentsFromFirestore(),_loadAllUtTeamsFromFirestore(),
     _loadAllPlayerHistoryFromFirestore(false, true),
-    // ── GUARANTEED full-data sync (not screen-triggered) ──────────────────
+  ]).then(async () => {
+    // ── GUARANTEED full-data sync (background, NEVER blocks anything) ─────
     // Everything above only loads the lightweight SUMMARY for Dream11
     // matches (playersCount, not the real players[] array; no per-user
-    // team totals). Several screens need the real thing — Leaderboard,
-    // Admin Panel match cards, participant panels — and until now those
-    // only got it if that specific screen happened to be opened first,
-    // which is what caused Leaderboard/Admin Panel to intermittently show
-    // 0/null for data that was actually fine in Firestore. Loading both
-    // here guarantees every session eventually has full, accurate numbers
-    // everywhere, with no dependency on which screens get visited — while
-    // still keeping the read cost low: this is 1 read for every user's
-    // points (the summary doc) + 1 read per published match still needing
-    // its full doc, done once per session, not per screen-visit.
-    typeof d11LoadTeamPointsSummary === 'function'
-      ? d11LoadTeamPointsSummary().then(summary => { if (summary) window._d11TeamPointsSummaryForLeaderboard = summary; })
-      : Promise.resolve(),
-  ]).then(async () => {
-    // Full Dream11 match docs (real players[] array) for every currently
-    // published match — same guarantee as above, run after the summary
-    // load so dream11Matches is populated first. d11EnsureFullMatch()
-    // no-ops (0 reads) for anything already fully loaded, so this is safe
-    // to call broadly; each call is independent so one failing match
-    // doesn't block the others.
-    if (typeof d11EnsureFullMatch === 'function') {
-      Promise.all(
-        Object.values(dream11Matches||{})
-          .filter(m => m && m.published)
-          .map(m => d11EnsureFullMatch(m.id).catch(()=>{}))
-      ).then(hadAny => { if (hadAny.some(Boolean)) render(); }).catch(()=>{});
-    }
+    // team totals). Leaderboard/Admin Panel/participant panels need the
+    // real thing. IMPORTANT: this used to sit INSIDE the Promise.all above,
+    // which meant the app's first paint, _ensureAdminDataLoaded(), and the
+    // admin live-users listener all waited on these extra reads finishing
+    // — that was the direct cause of the reported slow app-open. Firing it
+    // here, un-awaited, means the rest of startup (below) proceeds
+    // immediately; these reads land whenever they land and just trigger a
+    // quiet re-render when they do, exactly like every other
+    // summary-first loader already does.
+    (async () => {
+      let d11PointsSummary = null;
+      if (typeof d11LoadTeamPointsSummary === 'function') {
+        d11PointsSummary = await d11LoadTeamPointsSummary().catch(() => null);
+        if (d11PointsSummary) { window._d11TeamPointsSummaryForLeaderboard = d11PointsSummary; render(); }
+      }
+      if (typeof d11EnsureFullMatch === 'function') {
+        const results = await Promise.all(
+          Object.values(dream11Matches||{})
+            .filter(m => m && m.published)
+            .map(m => d11EnsureFullMatch(m.id).catch(() => false))
+        );
+        if (results.some(Boolean)) render();
+      }
+    })();
     if (isAdmin()) {
       // Admin needs everything, including admin-only screens' data, right away.
       _ensureAdminDataLoaded();
@@ -34609,7 +34607,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.42.7";
+const APP_VERSION = "4.42.8";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
