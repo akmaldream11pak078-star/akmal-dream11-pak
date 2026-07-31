@@ -2712,16 +2712,47 @@ async function _removeDream11SummaryEntry(matchId) {
 // cache in that case, not block rendering.
 async function _loadDream11Summary(forceRefresh) {
   if (_d11SummaryCache && !forceRefresh) return _d11SummaryCache;
-  if (!window._fbDb || !window._fbFns) return null;
-  try {
-    const { doc, getDoc } = window._fbFns;
-    const snap = await getDoc(doc(window._fbDb, 'pp_dream11_summary', 'main'));
-    _d11SummaryCache = snap.exists() ? (snap.data().matches || {}) : {};
-    return _d11SummaryCache;
-  } catch(e) {
-    console.warn('Dream11 summary load failed:', e.message);
-    return null;
+  // ── FIX: instant paint from localStorage, not just in-memory ──────────
+  // _d11SummaryCache is a plain JS variable — it resets to null on every
+  // single fresh page load (closing and reopening the app is a brand new
+  // JS context), which meant this function did a genuine Firestore
+  // getDoc() round-trip on literally every app open, regardless of how
+  // recently the app had last synced. That was the real cause behind the
+  // repeated multi-second "Loading your matches…" on every reopen — not
+  // a one-time thing, EVERY time. Every other summary/collection loader
+  // in this file already persists to localStorage for exactly this
+  // reason; this one didn't. Now: paint from localStorage immediately (0
+  // wait, 0 reads) if available, kick off the real Firestore read in the
+  // background regardless, and let its normal caller-side render() calls
+  // pick up any changes once it lands — same "instant stale data, then
+  // silently goes fresh" behavior as the rest of the app.
+  let cachedFromDisk = null;
+  if (!forceRefresh) {
+    try {
+      const raw = localStorage.getItem('pp_dream11_summary_cache');
+      if (raw) cachedFromDisk = JSON.parse(raw);
+    } catch(e){}
   }
+  if (!window._fbDb || !window._fbFns) return cachedFromDisk;
+  const fetchPromise = (async () => {
+    try {
+      const { doc, getDoc } = window._fbFns;
+      const snap = await getDoc(doc(window._fbDb, 'pp_dream11_summary', 'main'));
+      _d11SummaryCache = snap.exists() ? (snap.data().matches || {}) : {};
+      try { localStorage.setItem('pp_dream11_summary_cache', JSON.stringify(_d11SummaryCache)); } catch(e){}
+      return _d11SummaryCache;
+    } catch(e) {
+      console.warn('Dream11 summary load failed:', e.message);
+      return null;
+    }
+  })();
+  if (cachedFromDisk) {
+    // Don't make the caller wait — return the disk cache now, let the real
+    // fetch land whenever it lands and update _d11SummaryCache for next time.
+    fetchPromise.then(fresh => { if (fresh) { _d11SummaryCache = fresh; try { render(); } catch(e){} } });
+    return cachedFromDisk;
+  }
+  return fetchPromise;
 }
 // Scoped partial update for the scoring/live-update path — writes ONLY the
 // fields that path actually changes (players/scored/lastLiveUpdateAt/
@@ -34399,7 +34430,7 @@ async function initApp() {
     _loadAllMatchesFromFirestore(false, true),
     typeof d11LoadMatchesSummaryFirst === 'function' ? d11LoadMatchesSummaryFirst() : _loadAllDream11MatchesFromFirestore(false, true),
   ]).then(() => {
-    // ── FIX: "flash of 0" ──────────────────────────────────────────────
+    // ── FIX: "flash of 0" / premature empty-state ──────────────────────
     // _liveLoadCollection (see its own fix above) now resolves as soon as
     // it paints from cache, without waiting for the real network snapshot
     // — great for speed, but it means this .then() can fire while `matches`
@@ -34407,13 +34438,21 @@ async function initApp() {
     // yet, or the gap between the fast cache-resolve and the slower real
     // snapshot actually landing). Marking _homeDataSyncDone=true right here
     // made renderHome() briefly show "Upcoming (0)/Live (0)/Completed (0)"
-    // — which looks like "no matches" rather than "still loading" — before
-    // the real snapshot arrived a moment later and corrected it. Instead:
-    // if we already have SOME match data, we're good, show it now. If not,
-    // give the live listener a short grace window to deliver its first real
-    // snapshot (it always does, per the fix above) before giving up and
-    // showing an honest empty state — this keeps the "Loading your
-    // matches…" skeleton up through that gap instead of a misleading "0".
+    // or even the full "No upcoming contests" empty-state — which looks
+    // exactly like "you genuinely have nothing" rather than "still
+    // loading". A short 4-second timeout here was tried and wasn't enough
+    // on slower connections — it kept firing before data landed. There is
+    // now NO timeout for the normal case: this keeps polling (every 300ms,
+    // cheap — just checking objects already in memory, not new Firestore
+    // reads) until real data is confirmed present, so "Loading your
+    // matches…" stays up for exactly as long as it genuinely takes, never
+    // less. The only thing that can end the wait early is the underlying
+    // Firestore listener actually reporting an error (network dead,
+    // permission denied, etc — see the listener's err callback in
+    // _liveLoadCollection, which resolves its promise on failure) — a
+    // generous 30s safety net below still exists purely to stop a
+    // genuinely broken listener from spinning forever, not as the expected
+    // path.
     const haveData = Object.keys(matches||{}).length > 0 || Object.keys(dream11Matches||{}).length > 0;
     if (haveData) {
       window._homeDataSyncDone = true;
@@ -34421,16 +34460,13 @@ async function initApp() {
     } else {
       let settled = false;
       const finish = () => { if (!settled) { settled = true; window._homeDataSyncDone = true; render(); } };
-      // Poll briefly for the listener's real snapshot to land (checked every
-      // 300ms) rather than a single fixed timer, so this resolves the moment
-      // data actually shows up instead of always waiting the full window.
       const pollId = setInterval(() => {
         if (Object.keys(matches||{}).length > 0 || Object.keys(dream11Matches||{}).length > 0) {
           clearInterval(pollId);
           finish();
         }
       }, 300);
-      setTimeout(() => { clearInterval(pollId); finish(); }, 4000); // hard cap — never wait forever, genuinely-empty accounts still resolve
+      setTimeout(() => { clearInterval(pollId); finish(); }, 30000); // generous safety net only — not the expected path
     }
   }).catch(() => {
     window._homeDataSyncDone = true; // don't get stuck loading forever even if this pair fails
@@ -34667,7 +34703,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.42.10";
+const APP_VERSION = "4.42.12";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
