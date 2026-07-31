@@ -9443,19 +9443,19 @@ async function permanentlyDeleteD11Match(matchId) {
 // via the fallback API), and manually-created matches leave it blank
 // unless typed in at creation time — until now there was no way to add or
 // correct it after the fact without deleting and recreating the match. ──
-function d11EditSeriesName(matchId) {
+async function d11EditSeriesName(matchId) {
   const m = matches[matchId];
   if (!m) return;
   const current = m.seriesName || '';
   const newVal = prompt('Series / Tournament / League name:\n(e.g. "ICC T20 World Cup 2026", "Lanka Premier League 2026")\n\nCurrent: ' + (current || '(not set)'), current);
   if (newVal === null) return; // cancelled
   m.seriesName = newVal.trim();
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   render();
   showNotif(m.seriesName ? '✅ Series name updated: ' + m.seriesName : '✅ Series name cleared');
 }
 
-function d11EditDeadline(matchId) {
+async function d11EditDeadline(matchId) {
   const m = matches[matchId];
   if (!m) return;
   const current = m.deadline ? new Date(m.deadline) : new Date(Date.now() + 86400000);
@@ -9466,7 +9466,7 @@ function d11EditDeadline(matchId) {
   const parsed = new Date(newVal);
   if (isNaN(parsed.getTime())) { showNotif('Invalid date — use format YYYY-MM-DDTHH:MM', 'error'); return; }
   m.deadline = parsed.getTime();
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   render();
   showNotif('✅ Deadline updated: ' + pkDateTimeYear(parsed));
 }
@@ -9477,7 +9477,7 @@ function d11EditDeadline(matchId) {
 // entered, since T20/ODI/Test each use different points values (see
 // D11_SCORING). Safe to use any time; does NOT touch players, teams, or
 // publish/lock state, only the format tag + recalculated points. ──
-function d11EditFormat(matchId) {
+async function d11EditFormat(matchId) {
   const m = matches[matchId];
   const d11m = dream11Matches[matchId];
   if (!m) return;
@@ -9492,14 +9492,14 @@ function d11EditFormat(matchId) {
   if (clean === current) { showNotif('Format unchanged'); return; }
   if (!confirm(`Change format from ${current} to ${clean}?\n\nThis will recalculate every player's fantasy points using ${clean} scoring rules (per-run/wicket bonuses, milestones, SR/ER bands etc. all differ by format).`)) return;
   m.format = clean;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   if (d11m) {
     // Recalculate every player's points under the new format's scoring rules
     (d11m.players || []).forEach(p => {
       if (p.stats) p.points = calcDream11PlayerPoints(p.stats, matchId);
     });
     recalcDream11MatchPoints(d11m);
-    _saveDream11MatchToFirestore(matchId, d11m);
+    await _saveDream11MatchToFirestore(matchId, d11m);
     d11RefreshLiveTeamPoints(matchId);
   }
   render();
@@ -10980,7 +10980,7 @@ async function masterTeamsSelectSearchedPhoto(url) {
       reader.readAsDataURL(blob);
     });
     const img = new Image();
-    img.onload = () => {
+    img.onload = async () => {
       const canvas = document.createElement('canvas');
       const maxSide = 140;
       const ratio = Math.min(maxSide / img.width, maxSide / img.height, 1);
@@ -10989,9 +10989,9 @@ async function masterTeamsSelectSearchedPhoto(url) {
       canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
       const b64 = canvas.toDataURL('image/jpeg', 0.8);
       p.photo = b64;
-      _saveTeamSquadToFirestore(target.key, squad);
+      await _saveTeamSquadToFirestore(target.key, squad);
       try { localStorage.setItem('pp_team_squads_cache', JSON.stringify(teamSquads)); } catch(e){}
-      masterTeamsPropagatePhoto(p.name, b64);
+      await masterTeamsPropagatePhoto(p.name, b64);
       masterTeamsClosePhotoSearch();
       showNotif('✅ Photo set from search!');
     };
@@ -11185,7 +11185,7 @@ function masterTeamsSetPlayerCredit(key, playerId, val) {
 // ── Propagate a player's updated photo (from Master Teams) into every match/tournament
 // that already copied this player, since match player-pools are independent snapshots
 // and don't auto-sync when the master squad is edited later.
-function masterTeamsPropagatePhoto(playerName, photo) {
+async function masterTeamsPropagatePhoto(playerName, photo) {
   const nameLower = (playerName || '').toLowerCase();
   if (!nameLower) return;
   // Dream11 matches
@@ -11196,25 +11196,25 @@ function masterTeamsPropagatePhoto(playerName, photo) {
   // been opened yet this session won't get this photo propagated until
   // it's next opened AND saved by an admin. Acceptable trade-off for a
   // cosmetic photo-sync convenience feature; not data-destructive either way.
-  Object.keys(dream11Matches).forEach(matchId => {
+  for (const matchId of Object.keys(dream11Matches)) {
     const d11m = dream11Matches[matchId];
-    if (!d11m || !d11m.players || d11m._summaryOnly) return;
+    if (!d11m || !d11m.players || d11m._summaryOnly) continue;
     let changed = false;
     d11m.players.forEach(p => { if (p.name.toLowerCase() === nameLower) { p.photo = photo; changed = true; } });
-    if (changed) _saveDream11MatchToFirestore(matchId, d11m);
-  });
+    if (changed) await _saveDream11MatchToFirestore(matchId, d11m);
+  }
   // User Tournaments
-  Object.keys(utTournaments).forEach(tId => {
+  for (const tId of Object.keys(utTournaments)) {
     const t = utTournaments[tId];
-    if (!t || !t.matches) return;
+    if (!t || !t.matches) continue;
     let changed = false;
     Object.keys(t.matches).forEach(mId => {
       const m = t.matches[mId];
       if (!m || !m.players) return;
       m.players.forEach(p => { if (p.name.toLowerCase() === nameLower) { p.photo = photo; changed = true; } });
     });
-    if (changed) _saveUtTournamentToFirestore(tId, t);
-  });
+    if (changed) await _saveUtTournamentToFirestore(tId, t);
+  }
 }
 
 function masterTeamsUploadPlayerPhoto(key, playerId, input) {
@@ -11227,9 +11227,9 @@ function masterTeamsUploadPlayerPhoto(key, playerId, input) {
     const p = squad && squad.players.find(x => x.id === playerId);
     if (!p) return;
     p.photo = cropped;
-    _saveTeamSquadToFirestore(key, squad);
+    await _saveTeamSquadToFirestore(key, squad);
     try { localStorage.setItem('pp_team_squads_cache', JSON.stringify(teamSquads)); } catch(e){}
-    masterTeamsPropagatePhoto(p.name, cropped);
+    await masterTeamsPropagatePhoto(p.name, cropped);
     render();
     showNotif('✅ Photo updated');
   };
@@ -13279,11 +13279,11 @@ async function d11SearchLiveMatchCll(matchId) {
   }
 }
 
-function d11LinkCllMatch(matchId, cllMatchId) {
+async function d11LinkCllMatch(matchId, cllMatchId) {
   const m = matches[matchId];
   if (!m) return;
   m.cllMatchId = cllMatchId;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   _d11CllSearchResults = [];
   d11CllLinkPickerMatchId = null;
   showNotif('🔗 Linked to Cricket Live Line! Fetching squad…');
@@ -13291,23 +13291,23 @@ function d11LinkCllMatch(matchId, cllMatchId) {
   d11FetchSquadFromCll(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line link failed:', e.message));
 }
 
-function d11UnlinkCllMatch(matchId) {
+async function d11UnlinkCllMatch(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.cllMatchId;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Cricket Live Line — switched back to manual paste');
   render();
 }
 
-function d11UnlinkCb2Match(matchId) {
+async function d11UnlinkCb2Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.cb2MatchId;
   delete m.cb2Team1Id;
   delete m.cb2Team2Id;
   delete m.cb2SeriesId;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Cricbuzz No 2 — switched back to manual paste');
   render();
 }
@@ -13649,11 +13649,11 @@ async function d11SearchLiveMatchSbx(matchId) {
   }
 }
 
-function d11LinkSbxMatch(matchId, sbxMatchId) {
+async function d11LinkSbxMatch(matchId, sbxMatchId) {
   const m = matches[matchId];
   if (!m) return;
   m.sbxMatchId = sbxMatchId;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   _d11SbxSearchResults = [];
   d11SbxLinkPickerMatchId = null;
   showNotif('🔗 Linked to Sportbex! Fetching squad…');
@@ -13661,11 +13661,11 @@ function d11LinkSbxMatch(matchId, sbxMatchId) {
   d11FetchSquadFromSbx(matchId).catch(e => console.warn('Auto squad fetch after Sportbex link failed:', e.message));
 }
 
-function d11UnlinkSbxMatch(matchId) {
+async function d11UnlinkSbxMatch(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.sbxMatchId;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Sportbex — switched back to manual paste');
   render();
 }
@@ -14011,11 +14011,11 @@ async function d11SyncLiveMatchSbx(matchId, showToast) {
 // (pre-deadline, 20/15/10/5-min windows) and d11AutoSyncSbxPostDeadline
 // (post-deadline, 30/60/90/120/240-min windows). It stays armed regardless
 // of whether admin later turns it OFF or even closes the app.
-function d11ToggleSbxAutoSync(matchId) {
+async function d11ToggleSbxAutoSync(matchId) {
   const m = matches[matchId];
   if (!m) return;
   m.sbxAutoSync = !m.sbxAutoSync;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   showNotif(m.sbxAutoSync
     ? '🤖 Automatic armed — deadline se pehle 20/15/10/5min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
     : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
@@ -14402,12 +14402,12 @@ async function d11SearchLiveMatchAll(matchId) {
   }
 }
 
-function d11LinkAllMatch(matchId, allMatchId, seriesId) {
+async function d11LinkAllMatch(matchId, allMatchId, seriesId) {
   const m = matches[matchId];
   if (!m) return;
   m.allMatchId = allMatchId;
   if (seriesId) m.allSeriesId = seriesId;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   _d11AllSearchResults = [];
   d11AllLinkPickerMatchId = null;
   showNotif('🔗 Linked to Advance Live Line! Fetching squad…');
@@ -14415,12 +14415,12 @@ function d11LinkAllMatch(matchId, allMatchId, seriesId) {
   d11FetchSquadFromAll(matchId).catch(e => console.warn('Auto squad fetch after Advance Live Line link failed:', e.message));
 }
 
-function d11UnlinkAllMatch(matchId) {
+async function d11UnlinkAllMatch(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.allMatchId;
   delete m.allSeriesId;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Advance Live Line — switched back to manual paste');
   render();
 }
@@ -14771,7 +14771,23 @@ async function d11SyncLiveMatchAll(matchId, showToast) {
 
     _d11AllLastSyncedAt[matchId] = Date.now();
     d11ApplyBackupReplacements(matchId);
-    await _saveMatchToFirestore(matchId, m);
+    // ── FIX: stale-object race that silently reverted the "🤖 Automatic"
+    // toggle ────────────────────────────────────────────────────────────
+    // `m` was captured at the TOP of this function, before the `await
+    // _allFetch(...)` network call. If the admin flips the Automatic toggle
+    // (or any other field on this match) while that network call is still
+    // in flight, `matches[matchId]` gets reassigned to a NEW object (the
+    // live Firestore listener does `matches = v` on every snapshot) — so by
+    // the time we get here, our local `m` is a stale reference missing that
+    // change. Writing `m` as-is would silently overwrite the toggle back to
+    // its old value. Fix: re-read the current object right before saving,
+    // and only merge in the specific fields THIS function is responsible
+    // for (scoreA/scoreB) — never blind-overwrite the whole document.
+    const _freshM = matches[matchId] || m;
+    if (m.scoreA !== undefined) _freshM.scoreA = m.scoreA;
+    if (m.scoreB !== undefined) _freshM.scoreB = m.scoreB;
+    matches[matchId] = _freshM;
+    await _saveMatchToFirestore(matchId, _freshM);
     await _saveDream11MatchToFirestore(matchId, d11m);
     await d11RefreshLiveTeamPoints(matchId);
 
@@ -14789,10 +14805,13 @@ async function d11SyncLiveMatchAll(matchId, showToast) {
       delete _d11PendingFinish[matchId + '_all'];
     }
     if (isFinished) {
-      m.status = 'completed';
+      // Same stale-reference fix as above — re-read fresh before mutating/saving.
+      const _freshM2 = matches[matchId] || m;
+      _freshM2.status = 'completed';
+      matches[matchId] = _freshM2;
       if (d11m) d11m.scored = true;
       _d11MarkTeamsScoredForMatch(matchId);
-      await _saveMatchToFirestore(matchId, m);
+      await _saveMatchToFirestore(matchId, _freshM2);
       await _saveDream11MatchToFirestore(matchId, d11m);
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
@@ -14816,11 +14835,11 @@ async function d11SyncLiveMatchAll(matchId, showToast) {
 // (pre-deadline, 20/15/10/5-min windows) and d11AutoSyncAllPostDeadline
 // (post-deadline, 30/60/90/120/240-min windows). It stays armed regardless
 // of whether admin later turns it OFF or even closes the app.
-function d11ToggleAllAutoSync(matchId) {
+async function d11ToggleAllAutoSync(matchId) {
   const m = matches[matchId];
   if (!m) return;
   m.allAutoSync = !m.allAutoSync;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   showNotif(m.allAutoSync
     ? '🤖 Automatic armed — deadline se pehle 20/15/10/5min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
     : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
@@ -15146,11 +15165,11 @@ async function d11SearchLiveMatchLl2(matchId) {
   }
 }
 
-function d11LinkLl2Match(matchId, ll2MatchId) {
+async function d11LinkLl2Match(matchId, ll2MatchId) {
   const m = matches[matchId];
   if (!m) return;
   m.ll2MatchId = ll2MatchId;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   _d11Ll2SearchResults = [];
   d11Ll2LinkPickerMatchId = null;
   showNotif('🔗 Linked to Cricket Live Line 2! Fetching squad…');
@@ -15158,11 +15177,11 @@ function d11LinkLl2Match(matchId, ll2MatchId) {
   d11FetchSquadFromLl2(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 2 link failed:', e.message));
 }
 
-function d11UnlinkLl2Match(matchId) {
+async function d11UnlinkLl2Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.ll2MatchId;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Cricket Live Line 2 — switched back to manual paste');
   render();
 }
@@ -15280,14 +15299,14 @@ async function d11SearchLiveMatchCb2(matchId) {
     render();
   }
 }
-function d11LinkCb2Match(matchId, cb2MatchId, team1Id, team2Id, seriesId) {
+async function d11LinkCb2Match(matchId, cb2MatchId, team1Id, team2Id, seriesId) {
   const m = matches[matchId];
   if (!m) return;
   m.cb2MatchId = cb2MatchId;
   if (team1Id) m.cb2Team1Id = team1Id;
   if (team2Id) m.cb2Team2Id = team2Id;
   if (seriesId) m.cb2SeriesId = seriesId;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   d11Cb2LinkPickerMatchId = null;
   _d11Cb2SearchResults = [];
   showNotif('✅ Linked to Cricbuzz No 2! Use 📥 Fetch Squad next.');
@@ -16625,12 +16644,12 @@ async function d11SearchLiveMatchLl3(matchId) {
   }
 }
 
-function d11LinkLl3Match(matchId, ll3MatchId, seriesId) {
+async function d11LinkLl3Match(matchId, ll3MatchId, seriesId) {
   const m = matches[matchId];
   if (!m) return;
   m.ll3MatchId = ll3MatchId;
   if (seriesId) m.ll3SeriesId = seriesId; // captured at link time — avoids relying on the match/info endpoint later
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   _d11Ll3SearchResults = [];
   d11Ll3LinkPickerMatchId = null;
   showNotif('🔗 Linked to Cricket Live Line 3! Fetching squad…');
@@ -16638,11 +16657,11 @@ function d11LinkLl3Match(matchId, ll3MatchId, seriesId) {
   d11FetchSquadFromLl3(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 3 link failed:', e.message));
 }
 
-function d11UnlinkLl3Match(matchId) {
+async function d11UnlinkLl3Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.ll3MatchId;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Cricket Live Line 3 — switched back to manual paste');
   render();
 }
@@ -17043,11 +17062,11 @@ async function d11SyncLiveMatchLl3(matchId, showToast) {
 // (pre-deadline, 20/15/10/5-min windows) and d11AutoSyncLl3PostDeadline
 // (post-deadline, 30/60/90/120/240-min windows). It stays armed regardless
 // of whether admin later turns it OFF or even closes the app.
-function d11ToggleLl3AutoSync(matchId) {
+async function d11ToggleLl3AutoSync(matchId) {
   const m = matches[matchId];
   if (!m) return;
   m.ll3AutoSync = !m.ll3AutoSync;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   showNotif(m.ll3AutoSync
     ? '🤖 Automatic armed — deadline se pehle 20/15/10/5min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
     : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
@@ -17482,11 +17501,11 @@ async function d11SearchLiveMatchLl4(matchId) {
   }
 }
 
-function d11LinkLl4Match(matchId, ll4MatchId) {
+async function d11LinkLl4Match(matchId, ll4MatchId) {
   const m = matches[matchId];
   if (!m) return;
   m.ll4MatchId = ll4MatchId;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   _d11Ll4SearchResults = [];
   d11Ll4LinkPickerMatchId = null;
   showNotif('🔗 Linked to Cricket Live Line 4! Fetching squad…');
@@ -17494,11 +17513,11 @@ function d11LinkLl4Match(matchId, ll4MatchId) {
   d11FetchSquadFromLl4(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 4 link failed:', e.message));
 }
 
-function d11UnlinkLl4Match(matchId) {
+async function d11UnlinkLl4Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.ll4MatchId;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Cricket Live Line 4 — switched back to manual paste');
   render();
 }
@@ -18301,12 +18320,12 @@ async function d11SearchLiveMatchLl5(matchId) {
   }
 }
 
-function d11LinkLl5Match(matchId, ll5MatchId, seriesId) {
+async function d11LinkLl5Match(matchId, ll5MatchId, seriesId) {
   const m = matches[matchId];
   if (!m) return;
   m.ll5MatchId = ll5MatchId;
   if (seriesId) m.ll5SeriesId = seriesId; // captured at link time — avoids relying on a separate lookup later
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   _d11Ll5SearchResults = [];
   d11Ll5LinkPickerMatchId = null;
   showNotif('🔗 Linked to Cricket Live Line 5! Fetching squad…');
@@ -18314,13 +18333,13 @@ function d11LinkLl5Match(matchId, ll5MatchId, seriesId) {
   d11FetchSquadFromLl5(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 5 link failed:', e.message));
 }
 
-function d11UnlinkLl5Match(matchId) {
+async function d11UnlinkLl5Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.ll5MatchId;
   delete m.ll5SeriesId;
   delete m.ll5AutoSync;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Cricket Live Line 5 — switched back to manual paste');
   render();
 }
@@ -18336,11 +18355,11 @@ function d11UnlinkLl5Match(matchId) {
 // matches the "admin phone off, still works" requirement — the trigger
 // just needs SOME active tab (any user's, at any later time), not the
 // admin's specifically.
-function d11ToggleLl5AutoSync(matchId) {
+async function d11ToggleLl5AutoSync(matchId) {
   const m = matches[matchId];
   if (!m) return;
   m.ll5AutoSync = !m.ll5AutoSync;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   showNotif(m.ll5AutoSync
     ? '🤖 Automatic armed — deadline se pehle 20/15/10/5min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
     : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
@@ -19999,14 +20018,14 @@ function renderReceiptImageModal() {
   </div>`;
 }
 
-function d11LinkLiveMatch(matchId, cricbuzzMatchId, team1Id, team2Id, seriesId) {
+async function d11LinkLiveMatch(matchId, cricbuzzMatchId, team1Id, team2Id, seriesId) {
   const m = matches[matchId];
   if (!m) return;
   m.cricketDataMatchId = cricbuzzMatchId; // field name kept for backward compatibility with earlier saved links
   if (team1Id) m.cricbuzzTeam1Id = team1Id;
   if (team2Id) m.cricbuzzTeam2Id = team2Id;
   if (seriesId) m.cricbuzzSeriesId = seriesId; // used as a fallback for squads before the match's own squad is announced
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   _d11LiveSyncSearchResults = [];
   showNotif('🔗 Linked to Cricbuzz! Fetching squad…');
   render();
@@ -20021,13 +20040,13 @@ function d11LinkLiveMatch(matchId, cricbuzzMatchId, team1Id, team2Id, seriesId) 
   d11FetchSquadFromCricbuzz(matchId).catch(e => console.warn('Auto squad fetch after link failed:', e.message));
 }
 
-function d11UnlinkLiveMatch(matchId) {
+async function d11UnlinkLiveMatch(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.cricketDataMatchId;
   delete m.cricbuzzTeam1Id;
   delete m.cricbuzzTeam2Id;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Cricbuzz — switched back to manual paste');
   render();
 }
@@ -20089,24 +20108,24 @@ async function d11SearchLiveMatchEspn(matchId) {
   }
 }
 
-function d11LinkEspnMatch(matchId, espnObjectId, espnSeriesId) {
+async function d11LinkEspnMatch(matchId, espnObjectId, espnSeriesId) {
   const m = matches[matchId];
   if (!m) return;
   m.espnMatchId = espnObjectId;
   if (espnSeriesId) m.espnSeriesId = espnSeriesId;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   _d11EspnSearchResults = [];
   showNotif('🔗 Linked to ESPN Cricinfo! Fetching squad…');
   render();
   d11FetchSquadFromEspn(matchId).catch(e => console.warn('Auto squad fetch after ESPN link failed:', e.message));
 }
 
-function d11UnlinkEspnMatch(matchId) {
+async function d11UnlinkEspnMatch(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.espnMatchId;
   delete m.espnSeriesId;
-  _saveMatchToFirestore(matchId, m);
+  await _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from ESPN Cricinfo — switched back to manual paste');
   render();
 }
@@ -27304,7 +27323,7 @@ function d11ExtractPlayerNamesFromScorecard(text) {
   return names;
 }
 
-function d11AutoConfirmPlayingXIFromScorecard(matchId, scorecardText) {
+async function d11AutoConfirmPlayingXIFromScorecard(matchId, scorecardText) {
   const d11m = dream11Matches[matchId];
   if (!d11m || !scorecardText) return { matchedCount: 0, totalNames: 0 };
 
@@ -27326,7 +27345,7 @@ function d11AutoConfirmPlayingXIFromScorecard(matchId, scorecardText) {
   });
 
   if (matchedCount > 0) {
-    _saveDream11MatchToFirestore(matchId, d11m);
+    await _saveDream11MatchToFirestore(matchId, d11m);
     d11ApplyBackupReplacements(matchId);
   }
   return { matchedCount, totalNames: rawNames.length };
@@ -27363,7 +27382,7 @@ async function d11SaveMatchScorecard(matchId) {
     // their queued backup — same as if admin had manually ticked each player.
     let xiMsg = '';
     if (scorecardText && dream11Matches[matchId]) {
-      const { matchedCount } = d11AutoConfirmPlayingXIFromScorecard(matchId, scorecardText);
+      const { matchedCount } = await d11AutoConfirmPlayingXIFromScorecard(matchId, scorecardText);
       if (matchedCount > 0) xiMsg = ` · 🏏 ${matchedCount} players auto-confirmed Playing XI, backups applied`;
     }
 
@@ -30520,7 +30539,7 @@ function renderD11QuickScoreSelector() {
   }).join('')}`;
 }
 
-function d11QuickSaveAllStats(matchId) {
+async function d11QuickSaveAllStats(matchId) {
   const d11m = dream11Matches[matchId];
   if (!d11m) return;
   let count = 0;
@@ -30542,7 +30561,7 @@ function d11QuickSaveAllStats(matchId) {
     count++;
   });
   d11m.lastLiveUpdateAt = getDateTime();
-  _saveDream11MatchToFirestore(matchId, d11m);
+  await _saveDream11MatchToFirestore(matchId, d11m);
   d11RefreshLiveTeamPoints(matchId);
   showNotif(`✅ ${count} players ke stats save ho gaye — live points update 🔴`);
   render();
@@ -35132,7 +35151,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.48.0";
+const APP_VERSION = "4.49.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
