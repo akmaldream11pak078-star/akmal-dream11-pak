@@ -34300,6 +34300,13 @@ async function initApp() {
     }
     const _uCache = localStorage.getItem('pp_users_cache');
     if (_uCache) Object.assign(users, JSON.parse(_uCache));
+    // Also paint this user's Dream11 teams from cache — without this, the
+    // very first frame doesn't yet know the user already built a team for
+    // a match, so My Matches cards show "Build My Team" instead of "My
+    // Team" until Step 3's real dream11Teams read lands a moment later
+    // (the card then flips correctly, but only after that visible delay).
+    const _teamsCache = localStorage.getItem('pp_dream11_teams_cache');
+    if (_teamsCache) Object.assign(dream11Teams, JSON.parse(_teamsCache));
   } catch(e){}
   // If we already have real matches/dream11 data from cache above, skip the
   // skeleton on the very first paint — Step 3 will still silently correct
@@ -34782,7 +34789,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.45.0";
+const APP_VERSION = "4.46.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
