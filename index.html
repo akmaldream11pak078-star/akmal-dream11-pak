@@ -2904,6 +2904,72 @@ async function _saveTeamSquadToFirestore(teamKey, data) {
 async function _loadAllTeamSquadsFromFirestore(forceRefresh) {
   return _liveLoadCollection('pp_team_squads', () => teamSquads, (v) => { teamSquads = v; }, 'pp_team_squads_cache', { rerenderOnUpdate: true }, forceRefresh);
 }
+// ── READS-QUOTA FIX: points-only summary for the Global Leaderboard ───────
+// getGlobalLeaderboard() needs every user's totalPoints across every
+// Dream11 team they've ever submitted — but dream11Teams in memory only
+// ever holds teams for matches/users someone has actually opened this
+// session (see d11EnsureTeamsForMatch/d11EnsureTeamsForUser above), by
+// design, to avoid re-introducing the 698K-read full-collection problem.
+// That left the leaderboard silently incomplete/stale for anyone whose
+// teams hadn't happened to load into this browser's memory.
+//
+// Fix: a SEPARATE, tiny summary doc that stores ONLY the 4 fields the
+// leaderboard actually needs per team (userEmail, matchId, teamSlot,
+// totalPoints) — never the full team object (players[], etc), so this
+// stays small even as the real pp_dream11_teams collection grows. Kept in
+// sync from both places a team's points can change: the full save
+// (_saveDream11TeamToFirestore) and the points-only scoring update
+// (_updateDream11TeamPointsOnly).
+function _d11TeamPointsFieldsFor(teamId, data) {
+  return { userEmail: data.userEmail, matchId: data.matchId, teamSlot: data.teamSlot || 1, totalPoints: data.totalPoints || 0 };
+}
+async function _updateD11TeamPointsSummaryEntry(teamId, fields) {
+  if (!window._fbDb || !window._fbFns) return;
+  try {
+    const { doc, getDoc, setDoc } = window._fbFns;
+    const ref = doc(window._fbDb, 'pp_dream11_teams_points_summary', 'main');
+    if (!_genericSummaryCache['pp_dream11_teams_points_summary']) {
+      const snap = await getDoc(ref);
+      _genericSummaryCache['pp_dream11_teams_points_summary'] = snap.exists() ? (snap.data().entries || {}) : {};
+    }
+    _genericSummaryCache['pp_dream11_teams_points_summary'][teamId] = fields;
+    await setDoc(ref, { entries: _genericSummaryCache['pp_dream11_teams_points_summary'], updatedAt: Date.now() });
+  } catch(e) {
+    console.warn('Dream11 team points summary sync skipped:', e.message);
+  }
+}
+// Loads the points-only summary (1 read) and returns { [email]: totalPoints }
+// pre-aggregated across every team (teamSlot 1 only, matching
+// getGlobalLeaderboard's existing rule), for the leaderboard to merge with
+// `users`. Falls back to whatever's already in dream11Teams locally (old
+// behaviour) if the summary is unreachable — never blocks rendering.
+async function d11LoadTeamPointsSummary(forceRefresh) {
+  const summary = await _loadGenericSummary('pp_dream11_teams_points_summary', forceRefresh);
+  if (summary === null) return null;
+  if (Object.keys(summary).length === 0) {
+    // One-time backfill — same rationale as every other summary above.
+    if (window._d11TeamPtsBackfillDone || window._d11TeamPtsBackfillInFlight) return null;
+    window._d11TeamPtsBackfillInFlight = true;
+    try {
+      if (!window._fbDb || !window._fbFns || !window._fbFns.collection || !window._fbFns.getDocs) return null;
+      const { collection, getDocs } = window._fbFns;
+      const snap = await getDocs(collection(window._fbDb, 'pp_dream11_teams'));
+      const built = {};
+      snap.forEach(d => { built[d.id] = _d11TeamPointsFieldsFor(d.id, d.data()); });
+      _genericSummaryCache['pp_dream11_teams_points_summary'] = built;
+      const { doc, setDoc } = window._fbFns;
+      await setDoc(doc(window._fbDb, 'pp_dream11_teams_points_summary', 'main'), { entries: built, updatedAt: Date.now() });
+      window._d11TeamPtsBackfillDone = true;
+      return built;
+    } catch(e) {
+      console.warn('Dream11 team points summary backfill failed:', e.message);
+      return null;
+    } finally {
+      window._d11TeamPtsBackfillInFlight = false;
+    }
+  }
+  return summary;
+}
 async function _saveDream11TeamToFirestore(teamId, data) {
   if (!window._fbDb || !window._fbFns) {
     throw new Error('Firebase not ready');
@@ -2911,6 +2977,7 @@ async function _saveDream11TeamToFirestore(teamId, data) {
   const { doc, setDoc } = window._fbFns;
   try {
     await setDoc(doc(window._fbDb, 'pp_dream11_teams', teamId), _stampUpdatedAt(data));
+    _updateD11TeamPointsSummaryEntry(teamId, _d11TeamPointsFieldsFor(teamId, data));
   } catch(e) {
     console.error('Dream11 team save error:', e.code || e.message, e);
     throw e;
@@ -2933,6 +3000,11 @@ async function _updateDream11TeamPointsOnly(teamId, totalPoints) {
   const { doc, updateDoc } = window._fbFns;
   try {
     await updateDoc(doc(window._fbDb, 'pp_dream11_teams', teamId), { totalPoints, updatedAt: Date.now() });
+    // Points-only summary needs userEmail/matchId/teamSlot too — pull from
+    // the local in-memory copy (already merged with this same value by the
+    // caller, same convention as every other write path in this app).
+    const local = dream11Teams[teamId];
+    if (local) _updateD11TeamPointsSummaryEntry(teamId, _d11TeamPointsFieldsFor(teamId, { ...local, totalPoints }));
   } catch(e) {
     console.error('Dream11 team points-only update error:', e.code || e.message, e);
     throw e;
@@ -4797,12 +4869,30 @@ function getGlobalLeaderboard() {
   // Only Team 1 (teamSlot 1, or unset which defaults to 1) counts toward
   // global points — a user who creates extra teams (Team 2, Team 3...) in
   // the same match should not get their points added multiple times here.
+  //
+  // Points come from _d11TeamPointsSummaryForLeaderboard (see
+  // d11LoadTeamPointsSummary) when available — a lightweight, points-only
+  // summary covering EVERY team across every user (see that function for
+  // why dream11Teams alone isn't reliable for this: it's intentionally
+  // partial, only holding teams for matches/users someone has actually
+  // opened this session). Falls back to whatever's in dream11Teams locally
+  // if the summary hasn't loaded yet, so the leaderboard still renders
+  // something on first paint rather than going blank.
   const d11PointsByEmail = {};
-  Object.values(dream11Teams||{}).forEach(t => {
-    if (!t || !t.userEmail) return;
-    if ((t.teamSlot||1) !== 1) return;
-    d11PointsByEmail[t.userEmail] = (d11PointsByEmail[t.userEmail]||0) + (t.totalPoints||0);
-  });
+  const summarySource = window._d11TeamPointsSummaryForLeaderboard;
+  if (summarySource) {
+    Object.values(summarySource).forEach(t => {
+      if (!t || !t.userEmail) return;
+      if ((t.teamSlot||1) !== 1) return;
+      d11PointsByEmail[t.userEmail] = (d11PointsByEmail[t.userEmail]||0) + (t.totalPoints||0);
+    });
+  } else {
+    Object.values(dream11Teams||{}).forEach(t => {
+      if (!t || !t.userEmail) return;
+      if ((t.teamSlot||1) !== 1) return;
+      d11PointsByEmail[t.userEmail] = (d11PointsByEmail[t.userEmail]||0) + (t.totalPoints||0);
+    });
+  }
 
   return Object.entries(users)
     .filter(([e,u]) => !u.isAdmin)
@@ -5970,6 +6060,13 @@ function render() {
     const _d11TeamScreens = ['dream11Build','dream11TeamPicker','dream11JoinContest','dream11ContestParticipants','dream11Pool','d11ViewTeam'];
     if (typeof tab !== 'undefined' && _d11TeamScreens.includes(tab) && typeof d11ActiveMatchId !== 'undefined' && d11ActiveMatchId && typeof d11EnsureTeamsForMatch === 'function') {
       d11EnsureTeamsForMatch(d11ActiveMatchId).then(hadNewData => { if (hadNewData) render(); }).catch(()=>{});
+    }
+    // Global Leaderboard needs points across EVERY user's Dream11 teams,
+    // not just whichever teams happen to already be in memory (see
+    // getGlobalLeaderboard's comment) — load the points-only summary (1
+    // read) once per session, no-ops after that until a manual refresh.
+    if (typeof tab !== 'undefined' && tab === 'leaderboard' && typeof d11LoadTeamPointsSummary === 'function' && !window._d11TeamPointsSummaryForLeaderboard) {
+      d11LoadTeamPointsSummary().then(summary => { if (summary) { window._d11TeamPointsSummaryForLeaderboard = summary; render(); } }).catch(()=>{});
     }
     // Same idea for the FULL match doc (real players[]/participant lists)
     // — list screens run fine on the cheap summary-only data, but these
@@ -34389,7 +34486,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.42.0";
+const APP_VERSION = "4.42.1";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
