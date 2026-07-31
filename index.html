@@ -6394,7 +6394,7 @@ function renderHome() {
   if (d11Stats.totalPlayed === 0 && !window._homeSelfHealScheduled) {
     const hasAnyTeams = Object.keys(dream11Teams||{}).some(k => dream11Teams[k]?.userEmail === currentUser.email);
     const stillLoading = (typeof _d11TeamsUserFetchInFlight !== 'undefined' && _d11TeamsUserFetchInFlight.has(currentUser.email))
-      || !window._homeDataSyncDone;
+      || !window._homeStatsDataSyncDone;
     if (hasAnyTeams || stillLoading) {
       window._homeSelfHealScheduled = true;
       setTimeout(() => {
@@ -6407,11 +6407,11 @@ function renderHome() {
   return `
   <div class="stat-grid mb14">
     <div class="stat-box">
-      <div class="stat-val" style="color:var(--gold)">${window._homeDataSyncDone ? totalPoints : '<span style="opacity:0.5">⏳</span>'}</div>
+      <div class="stat-val" style="color:var(--gold)">${window._homeStatsDataSyncDone ? totalPoints : '<span style="opacity:0.5">⏳</span>'}</div>
       <div class="stat-lbl">Total Points</div>
     </div>
     <div class="stat-box">
-      <div class="stat-val" style="color:var(--blue-l)">${window._homeDataSyncDone ? d11Stats.totalPlayed : '<span style="opacity:0.5">⏳</span>'}</div>
+      <div class="stat-val" style="color:var(--blue-l)">${window._homeStatsDataSyncDone ? d11Stats.totalPlayed : '<span style="opacity:0.5">⏳</span>'}</div>
       <div class="stat-lbl">Contests Joined</div>
     </div>
   </div>
@@ -34257,7 +34257,55 @@ async function initApp() {
   // for a split second (or longer on a slow connection) before the real data
   // pops in. window._homeDataSyncDone lets renderHome() show a loading
   // skeleton instead until the first real sync finishes (see Step 3).
-  window._homeDataSyncDone = false;
+  // ── INSTANT-PAINT FIX ────────────────────────────────────────────────
+  // Previously matches/dream11Matches/users only got read from their
+  // localStorage caches INSIDE Step 3 (_liveLoadCollection /
+  // _loadAllUsersFromFirestore etc), i.e. after Firebase Auth (Step 2) had
+  // already confirmed the session — so even with a warm cache sitting
+  // right there on disk, the user still saw the "Loading your matches…"
+  // skeleton + ⏳ stat boxes for at least one Auth round-trip before Step 3
+  // even started reading that cache. Reading these caches here, synchronously,
+  // BEFORE the very first render() call, means a returning user (cache
+  // already warm from a previous open) sees real Upcoming/Live/Completed
+  // matches AND real Total Points/Contests Joined on the very first paint —
+  // genuinely no perceptible wait. Step 3 still runs exactly as before and
+  // silently refreshes everything from Firestore in the background the
+  // moment it lands; this only changes what the FIRST frame shows.
+  try {
+    const _mCache = localStorage.getItem('pp_matches_cache');
+    if (_mCache) matches = JSON.parse(_mCache);
+    const _d11Cache = localStorage.getItem('pp_dream11_matches_cache');
+    if (_d11Cache) dream11Matches = JSON.parse(_d11Cache);
+    if (!_d11Cache) {
+      const _d11Summary = localStorage.getItem('pp_dream11_summary_cache');
+      if (_d11Summary && typeof _d11SummaryFieldsFor === 'function') {
+        // No full-match cache yet, but a summary cache exists — build enough
+        // of a placeholder dream11Matches so My Matches can still render
+        // real cards immediately (same shape d11LoadMatchesSummaryFirst
+        // builds), instead of staying empty until Step 3's network read.
+        try {
+          const summary = JSON.parse(_d11Summary);
+          Object.keys(summary || {}).forEach(matchId => {
+            const s = summary[matchId];
+            dream11Matches[matchId] = {
+              id: matchId, published: s.published, scored: s.scored,
+              players: [], _summaryOnly: true,
+              megaParticipants: new Array(s.megaCount || 0).fill(null),
+              miniMegaParticipants: new Array(s.miniMegaCount || 0).fill(null),
+              freeParticipants: new Array(s.freeCount || 0).fill(null),
+            };
+          });
+        } catch(e){}
+      }
+    }
+    const _uCache = localStorage.getItem('pp_users_cache');
+    if (_uCache) Object.assign(users, JSON.parse(_uCache));
+  } catch(e){}
+  // If we already have real matches/dream11 data from cache above, skip the
+  // skeleton on the very first paint — Step 3 will still silently correct
+  // anything stale once its own (also cache-first) reads land.
+  window._homeDataSyncDone = (Object.keys(matches||{}).length > 0 || Object.keys(dream11Matches||{}).length > 0);
+  window._homeStatsDataSyncDone = Object.keys(users||{}).length > 0;
   loadLocalCache();
   loadSession(); // optimistic instant paint from localStorage (legacy/cache only)
   applySavedAppTheme(); // apply saved Light/Dark Mode preference before first paint
@@ -34347,6 +34395,7 @@ async function initApp() {
     console.warn("Firebase not available — running on localStorage cache only");
     window._authCheckDone = true; // give up waiting; show login screen if no cached user
     window._homeDataSyncDone = true; // no Firestore to wait on — stop showing a loading skeleton
+    window._homeStatsDataSyncDone = true;
     render(); // re-render now that we're allowed to show the login screen if needed
     return; // App already rendered from cache above — user can still use it
   }
@@ -34367,6 +34416,7 @@ async function initApp() {
   if (!authOk) {
     console.warn('[initApp] No Firebase Auth session — skipping Firestore sync to avoid PERMISSION_DENIED');
     window._homeDataSyncDone = true; // not syncing at all (no session) — stop showing a loading skeleton
+    window._homeStatsDataSyncDone = true;
     render();
     return;
   }
@@ -34441,9 +34491,14 @@ async function initApp() {
   // once both are done.
   window._homeMatchesChainDone = false;
   window._homeUsersChainDone = false;
+  window._homeStatsDataSyncDone = false;
   const _maybeFinishHomeSync = () => {
-    if (window._homeMatchesChainDone && window._homeUsersChainDone) {
+    if (window._homeMatchesChainDone && !window._homeDataSyncDone) {
       window._homeDataSyncDone = true;
+      render();
+    }
+    if (window._homeMatchesChainDone && window._homeUsersChainDone) {
+      window._homeStatsDataSyncDone = true;
       render();
     }
   };
@@ -34727,7 +34782,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.43.0";
+const APP_VERSION = "4.45.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
