@@ -6345,11 +6345,11 @@ function renderHome() {
   return `
   <div class="stat-grid mb14">
     <div class="stat-box">
-      <div class="stat-val" style="color:var(--gold)">${totalPoints}</div>
+      <div class="stat-val" style="color:var(--gold)">${window._homeDataSyncDone ? totalPoints : '<span style="opacity:0.5">⏳</span>'}</div>
       <div class="stat-lbl">Total Points</div>
     </div>
     <div class="stat-box">
-      <div class="stat-val" style="color:var(--blue-l)">${d11Stats.totalPlayed}</div>
+      <div class="stat-val" style="color:var(--blue-l)">${window._homeDataSyncDone ? d11Stats.totalPlayed : '<span style="opacity:0.5">⏳</span>'}</div>
       <div class="stat-lbl">Contests Joined</div>
     </div>
   </div>
@@ -34514,7 +34514,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.42.2";
+const APP_VERSION = "4.42.3";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
