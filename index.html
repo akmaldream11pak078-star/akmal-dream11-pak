@@ -2375,6 +2375,7 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
   // Instant paint from cache first (0 reads), same as before — this makes
   // the very first render of the app feel instant regardless of what
   // happens with the listener below.
+  let hadCache = false;
   if (!forceRefresh) {
     try {
       const cached = localStorage.getItem(cacheKey);
@@ -2382,6 +2383,7 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
         const obj = JSON.parse(cached);
         targetSetter(obj);
         if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
+        hadCache = true;
       }
     } catch(e){}
   }
@@ -2417,6 +2419,23 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
     }
   }
 
+  // ── PERFORMANCE FIX ─────────────────────────────────────────────────────
+  // Previously this whole function returned a Promise that only resolved
+  // once the FIRST live snapshot arrived over the network (inside
+  // onSnapshot's callback below) — even though the cache paint two blocks
+  // up already happened instantly and synchronously. That meant every
+  // await/Promise.all() waiting on this function (including the app-open
+  // sequence that gates the Home "Upcoming/Live/Completed" tabs) was
+  // blocked for a full network round-trip on every single app open, which
+  // on a slow connection is exactly the ~20 second wait that was reported.
+  // Fix: attach the listener, but resolve the promise right away if we
+  // already had cached data to show — the listener still updates
+  // dream11Matches/matches/etc and calls render() silently the moment the
+  // real snapshot lands (via opts.onUpdate / the `else` branch below),
+  // exactly as before. Only block on the network round-trip when there
+  // was NO cache at all (this device's very first-ever load) — in that
+  // specific case there's genuinely nothing to show yet, so waiting is
+  // the correct, unavoidable behavior.
   return new Promise((resolve) => {
     let resolved = false;
     try {
@@ -2432,6 +2451,12 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
           // A later snapshot (someone else's change) after our own initial
           // resolve — repaint whatever's currently on screen so it's live.
           try { render(); } catch(e){}
+        } else if (hadCache) {
+          // We resolved early off the cache below; this IS the first real
+          // snapshot landing — always repaint so the screen reflects real
+          // data, regardless of rerenderOnUpdate (that flag only concerns
+          // whether LATER updates repaint, not this first one).
+          try { render(); } catch(e){}
         }
       }, err => {
         console.error(collectionName + ' live-sync error:', err);
@@ -2445,6 +2470,10 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
       // tap — instead of running forever in a backgrounded/idle tab.
       _liveCollections[collectionName] = unsub;
       _liveCollectionSpecs[collectionName] = { targetSetter, cacheKey, opts };
+      // Resolve immediately if we already painted from cache — don't make
+      // the caller wait for the network. The listener above still fires
+      // later and repaints (see the `else if (hadCache)` branch).
+      if (hadCache && !resolved) { resolved = true; resolve(true); }
     } catch(e) {
       console.error('Failed to attach live listener for ' + collectionName + ':', e);
       if (!resolved) { resolved = true; resolve(false); }
@@ -34607,7 +34636,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.42.8";
+const APP_VERSION = "4.42.9";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
