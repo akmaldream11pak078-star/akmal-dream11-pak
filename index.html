@@ -34399,8 +34399,39 @@ async function initApp() {
     _loadAllMatchesFromFirestore(false, true),
     typeof d11LoadMatchesSummaryFirst === 'function' ? d11LoadMatchesSummaryFirst() : _loadAllDream11MatchesFromFirestore(false, true),
   ]).then(() => {
-    window._homeDataSyncDone = true;
-    render();
+    // ── FIX: "flash of 0" ──────────────────────────────────────────────
+    // _liveLoadCollection (see its own fix above) now resolves as soon as
+    // it paints from cache, without waiting for the real network snapshot
+    // — great for speed, but it means this .then() can fire while `matches`
+    // /dream11Matches are still genuinely empty (brand-new device, no cache
+    // yet, or the gap between the fast cache-resolve and the slower real
+    // snapshot actually landing). Marking _homeDataSyncDone=true right here
+    // made renderHome() briefly show "Upcoming (0)/Live (0)/Completed (0)"
+    // — which looks like "no matches" rather than "still loading" — before
+    // the real snapshot arrived a moment later and corrected it. Instead:
+    // if we already have SOME match data, we're good, show it now. If not,
+    // give the live listener a short grace window to deliver its first real
+    // snapshot (it always does, per the fix above) before giving up and
+    // showing an honest empty state — this keeps the "Loading your
+    // matches…" skeleton up through that gap instead of a misleading "0".
+    const haveData = Object.keys(matches||{}).length > 0 || Object.keys(dream11Matches||{}).length > 0;
+    if (haveData) {
+      window._homeDataSyncDone = true;
+      render();
+    } else {
+      let settled = false;
+      const finish = () => { if (!settled) { settled = true; window._homeDataSyncDone = true; render(); } };
+      // Poll briefly for the listener's real snapshot to land (checked every
+      // 300ms) rather than a single fixed timer, so this resolves the moment
+      // data actually shows up instead of always waiting the full window.
+      const pollId = setInterval(() => {
+        if (Object.keys(matches||{}).length > 0 || Object.keys(dream11Matches||{}).length > 0) {
+          clearInterval(pollId);
+          finish();
+        }
+      }, 300);
+      setTimeout(() => { clearInterval(pollId); finish(); }, 4000); // hard cap — never wait forever, genuinely-empty accounts still resolve
+    }
   }).catch(() => {
     window._homeDataSyncDone = true; // don't get stuck loading forever even if this pair fails
     render();
@@ -34636,7 +34667,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.42.9";
+const APP_VERSION = "4.42.10";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
