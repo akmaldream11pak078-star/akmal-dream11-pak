@@ -34426,6 +34426,28 @@ async function initApp() {
   // cache yet — matching the cache-first design already documented above
   // (see _MANUAL_REFRESH_COOLDOWN_MS) where the 🔄 button is meant to be
   // the only thing that forces a real re-read.
+  // ── FIX: _homeDataSyncDone must wait for BOTH data chains ──────────────
+  // Home's "Total Points" / "Contests Joined" numbers come from `currentUser`
+  // and `dream11Teams`, which are populated by the SECOND Promise.all below
+  // (_loadAllUsersFromFirestore, H2H, custom contests, etc) — a completely
+  // separate wait chain from the "matches ready" one right above. The old
+  // code let EITHER chain flip _homeDataSyncDone to true on its own, so on
+  // a device where matches/dream11Matches happened to sync fast (e.g. from
+  // local cache) but the users/contests chain was still in flight, Home
+  // would show real match cards while Total Points/Contests Joined were
+  // still 0 (their real source hadn't landed yet) — exactly the "closed the
+  // app, reopened, briefly shows 0 until it self-corrects" bug reported.
+  // Track each chain's completion separately and only flip the shared flag
+  // once both are done.
+  window._homeMatchesChainDone = false;
+  window._homeUsersChainDone = false;
+  const _maybeFinishHomeSync = () => {
+    if (window._homeMatchesChainDone && window._homeUsersChainDone) {
+      window._homeDataSyncDone = true;
+      render();
+    }
+  };
+
   const _homeMatchesReady = Promise.all([
     _loadAllMatchesFromFirestore(false, true),
     typeof d11LoadMatchesSummaryFirst === 'function' ? d11LoadMatchesSummaryFirst() : _loadAllDream11MatchesFromFirestore(false, true),
@@ -34455,11 +34477,11 @@ async function initApp() {
     // path.
     const haveData = Object.keys(matches||{}).length > 0 || Object.keys(dream11Matches||{}).length > 0;
     if (haveData) {
-      window._homeDataSyncDone = true;
-      render();
+      window._homeMatchesChainDone = true;
+      _maybeFinishHomeSync();
     } else {
       let settled = false;
-      const finish = () => { if (!settled) { settled = true; window._homeDataSyncDone = true; render(); } };
+      const finish = () => { if (!settled) { settled = true; window._homeMatchesChainDone = true; _maybeFinishHomeSync(); } };
       const pollId = setInterval(() => {
         if (Object.keys(matches||{}).length > 0 || Object.keys(dream11Matches||{}).length > 0) {
           clearInterval(pollId);
@@ -34469,8 +34491,8 @@ async function initApp() {
       setTimeout(() => { clearInterval(pollId); finish(); }, 30000); // generous safety net only — not the expected path
     }
   }).catch(() => {
-    window._homeDataSyncDone = true; // don't get stuck loading forever even if this pair fails
-    render();
+    window._homeMatchesChainDone = true; // don't get stuck loading forever even if this pair fails
+    _maybeFinishHomeSync();
   });
 
   Promise.all([
@@ -34535,7 +34557,8 @@ async function initApp() {
     if (currentUser && users[currentUser.email]) {
       currentUser = { ...users[currentUser.email], email: currentUser.email };
     }
-    window._homeDataSyncDone = true; // real Firestore data has landed — 0/empty now means genuinely empty
+    window._homeUsersChainDone = true; // this chain's real Firestore data has landed
+    _maybeFinishHomeSync(); // real Firestore data has landed — 0/empty now means genuinely empty (once matches chain is also done)
     render(); // Re-render with fresh data (silent update)
     // Catch-up trigger for Cricket Live Line 5 automatic sync (both the
     // pre-deadline Playing XI check and the post-deadline scorecard sync)
@@ -34549,7 +34572,8 @@ async function initApp() {
     if (typeof d11AutoSyncLl5PostDeadline === 'function') d11AutoSyncLl5PostDeadline().catch(function(){});
   }).catch(err => {
     console.error('[initApp] background Firestore sync failed:', err);
-    window._homeDataSyncDone = true; // sync failed, but stop showing a loading skeleton forever — fall back to whatever we have
+    window._homeUsersChainDone = true; // sync failed, but stop showing a loading skeleton forever — fall back to whatever we have
+    _maybeFinishHomeSync();
     render();
   });
   // Render now with whatever we already have (cache/auth), don't wait on the sync.
@@ -34703,7 +34727,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.42.12";
+const APP_VERSION = "4.43.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
