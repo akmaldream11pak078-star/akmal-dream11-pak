@@ -2712,47 +2712,16 @@ async function _removeDream11SummaryEntry(matchId) {
 // cache in that case, not block rendering.
 async function _loadDream11Summary(forceRefresh) {
   if (_d11SummaryCache && !forceRefresh) return _d11SummaryCache;
-  // ── FIX: instant paint from localStorage, not just in-memory ──────────
-  // _d11SummaryCache is a plain JS variable — it resets to null on every
-  // single fresh page load (closing and reopening the app is a brand new
-  // JS context), which meant this function did a genuine Firestore
-  // getDoc() round-trip on literally every app open, regardless of how
-  // recently the app had last synced. That was the real cause behind the
-  // repeated multi-second "Loading your matches…" on every reopen — not
-  // a one-time thing, EVERY time. Every other summary/collection loader
-  // in this file already persists to localStorage for exactly this
-  // reason; this one didn't. Now: paint from localStorage immediately (0
-  // wait, 0 reads) if available, kick off the real Firestore read in the
-  // background regardless, and let its normal caller-side render() calls
-  // pick up any changes once it lands — same "instant stale data, then
-  // silently goes fresh" behavior as the rest of the app.
-  let cachedFromDisk = null;
-  if (!forceRefresh) {
-    try {
-      const raw = localStorage.getItem('pp_dream11_summary_cache');
-      if (raw) cachedFromDisk = JSON.parse(raw);
-    } catch(e){}
+  if (!window._fbDb || !window._fbFns) return null;
+  try {
+    const { doc, getDoc } = window._fbFns;
+    const snap = await getDoc(doc(window._fbDb, 'pp_dream11_summary', 'main'));
+    _d11SummaryCache = snap.exists() ? (snap.data().matches || {}) : {};
+    return _d11SummaryCache;
+  } catch(e) {
+    console.warn('Dream11 summary load failed:', e.message);
+    return null;
   }
-  if (!window._fbDb || !window._fbFns) return cachedFromDisk;
-  const fetchPromise = (async () => {
-    try {
-      const { doc, getDoc } = window._fbFns;
-      const snap = await getDoc(doc(window._fbDb, 'pp_dream11_summary', 'main'));
-      _d11SummaryCache = snap.exists() ? (snap.data().matches || {}) : {};
-      try { localStorage.setItem('pp_dream11_summary_cache', JSON.stringify(_d11SummaryCache)); } catch(e){}
-      return _d11SummaryCache;
-    } catch(e) {
-      console.warn('Dream11 summary load failed:', e.message);
-      return null;
-    }
-  })();
-  if (cachedFromDisk) {
-    // Don't make the caller wait — return the disk cache now, let the real
-    // fetch land whenever it lands and update _d11SummaryCache for next time.
-    fetchPromise.then(fresh => { if (fresh) { _d11SummaryCache = fresh; try { render(); } catch(e){} } });
-    return cachedFromDisk;
-  }
-  return fetchPromise;
 }
 // Scoped partial update for the scoring/live-update path — writes ONLY the
 // fields that path actually changes (players/scored/lastLiveUpdateAt/
@@ -6394,7 +6363,7 @@ function renderHome() {
   if (d11Stats.totalPlayed === 0 && !window._homeSelfHealScheduled) {
     const hasAnyTeams = Object.keys(dream11Teams||{}).some(k => dream11Teams[k]?.userEmail === currentUser.email);
     const stillLoading = (typeof _d11TeamsUserFetchInFlight !== 'undefined' && _d11TeamsUserFetchInFlight.has(currentUser.email))
-      || !window._homeStatsDataSyncDone;
+      || !window._homeDataSyncDone;
     if (hasAnyTeams || stillLoading) {
       window._homeSelfHealScheduled = true;
       setTimeout(() => {
@@ -6407,11 +6376,11 @@ function renderHome() {
   return `
   <div class="stat-grid mb14">
     <div class="stat-box">
-      <div class="stat-val" style="color:var(--gold)">${window._homeStatsDataSyncDone ? totalPoints : '<span style="opacity:0.5">⏳</span>'}</div>
+      <div class="stat-val" style="color:var(--gold)">${window._homeDataSyncDone ? totalPoints : '<span style="opacity:0.5">⏳</span>'}</div>
       <div class="stat-lbl">Total Points</div>
     </div>
     <div class="stat-box">
-      <div class="stat-val" style="color:var(--blue-l)">${window._homeStatsDataSyncDone ? d11Stats.totalPlayed : '<span style="opacity:0.5">⏳</span>'}</div>
+      <div class="stat-val" style="color:var(--blue-l)">${window._homeDataSyncDone ? d11Stats.totalPlayed : '<span style="opacity:0.5">⏳</span>'}</div>
       <div class="stat-lbl">Contests Joined</div>
     </div>
   </div>
@@ -9443,19 +9412,19 @@ async function permanentlyDeleteD11Match(matchId) {
 // via the fallback API), and manually-created matches leave it blank
 // unless typed in at creation time — until now there was no way to add or
 // correct it after the fact without deleting and recreating the match. ──
-async function d11EditSeriesName(matchId) {
+function d11EditSeriesName(matchId) {
   const m = matches[matchId];
   if (!m) return;
   const current = m.seriesName || '';
   const newVal = prompt('Series / Tournament / League name:\n(e.g. "ICC T20 World Cup 2026", "Lanka Premier League 2026")\n\nCurrent: ' + (current || '(not set)'), current);
   if (newVal === null) return; // cancelled
   m.seriesName = newVal.trim();
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   render();
   showNotif(m.seriesName ? '✅ Series name updated: ' + m.seriesName : '✅ Series name cleared');
 }
 
-async function d11EditDeadline(matchId) {
+function d11EditDeadline(matchId) {
   const m = matches[matchId];
   if (!m) return;
   const current = m.deadline ? new Date(m.deadline) : new Date(Date.now() + 86400000);
@@ -9466,7 +9435,7 @@ async function d11EditDeadline(matchId) {
   const parsed = new Date(newVal);
   if (isNaN(parsed.getTime())) { showNotif('Invalid date — use format YYYY-MM-DDTHH:MM', 'error'); return; }
   m.deadline = parsed.getTime();
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   render();
   showNotif('✅ Deadline updated: ' + pkDateTimeYear(parsed));
 }
@@ -9477,7 +9446,7 @@ async function d11EditDeadline(matchId) {
 // entered, since T20/ODI/Test each use different points values (see
 // D11_SCORING). Safe to use any time; does NOT touch players, teams, or
 // publish/lock state, only the format tag + recalculated points. ──
-async function d11EditFormat(matchId) {
+function d11EditFormat(matchId) {
   const m = matches[matchId];
   const d11m = dream11Matches[matchId];
   if (!m) return;
@@ -9492,14 +9461,14 @@ async function d11EditFormat(matchId) {
   if (clean === current) { showNotif('Format unchanged'); return; }
   if (!confirm(`Change format from ${current} to ${clean}?\n\nThis will recalculate every player's fantasy points using ${clean} scoring rules (per-run/wicket bonuses, milestones, SR/ER bands etc. all differ by format).`)) return;
   m.format = clean;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   if (d11m) {
     // Recalculate every player's points under the new format's scoring rules
     (d11m.players || []).forEach(p => {
       if (p.stats) p.points = calcDream11PlayerPoints(p.stats, matchId);
     });
     recalcDream11MatchPoints(d11m);
-    await _saveDream11MatchToFirestore(matchId, d11m);
+    _saveDream11MatchToFirestore(matchId, d11m);
     d11RefreshLiveTeamPoints(matchId);
   }
   render();
@@ -10980,7 +10949,7 @@ async function masterTeamsSelectSearchedPhoto(url) {
       reader.readAsDataURL(blob);
     });
     const img = new Image();
-    img.onload = async () => {
+    img.onload = () => {
       const canvas = document.createElement('canvas');
       const maxSide = 140;
       const ratio = Math.min(maxSide / img.width, maxSide / img.height, 1);
@@ -10989,9 +10958,9 @@ async function masterTeamsSelectSearchedPhoto(url) {
       canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
       const b64 = canvas.toDataURL('image/jpeg', 0.8);
       p.photo = b64;
-      await _saveTeamSquadToFirestore(target.key, squad);
+      _saveTeamSquadToFirestore(target.key, squad);
       try { localStorage.setItem('pp_team_squads_cache', JSON.stringify(teamSquads)); } catch(e){}
-      await masterTeamsPropagatePhoto(p.name, b64);
+      masterTeamsPropagatePhoto(p.name, b64);
       masterTeamsClosePhotoSearch();
       showNotif('✅ Photo set from search!');
     };
@@ -11185,7 +11154,7 @@ function masterTeamsSetPlayerCredit(key, playerId, val) {
 // ── Propagate a player's updated photo (from Master Teams) into every match/tournament
 // that already copied this player, since match player-pools are independent snapshots
 // and don't auto-sync when the master squad is edited later.
-async function masterTeamsPropagatePhoto(playerName, photo) {
+function masterTeamsPropagatePhoto(playerName, photo) {
   const nameLower = (playerName || '').toLowerCase();
   if (!nameLower) return;
   // Dream11 matches
@@ -11196,25 +11165,25 @@ async function masterTeamsPropagatePhoto(playerName, photo) {
   // been opened yet this session won't get this photo propagated until
   // it's next opened AND saved by an admin. Acceptable trade-off for a
   // cosmetic photo-sync convenience feature; not data-destructive either way.
-  for (const matchId of Object.keys(dream11Matches)) {
+  Object.keys(dream11Matches).forEach(matchId => {
     const d11m = dream11Matches[matchId];
-    if (!d11m || !d11m.players || d11m._summaryOnly) continue;
+    if (!d11m || !d11m.players || d11m._summaryOnly) return;
     let changed = false;
     d11m.players.forEach(p => { if (p.name.toLowerCase() === nameLower) { p.photo = photo; changed = true; } });
-    if (changed) await _saveDream11MatchToFirestore(matchId, d11m);
-  }
+    if (changed) _saveDream11MatchToFirestore(matchId, d11m);
+  });
   // User Tournaments
-  for (const tId of Object.keys(utTournaments)) {
+  Object.keys(utTournaments).forEach(tId => {
     const t = utTournaments[tId];
-    if (!t || !t.matches) continue;
+    if (!t || !t.matches) return;
     let changed = false;
     Object.keys(t.matches).forEach(mId => {
       const m = t.matches[mId];
       if (!m || !m.players) return;
       m.players.forEach(p => { if (p.name.toLowerCase() === nameLower) { p.photo = photo; changed = true; } });
     });
-    if (changed) await _saveUtTournamentToFirestore(tId, t);
-  }
+    if (changed) _saveUtTournamentToFirestore(tId, t);
+  });
 }
 
 function masterTeamsUploadPlayerPhoto(key, playerId, input) {
@@ -11227,9 +11196,9 @@ function masterTeamsUploadPlayerPhoto(key, playerId, input) {
     const p = squad && squad.players.find(x => x.id === playerId);
     if (!p) return;
     p.photo = cropped;
-    await _saveTeamSquadToFirestore(key, squad);
+    _saveTeamSquadToFirestore(key, squad);
     try { localStorage.setItem('pp_team_squads_cache', JSON.stringify(teamSquads)); } catch(e){}
-    await masterTeamsPropagatePhoto(p.name, cropped);
+    masterTeamsPropagatePhoto(p.name, cropped);
     render();
     showNotif('✅ Photo updated');
   };
@@ -13279,11 +13248,11 @@ async function d11SearchLiveMatchCll(matchId) {
   }
 }
 
-async function d11LinkCllMatch(matchId, cllMatchId) {
+function d11LinkCllMatch(matchId, cllMatchId) {
   const m = matches[matchId];
   if (!m) return;
   m.cllMatchId = cllMatchId;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   _d11CllSearchResults = [];
   d11CllLinkPickerMatchId = null;
   showNotif('🔗 Linked to Cricket Live Line! Fetching squad…');
@@ -13291,23 +13260,23 @@ async function d11LinkCllMatch(matchId, cllMatchId) {
   d11FetchSquadFromCll(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line link failed:', e.message));
 }
 
-async function d11UnlinkCllMatch(matchId) {
+function d11UnlinkCllMatch(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.cllMatchId;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Cricket Live Line — switched back to manual paste');
   render();
 }
 
-async function d11UnlinkCb2Match(matchId) {
+function d11UnlinkCb2Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.cb2MatchId;
   delete m.cb2Team1Id;
   delete m.cb2Team2Id;
   delete m.cb2SeriesId;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Cricbuzz No 2 — switched back to manual paste');
   render();
 }
@@ -13649,11 +13618,11 @@ async function d11SearchLiveMatchSbx(matchId) {
   }
 }
 
-async function d11LinkSbxMatch(matchId, sbxMatchId) {
+function d11LinkSbxMatch(matchId, sbxMatchId) {
   const m = matches[matchId];
   if (!m) return;
   m.sbxMatchId = sbxMatchId;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   _d11SbxSearchResults = [];
   d11SbxLinkPickerMatchId = null;
   showNotif('🔗 Linked to Sportbex! Fetching squad…');
@@ -13661,11 +13630,11 @@ async function d11LinkSbxMatch(matchId, sbxMatchId) {
   d11FetchSquadFromSbx(matchId).catch(e => console.warn('Auto squad fetch after Sportbex link failed:', e.message));
 }
 
-async function d11UnlinkSbxMatch(matchId) {
+function d11UnlinkSbxMatch(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.sbxMatchId;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Sportbex — switched back to manual paste');
   render();
 }
@@ -14005,23 +13974,6 @@ async function d11SyncLiveMatchSbx(matchId, showToast) {
   }
 }
 
-// ── Advance Live Line (Sportbex) — Automatic sync toggle (same pattern as
-// Cricket Live Line 5's "🤖 Automatic" toggle). Admin flips this ON per-match;
-// once ON, it arms BOTH schedulers for that match: d11AutoCheckSbxPlayingXI
-// (pre-deadline, 20/15/10/5-min windows) and d11AutoSyncSbxPostDeadline
-// (post-deadline, 30/60/90/120/240-min windows). It stays armed regardless
-// of whether admin later turns it OFF or even closes the app.
-async function d11ToggleSbxAutoSync(matchId) {
-  const m = matches[matchId];
-  if (!m) return;
-  m.sbxAutoSync = !m.sbxAutoSync;
-  await _saveMatchToFirestore(matchId, m);
-  showNotif(m.sbxAutoSync
-    ? '🤖 Automatic armed — deadline se pehle 20/15/10/5min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
-    : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
-  render();
-}
-
 function _d11RenderSbxSyncRow(m) {
   if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll3MatchId || m.ll4MatchId) return ''; // already on another provider
   if (!m.sbxMatchId) {
@@ -14032,10 +13984,8 @@ function _d11RenderSbxSyncRow(m) {
   }
   const lastSync = _d11SbxLastSyncedAt[m.id];
   const lastSyncStr = lastSync ? new Date(lastSync).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : 'not yet';
-  const autoOn = !!m.sbxAutoSync;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(225,29,45,0.08);border:1px solid rgba(225,29,45,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#fb7185;flex:1;min-width:140px">🎯 Linked to Sportbex · Last synced: ${lastSyncStr}</span>
-    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleSbxAutoSync('${m.id}')" title="Deadline se pehle 20/15/10/5min pe Playing XI, aur deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchSbx('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchSbx('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromSbx('${m.id}')">📥 Fetch Squad</button>
@@ -14402,12 +14352,12 @@ async function d11SearchLiveMatchAll(matchId) {
   }
 }
 
-async function d11LinkAllMatch(matchId, allMatchId, seriesId) {
+function d11LinkAllMatch(matchId, allMatchId, seriesId) {
   const m = matches[matchId];
   if (!m) return;
   m.allMatchId = allMatchId;
   if (seriesId) m.allSeriesId = seriesId;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   _d11AllSearchResults = [];
   d11AllLinkPickerMatchId = null;
   showNotif('🔗 Linked to Advance Live Line! Fetching squad…');
@@ -14415,12 +14365,12 @@ async function d11LinkAllMatch(matchId, allMatchId, seriesId) {
   d11FetchSquadFromAll(matchId).catch(e => console.warn('Auto squad fetch after Advance Live Line link failed:', e.message));
 }
 
-async function d11UnlinkAllMatch(matchId) {
+function d11UnlinkAllMatch(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.allMatchId;
   delete m.allSeriesId;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Advance Live Line — switched back to manual paste');
   render();
 }
@@ -14582,90 +14532,6 @@ async function d11FetchSquadFromAll(matchId) {
   }
 }
 
-// ── Advance Live Line ("All" provider) — Automatic PRE-deadline Playing XI +
-// POST-deadline sync (catch-up), mirroring the Cricket Live Line 5 / Sportbex
-// / Cricket Live Line 3 scheduler pairs above. Only runs for matches where
-// admin has the per-match "🤖 Automatic" toggle on (m.allAutoSync).
-const ALL_PRE_DEADLINE_XI_WINDOWS_MIN = [
-  { key: 'w20', mins: 20 },
-  { key: 'w15', mins: 15 },
-  { key: 'w10', mins: 10 },
-  { key: 'w5', mins: 5 },
-];
-
-async function d11AutoCheckAllPlayingXI() {
-  const now = Date.now();
-  for (const m of Object.values(matches)) {
-    if (!m.allMatchId || !m.allAutoSync) continue; // not linked to Advance Live Line, or admin hasn't armed it
-    const d11m = dream11Matches[m.id];
-    if (!d11m) continue;
-    if (d11m.scored || d11m.locked) continue;
-    if ((d11m.players || []).some(p => p.isPlayingXI)) continue; // already confirmed — stop calling
-    if (!m.deadline) continue;
-    const deadlineMs = new Date(m.deadline).getTime();
-    if (isNaN(deadlineMs)) continue;
-    const minsToDeadline = (deadlineMs - now) / 60000;
-    if (minsToDeadline <= 0 || minsToDeadline > 20) continue;
-
-    const done = d11m.autoAllPreDeadlineXI || {};
-    let windowHit = null;
-    for (const w of ALL_PRE_DEADLINE_XI_WINDOWS_MIN) {
-      if (!done[w.key] && minsToDeadline <= w.mins) windowHit = w.key;
-    }
-    if (!windowHit) continue;
-
-    const newDone = { ...done };
-    ALL_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsToDeadline <= w.mins) newDone[w.key] = true; });
-    d11m.autoAllPreDeadlineXI = newDone;
-    await _saveDream11MatchToFirestore(m.id, d11m);
-    try {
-      await d11CheckPlayingXIAnnouncedAll(m.id, /*silent=*/true);
-    } catch (e) {
-      console.warn('Auto Advance Live Line pre-deadline Playing XI check failed for', m.id, e.message);
-    }
-  }
-}
-
-const ALL_AUTO_SYNC_WINDOWS_MIN = [
-  { key: 'w30', mins: 30 },
-  { key: 'w60', mins: 60 },
-  { key: 'w90', mins: 90 },
-  { key: 'w120', mins: 120 },
-  { key: 'w240', mins: 240 },
-];
-
-async function d11AutoSyncAllPostDeadline() {
-  const now = Date.now();
-  for (const m of Object.values(matches)) {
-    if (!m.allMatchId || !m.allAutoSync) continue; // not linked to Advance Live Line, or admin hasn't armed it
-    const d11m = dream11Matches[m.id];
-    if (!d11m) continue;
-    if (d11m.scored) continue; // already finalized — nothing left to sync
-    if (!m.deadline) continue;
-    const deadlineMs = new Date(m.deadline).getTime();
-    if (isNaN(deadlineMs)) continue;
-    const minsSinceDeadline = (now - deadlineMs) / 60000;
-    if (minsSinceDeadline <= 0) continue; // deadline hasn't passed yet — this is a POST-deadline scheduler only
-
-    const done = d11m.autoAllPostDeadline || {};
-    let windowHit = null;
-    for (const w of ALL_AUTO_SYNC_WINDOWS_MIN) {
-      if (!done[w.key] && minsSinceDeadline >= w.mins) windowHit = w.key;
-    }
-    if (!windowHit) continue;
-
-    const newDone = { ...done };
-    ALL_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsSinceDeadline >= w.mins) newDone[w.key] = true; });
-    d11m.autoAllPostDeadline = newDone;
-    await _saveDream11MatchToFirestore(m.id, d11m);
-    try {
-      await d11SyncLiveMatchAll(m.id, /*showToast=*/false);
-    } catch (e) {
-      console.warn('Auto Advance Live Line post-deadline sync failed for', m.id, e.message);
-    }
-  }
-}
-
 async function d11CheckPlayingXIAnnouncedAll(matchId, silent) {
   const notify = silent ? (()=>{}) : showNotif;
   const m = matches[matchId];
@@ -14726,14 +14592,8 @@ async function d11SyncLiveMatchAll(matchId, showToast) {
       return;
     }
 
-    // batsman_id/bowler_id -> name isn't attached to each wagon row directly,
-    // but this same response includes a top-level players[] array with
-    // {player_id, name} for every player in the match — use that as the
-    // authoritative id->name map instead of a (never-populated) p.allPid.
-    const idToName = {};
-    (raw?.response?.players || []).forEach(pl => { if (pl.player_id != null) idToName[pl.player_id] = pl.name; });
-    // Keep the old lookup too, in case some players carry a stored allPid.
-    (d11m.players || []).forEach(p => { if (p.allPid && !idToName[p.allPid]) idToName[p.allPid] = p.name; });
+    const idToName = {}; // batsman_id/bowler_id -> name isn't in this payload directly, so names come from our existing pool by pid match via the squads fetch; fall back to id-based lookup on players' storedProviderId if present
+    (d11m.players || []).forEach(p => { if (p.allPid) idToName[p.allPid] = p.name; });
 
     let battersApplied = 0, bowlersApplied = 0;
 
@@ -14771,23 +14631,7 @@ async function d11SyncLiveMatchAll(matchId, showToast) {
 
     _d11AllLastSyncedAt[matchId] = Date.now();
     d11ApplyBackupReplacements(matchId);
-    // ── FIX: stale-object race that silently reverted the "🤖 Automatic"
-    // toggle ────────────────────────────────────────────────────────────
-    // `m` was captured at the TOP of this function, before the `await
-    // _allFetch(...)` network call. If the admin flips the Automatic toggle
-    // (or any other field on this match) while that network call is still
-    // in flight, `matches[matchId]` gets reassigned to a NEW object (the
-    // live Firestore listener does `matches = v` on every snapshot) — so by
-    // the time we get here, our local `m` is a stale reference missing that
-    // change. Writing `m` as-is would silently overwrite the toggle back to
-    // its old value. Fix: re-read the current object right before saving,
-    // and only merge in the specific fields THIS function is responsible
-    // for (scoreA/scoreB) — never blind-overwrite the whole document.
-    const _freshM = matches[matchId] || m;
-    if (m.scoreA !== undefined) _freshM.scoreA = m.scoreA;
-    if (m.scoreB !== undefined) _freshM.scoreB = m.scoreB;
-    matches[matchId] = _freshM;
-    await _saveMatchToFirestore(matchId, _freshM);
+    await _saveMatchToFirestore(matchId, m);
     await _saveDream11MatchToFirestore(matchId, d11m);
     await d11RefreshLiveTeamPoints(matchId);
 
@@ -14805,13 +14649,10 @@ async function d11SyncLiveMatchAll(matchId, showToast) {
       delete _d11PendingFinish[matchId + '_all'];
     }
     if (isFinished) {
-      // Same stale-reference fix as above — re-read fresh before mutating/saving.
-      const _freshM2 = matches[matchId] || m;
-      _freshM2.status = 'completed';
-      matches[matchId] = _freshM2;
+      m.status = 'completed';
       if (d11m) d11m.scored = true;
       _d11MarkTeamsScoredForMatch(matchId);
-      await _saveMatchToFirestore(matchId, _freshM2);
+      await _saveMatchToFirestore(matchId, m);
       await _saveDream11MatchToFirestore(matchId, d11m);
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
@@ -14828,24 +14669,6 @@ async function d11SyncLiveMatchAll(matchId, showToast) {
   }
 }
 
-// ── Advance Live Line ("All" provider — wagons/newpoint2 endpoints) —
-// Automatic sync toggle, same pattern as Cricket Live Line 5 / Sportbex /
-// Cricket Live Line 3's "🤖 Automatic" toggle. Admin flips this ON per-match;
-// once ON, it arms BOTH schedulers for that match: d11AutoCheckAllPlayingXI
-// (pre-deadline, 20/15/10/5-min windows) and d11AutoSyncAllPostDeadline
-// (post-deadline, 30/60/90/120/240-min windows). It stays armed regardless
-// of whether admin later turns it OFF or even closes the app.
-async function d11ToggleAllAutoSync(matchId) {
-  const m = matches[matchId];
-  if (!m) return;
-  m.allAutoSync = !m.allAutoSync;
-  await _saveMatchToFirestore(matchId, m);
-  showNotif(m.allAutoSync
-    ? '🤖 Automatic armed — deadline se pehle 20/15/10/5min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
-    : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
-  render();
-}
-
 function _d11RenderAllSyncRow(m) {
   if (!m.allMatchId && (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll3MatchId || m.ll4MatchId || m.ll5MatchId || m.sbxMatchId)) return ''; // already on another provider
   if (!m.allMatchId) {
@@ -14856,10 +14679,8 @@ function _d11RenderAllSyncRow(m) {
   }
   const lastSync = _d11AllLastSyncedAt[m.id];
   const lastSyncStr = lastSync ? new Date(lastSync).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : 'not yet';
-  const autoOn = !!m.allAutoSync;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#a78bfa;flex:1;min-width:140px">🚀 Linked to Advance Live Line · Last synced: ${lastSyncStr}</span>
-    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleAllAutoSync('${m.id}')" title="Deadline se pehle 20/15/10/5min pe Playing XI, aur deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchAll('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchAll('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromAll('${m.id}')">📥 Fetch Squad</button>
@@ -15165,11 +14986,11 @@ async function d11SearchLiveMatchLl2(matchId) {
   }
 }
 
-async function d11LinkLl2Match(matchId, ll2MatchId) {
+function d11LinkLl2Match(matchId, ll2MatchId) {
   const m = matches[matchId];
   if (!m) return;
   m.ll2MatchId = ll2MatchId;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   _d11Ll2SearchResults = [];
   d11Ll2LinkPickerMatchId = null;
   showNotif('🔗 Linked to Cricket Live Line 2! Fetching squad…');
@@ -15177,11 +14998,11 @@ async function d11LinkLl2Match(matchId, ll2MatchId) {
   d11FetchSquadFromLl2(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 2 link failed:', e.message));
 }
 
-async function d11UnlinkLl2Match(matchId) {
+function d11UnlinkLl2Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.ll2MatchId;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Cricket Live Line 2 — switched back to manual paste');
   render();
 }
@@ -15299,14 +15120,14 @@ async function d11SearchLiveMatchCb2(matchId) {
     render();
   }
 }
-async function d11LinkCb2Match(matchId, cb2MatchId, team1Id, team2Id, seriesId) {
+function d11LinkCb2Match(matchId, cb2MatchId, team1Id, team2Id, seriesId) {
   const m = matches[matchId];
   if (!m) return;
   m.cb2MatchId = cb2MatchId;
   if (team1Id) m.cb2Team1Id = team1Id;
   if (team2Id) m.cb2Team2Id = team2Id;
   if (seriesId) m.cb2SeriesId = seriesId;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   d11Cb2LinkPickerMatchId = null;
   _d11Cb2SearchResults = [];
   showNotif('✅ Linked to Cricbuzz No 2! Use 📥 Fetch Squad next.');
@@ -16644,12 +16465,12 @@ async function d11SearchLiveMatchLl3(matchId) {
   }
 }
 
-async function d11LinkLl3Match(matchId, ll3MatchId, seriesId) {
+function d11LinkLl3Match(matchId, ll3MatchId, seriesId) {
   const m = matches[matchId];
   if (!m) return;
   m.ll3MatchId = ll3MatchId;
   if (seriesId) m.ll3SeriesId = seriesId; // captured at link time — avoids relying on the match/info endpoint later
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   _d11Ll3SearchResults = [];
   d11Ll3LinkPickerMatchId = null;
   showNotif('🔗 Linked to Cricket Live Line 3! Fetching squad…');
@@ -16657,11 +16478,11 @@ async function d11LinkLl3Match(matchId, ll3MatchId, seriesId) {
   d11FetchSquadFromLl3(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 3 link failed:', e.message));
 }
 
-async function d11UnlinkLl3Match(matchId) {
+function d11UnlinkLl3Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.ll3MatchId;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Cricket Live Line 3 — switched back to manual paste');
   render();
 }
@@ -17056,23 +16877,6 @@ async function d11SyncLiveMatchLl3(matchId, showToast) {
   }
 }
 
-// ── Cricket Live Line 3 — Automatic sync toggle (same pattern as Cricket
-// Live Line 5's "🤖 Automatic" toggle). Admin flips this ON per-match; once
-// ON, it arms BOTH schedulers for that match: d11AutoCheckLl3PlayingXI
-// (pre-deadline, 20/15/10/5-min windows) and d11AutoSyncLl3PostDeadline
-// (post-deadline, 30/60/90/120/240-min windows). It stays armed regardless
-// of whether admin later turns it OFF or even closes the app.
-async function d11ToggleLl3AutoSync(matchId) {
-  const m = matches[matchId];
-  if (!m) return;
-  m.ll3AutoSync = !m.ll3AutoSync;
-  await _saveMatchToFirestore(matchId, m);
-  showNotif(m.ll3AutoSync
-    ? '🤖 Automatic armed — deadline se pehle 20/15/10/5min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
-    : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
-  render();
-}
-
 function _d11RenderLl3SyncRow(m) {
   if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll4MatchId || m.ll5MatchId || m.sbxMatchId) return ''; // already on another provider
   if (!m.ll3MatchId) {
@@ -17083,10 +16887,8 @@ function _d11RenderLl3SyncRow(m) {
   }
   const lastSync = _d11Ll3LastSyncedAt[m.id];
   const lastSyncStr = lastSync ? new Date(lastSync).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : 'not yet';
-  const autoOn = !!m.ll3AutoSync;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#fbbf24;flex:1;min-width:140px">⚡ Linked to Cricket Live Line 3 · Last synced: ${lastSyncStr}</span>
-    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleLl3AutoSync('${m.id}')" title="Deadline se pehle 20/15/10/5min pe Playing XI, aur deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchLl3('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchLl3('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromLl3('${m.id}')">📥 Fetch Squad</button>
@@ -17501,11 +17303,11 @@ async function d11SearchLiveMatchLl4(matchId) {
   }
 }
 
-async function d11LinkLl4Match(matchId, ll4MatchId) {
+function d11LinkLl4Match(matchId, ll4MatchId) {
   const m = matches[matchId];
   if (!m) return;
   m.ll4MatchId = ll4MatchId;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   _d11Ll4SearchResults = [];
   d11Ll4LinkPickerMatchId = null;
   showNotif('🔗 Linked to Cricket Live Line 4! Fetching squad…');
@@ -17513,11 +17315,11 @@ async function d11LinkLl4Match(matchId, ll4MatchId) {
   d11FetchSquadFromLl4(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 4 link failed:', e.message));
 }
 
-async function d11UnlinkLl4Match(matchId) {
+function d11UnlinkLl4Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.ll4MatchId;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Cricket Live Line 4 — switched back to manual paste');
   render();
 }
@@ -18320,12 +18122,12 @@ async function d11SearchLiveMatchLl5(matchId) {
   }
 }
 
-async function d11LinkLl5Match(matchId, ll5MatchId, seriesId) {
+function d11LinkLl5Match(matchId, ll5MatchId, seriesId) {
   const m = matches[matchId];
   if (!m) return;
   m.ll5MatchId = ll5MatchId;
   if (seriesId) m.ll5SeriesId = seriesId; // captured at link time — avoids relying on a separate lookup later
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   _d11Ll5SearchResults = [];
   d11Ll5LinkPickerMatchId = null;
   showNotif('🔗 Linked to Cricket Live Line 5! Fetching squad…');
@@ -18333,13 +18135,13 @@ async function d11LinkLl5Match(matchId, ll5MatchId, seriesId) {
   d11FetchSquadFromLl5(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 5 link failed:', e.message));
 }
 
-async function d11UnlinkLl5Match(matchId) {
+function d11UnlinkLl5Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.ll5MatchId;
   delete m.ll5SeriesId;
   delete m.ll5AutoSync;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Cricket Live Line 5 — switched back to manual paste');
   render();
 }
@@ -18355,11 +18157,11 @@ async function d11UnlinkLl5Match(matchId) {
 // matches the "admin phone off, still works" requirement — the trigger
 // just needs SOME active tab (any user's, at any later time), not the
 // admin's specifically.
-async function d11ToggleLl5AutoSync(matchId) {
+function d11ToggleLl5AutoSync(matchId) {
   const m = matches[matchId];
   if (!m) return;
   m.ll5AutoSync = !m.ll5AutoSync;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   showNotif(m.ll5AutoSync
     ? '🤖 Automatic armed — deadline se pehle 20/15/10/5min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
     : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
@@ -18646,174 +18448,6 @@ async function d11AutoSyncLl5PostDeadline() {
       await d11SyncLiveMatchLl5(m.id, /*showToast=*/false);
     } catch (e) {
       console.warn('Auto LL5 post-deadline sync failed for', m.id, e.message);
-    }
-  }
-}
-
-// ── Advance Live Line (Sportbex) — Automatic PRE-deadline Playing XI +
-// POST-deadline sync (catch-up), mirroring the Cricket Live Line 5 scheduler
-// pair above. Only runs for matches where admin has the per-match
-// "🤖 Automatic" toggle on (m.sbxAutoSync).
-const SBX_PRE_DEADLINE_XI_WINDOWS_MIN = [
-  { key: 'w20', mins: 20 },
-  { key: 'w15', mins: 15 },
-  { key: 'w10', mins: 10 },
-  { key: 'w5', mins: 5 },
-];
-
-async function d11AutoCheckSbxPlayingXI() {
-  const now = Date.now();
-  for (const m of Object.values(matches)) {
-    if (!m.sbxMatchId || !m.sbxAutoSync) continue; // not linked to Sportbex, or admin hasn't armed it
-    const d11m = dream11Matches[m.id];
-    if (!d11m) continue;
-    if (d11m.scored || d11m.locked) continue;
-    if ((d11m.players || []).some(p => p.isPlayingXI)) continue; // already confirmed — stop calling
-    if (!m.deadline) continue;
-    const deadlineMs = new Date(m.deadline).getTime();
-    if (isNaN(deadlineMs)) continue;
-    const minsToDeadline = (deadlineMs - now) / 60000;
-    if (minsToDeadline <= 0 || minsToDeadline > 20) continue;
-
-    const done = d11m.autoSbxPreDeadlineXI || {};
-    let windowHit = null;
-    for (const w of SBX_PRE_DEADLINE_XI_WINDOWS_MIN) {
-      if (!done[w.key] && minsToDeadline <= w.mins) windowHit = w.key;
-    }
-    if (!windowHit) continue;
-
-    const newDone = { ...done };
-    SBX_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsToDeadline <= w.mins) newDone[w.key] = true; });
-    d11m.autoSbxPreDeadlineXI = newDone;
-    await _saveDream11MatchToFirestore(m.id, d11m);
-    try {
-      await d11CheckPlayingXIAnnouncedSbx(m.id, /*silent=*/true);
-    } catch (e) {
-      console.warn('Auto Sportbex pre-deadline Playing XI check failed for', m.id, e.message);
-    }
-  }
-}
-
-const SBX_AUTO_SYNC_WINDOWS_MIN = [
-  { key: 'w30', mins: 30 },
-  { key: 'w60', mins: 60 },
-  { key: 'w90', mins: 90 },
-  { key: 'w120', mins: 120 },
-  { key: 'w240', mins: 240 },
-];
-
-async function d11AutoSyncSbxPostDeadline() {
-  const now = Date.now();
-  for (const m of Object.values(matches)) {
-    if (!m.sbxMatchId || !m.sbxAutoSync) continue; // not linked to Sportbex, or admin hasn't armed it
-    const d11m = dream11Matches[m.id];
-    if (!d11m) continue;
-    if (d11m.scored) continue; // already finalized — nothing left to sync
-    if (!m.deadline) continue;
-    const deadlineMs = new Date(m.deadline).getTime();
-    if (isNaN(deadlineMs)) continue;
-    const minsSinceDeadline = (now - deadlineMs) / 60000;
-    if (minsSinceDeadline <= 0) continue; // deadline hasn't passed yet — this is a POST-deadline scheduler only
-
-    const done = d11m.autoSbxPostDeadline || {};
-    let windowHit = null;
-    for (const w of SBX_AUTO_SYNC_WINDOWS_MIN) {
-      if (!done[w.key] && minsSinceDeadline >= w.mins) windowHit = w.key;
-    }
-    if (!windowHit) continue;
-
-    const newDone = { ...done };
-    SBX_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsSinceDeadline >= w.mins) newDone[w.key] = true; });
-    d11m.autoSbxPostDeadline = newDone;
-    await _saveDream11MatchToFirestore(m.id, d11m);
-    try {
-      await d11SyncLiveMatchSbx(m.id, /*showToast=*/false);
-    } catch (e) {
-      console.warn('Auto Sportbex post-deadline sync failed for', m.id, e.message);
-    }
-  }
-}
-
-// ── Cricket Live Line 3 — Automatic PRE-deadline Playing XI + POST-deadline
-// sync (catch-up), mirroring the Cricket Live Line 5 scheduler pair above.
-// Only runs for matches where admin has the per-match "🤖 Automatic" toggle
-// on (m.ll3AutoSync).
-const LL3_PRE_DEADLINE_XI_WINDOWS_MIN = [
-  { key: 'w20', mins: 20 },
-  { key: 'w15', mins: 15 },
-  { key: 'w10', mins: 10 },
-  { key: 'w5', mins: 5 },
-];
-
-async function d11AutoCheckLl3PlayingXI() {
-  const now = Date.now();
-  for (const m of Object.values(matches)) {
-    if (!m.ll3MatchId || !m.ll3AutoSync) continue; // not linked to LL3, or admin hasn't armed it
-    const d11m = dream11Matches[m.id];
-    if (!d11m) continue;
-    if (d11m.scored || d11m.locked) continue;
-    if ((d11m.players || []).some(p => p.isPlayingXI)) continue; // already confirmed — stop calling
-    if (!m.deadline) continue;
-    const deadlineMs = new Date(m.deadline).getTime();
-    if (isNaN(deadlineMs)) continue;
-    const minsToDeadline = (deadlineMs - now) / 60000;
-    if (minsToDeadline <= 0 || minsToDeadline > 20) continue;
-
-    const done = d11m.autoLl3PreDeadlineXI || {};
-    let windowHit = null;
-    for (const w of LL3_PRE_DEADLINE_XI_WINDOWS_MIN) {
-      if (!done[w.key] && minsToDeadline <= w.mins) windowHit = w.key;
-    }
-    if (!windowHit) continue;
-
-    const newDone = { ...done };
-    LL3_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsToDeadline <= w.mins) newDone[w.key] = true; });
-    d11m.autoLl3PreDeadlineXI = newDone;
-    await _saveDream11MatchToFirestore(m.id, d11m);
-    try {
-      await d11CheckPlayingXIAnnouncedLl3(m.id, /*silent=*/true);
-    } catch (e) {
-      console.warn('Auto LL3 pre-deadline Playing XI check failed for', m.id, e.message);
-    }
-  }
-}
-
-const LL3_AUTO_SYNC_WINDOWS_MIN = [
-  { key: 'w30', mins: 30 },
-  { key: 'w60', mins: 60 },
-  { key: 'w90', mins: 90 },
-  { key: 'w120', mins: 120 },
-  { key: 'w240', mins: 240 },
-];
-
-async function d11AutoSyncLl3PostDeadline() {
-  const now = Date.now();
-  for (const m of Object.values(matches)) {
-    if (!m.ll3MatchId || !m.ll3AutoSync) continue; // not linked to LL3, or admin hasn't armed it
-    const d11m = dream11Matches[m.id];
-    if (!d11m) continue;
-    if (d11m.scored) continue; // already finalized — nothing left to sync
-    if (!m.deadline) continue;
-    const deadlineMs = new Date(m.deadline).getTime();
-    if (isNaN(deadlineMs)) continue;
-    const minsSinceDeadline = (now - deadlineMs) / 60000;
-    if (minsSinceDeadline <= 0) continue; // deadline hasn't passed yet — this is a POST-deadline scheduler only
-
-    const done = d11m.autoLl3PostDeadline || {};
-    let windowHit = null;
-    for (const w of LL3_AUTO_SYNC_WINDOWS_MIN) {
-      if (!done[w.key] && minsSinceDeadline >= w.mins) windowHit = w.key;
-    }
-    if (!windowHit) continue;
-
-    const newDone = { ...done };
-    LL3_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsSinceDeadline >= w.mins) newDone[w.key] = true; });
-    d11m.autoLl3PostDeadline = newDone;
-    await _saveDream11MatchToFirestore(m.id, d11m);
-    try {
-      await d11SyncLiveMatchLl3(m.id, /*showToast=*/false);
-    } catch (e) {
-      console.warn('Auto LL3 post-deadline sync failed for', m.id, e.message);
     }
   }
 }
@@ -20018,14 +19652,14 @@ function renderReceiptImageModal() {
   </div>`;
 }
 
-async function d11LinkLiveMatch(matchId, cricbuzzMatchId, team1Id, team2Id, seriesId) {
+function d11LinkLiveMatch(matchId, cricbuzzMatchId, team1Id, team2Id, seriesId) {
   const m = matches[matchId];
   if (!m) return;
   m.cricketDataMatchId = cricbuzzMatchId; // field name kept for backward compatibility with earlier saved links
   if (team1Id) m.cricbuzzTeam1Id = team1Id;
   if (team2Id) m.cricbuzzTeam2Id = team2Id;
   if (seriesId) m.cricbuzzSeriesId = seriesId; // used as a fallback for squads before the match's own squad is announced
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   _d11LiveSyncSearchResults = [];
   showNotif('🔗 Linked to Cricbuzz! Fetching squad…');
   render();
@@ -20040,13 +19674,13 @@ async function d11LinkLiveMatch(matchId, cricbuzzMatchId, team1Id, team2Id, seri
   d11FetchSquadFromCricbuzz(matchId).catch(e => console.warn('Auto squad fetch after link failed:', e.message));
 }
 
-async function d11UnlinkLiveMatch(matchId) {
+function d11UnlinkLiveMatch(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.cricketDataMatchId;
   delete m.cricbuzzTeam1Id;
   delete m.cricbuzzTeam2Id;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from Cricbuzz — switched back to manual paste');
   render();
 }
@@ -20108,24 +19742,24 @@ async function d11SearchLiveMatchEspn(matchId) {
   }
 }
 
-async function d11LinkEspnMatch(matchId, espnObjectId, espnSeriesId) {
+function d11LinkEspnMatch(matchId, espnObjectId, espnSeriesId) {
   const m = matches[matchId];
   if (!m) return;
   m.espnMatchId = espnObjectId;
   if (espnSeriesId) m.espnSeriesId = espnSeriesId;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   _d11EspnSearchResults = [];
   showNotif('🔗 Linked to ESPN Cricinfo! Fetching squad…');
   render();
   d11FetchSquadFromEspn(matchId).catch(e => console.warn('Auto squad fetch after ESPN link failed:', e.message));
 }
 
-async function d11UnlinkEspnMatch(matchId) {
+function d11UnlinkEspnMatch(matchId) {
   const m = matches[matchId];
   if (!m) return;
   delete m.espnMatchId;
   delete m.espnSeriesId;
-  await _saveMatchToFirestore(matchId, m);
+  _saveMatchToFirestore(matchId, m);
   showNotif('Unlinked from ESPN Cricinfo — switched back to manual paste');
   render();
 }
@@ -27323,7 +26957,7 @@ function d11ExtractPlayerNamesFromScorecard(text) {
   return names;
 }
 
-async function d11AutoConfirmPlayingXIFromScorecard(matchId, scorecardText) {
+function d11AutoConfirmPlayingXIFromScorecard(matchId, scorecardText) {
   const d11m = dream11Matches[matchId];
   if (!d11m || !scorecardText) return { matchedCount: 0, totalNames: 0 };
 
@@ -27345,7 +26979,7 @@ async function d11AutoConfirmPlayingXIFromScorecard(matchId, scorecardText) {
   });
 
   if (matchedCount > 0) {
-    await _saveDream11MatchToFirestore(matchId, d11m);
+    _saveDream11MatchToFirestore(matchId, d11m);
     d11ApplyBackupReplacements(matchId);
   }
   return { matchedCount, totalNames: rawNames.length };
@@ -27382,7 +27016,7 @@ async function d11SaveMatchScorecard(matchId) {
     // their queued backup — same as if admin had manually ticked each player.
     let xiMsg = '';
     if (scorecardText && dream11Matches[matchId]) {
-      const { matchedCount } = await d11AutoConfirmPlayingXIFromScorecard(matchId, scorecardText);
+      const { matchedCount } = d11AutoConfirmPlayingXIFromScorecard(matchId, scorecardText);
       if (matchedCount > 0) xiMsg = ` · 🏏 ${matchedCount} players auto-confirmed Playing XI, backups applied`;
     }
 
@@ -30539,7 +30173,7 @@ function renderD11QuickScoreSelector() {
   }).join('')}`;
 }
 
-async function d11QuickSaveAllStats(matchId) {
+function d11QuickSaveAllStats(matchId) {
   const d11m = dream11Matches[matchId];
   if (!d11m) return;
   let count = 0;
@@ -30561,7 +30195,7 @@ async function d11QuickSaveAllStats(matchId) {
     count++;
   });
   d11m.lastLiveUpdateAt = getDateTime();
-  await _saveDream11MatchToFirestore(matchId, d11m);
+  _saveDream11MatchToFirestore(matchId, d11m);
   d11RefreshLiveTeamPoints(matchId);
   showNotif(`✅ ${count} players ke stats save ho gaye — live points update 🔴`);
   render();
@@ -34592,62 +34226,7 @@ async function initApp() {
   // for a split second (or longer on a slow connection) before the real data
   // pops in. window._homeDataSyncDone lets renderHome() show a loading
   // skeleton instead until the first real sync finishes (see Step 3).
-  // ── INSTANT-PAINT FIX ────────────────────────────────────────────────
-  // Previously matches/dream11Matches/users only got read from their
-  // localStorage caches INSIDE Step 3 (_liveLoadCollection /
-  // _loadAllUsersFromFirestore etc), i.e. after Firebase Auth (Step 2) had
-  // already confirmed the session — so even with a warm cache sitting
-  // right there on disk, the user still saw the "Loading your matches…"
-  // skeleton + ⏳ stat boxes for at least one Auth round-trip before Step 3
-  // even started reading that cache. Reading these caches here, synchronously,
-  // BEFORE the very first render() call, means a returning user (cache
-  // already warm from a previous open) sees real Upcoming/Live/Completed
-  // matches AND real Total Points/Contests Joined on the very first paint —
-  // genuinely no perceptible wait. Step 3 still runs exactly as before and
-  // silently refreshes everything from Firestore in the background the
-  // moment it lands; this only changes what the FIRST frame shows.
-  try {
-    const _mCache = localStorage.getItem('pp_matches_cache');
-    if (_mCache) matches = JSON.parse(_mCache);
-    const _d11Cache = localStorage.getItem('pp_dream11_matches_cache');
-    if (_d11Cache) dream11Matches = JSON.parse(_d11Cache);
-    if (!_d11Cache) {
-      const _d11Summary = localStorage.getItem('pp_dream11_summary_cache');
-      if (_d11Summary && typeof _d11SummaryFieldsFor === 'function') {
-        // No full-match cache yet, but a summary cache exists — build enough
-        // of a placeholder dream11Matches so My Matches can still render
-        // real cards immediately (same shape d11LoadMatchesSummaryFirst
-        // builds), instead of staying empty until Step 3's network read.
-        try {
-          const summary = JSON.parse(_d11Summary);
-          Object.keys(summary || {}).forEach(matchId => {
-            const s = summary[matchId];
-            dream11Matches[matchId] = {
-              id: matchId, published: s.published, scored: s.scored,
-              players: [], _summaryOnly: true,
-              megaParticipants: new Array(s.megaCount || 0).fill(null),
-              miniMegaParticipants: new Array(s.miniMegaCount || 0).fill(null),
-              freeParticipants: new Array(s.freeCount || 0).fill(null),
-            };
-          });
-        } catch(e){}
-      }
-    }
-    const _uCache = localStorage.getItem('pp_users_cache');
-    if (_uCache) Object.assign(users, JSON.parse(_uCache));
-    // Also paint this user's Dream11 teams from cache — without this, the
-    // very first frame doesn't yet know the user already built a team for
-    // a match, so My Matches cards show "Build My Team" instead of "My
-    // Team" until Step 3's real dream11Teams read lands a moment later
-    // (the card then flips correctly, but only after that visible delay).
-    const _teamsCache = localStorage.getItem('pp_dream11_teams_cache');
-    if (_teamsCache) Object.assign(dream11Teams, JSON.parse(_teamsCache));
-  } catch(e){}
-  // If we already have real matches/dream11 data from cache above, skip the
-  // skeleton on the very first paint — Step 3 will still silently correct
-  // anything stale once its own (also cache-first) reads land.
-  window._homeDataSyncDone = (Object.keys(matches||{}).length > 0 || Object.keys(dream11Matches||{}).length > 0);
-  window._homeStatsDataSyncDone = Object.keys(users||{}).length > 0;
+  window._homeDataSyncDone = false;
   loadLocalCache();
   loadSession(); // optimistic instant paint from localStorage (legacy/cache only)
   applySavedAppTheme(); // apply saved Light/Dark Mode preference before first paint
@@ -34737,7 +34316,6 @@ async function initApp() {
     console.warn("Firebase not available — running on localStorage cache only");
     window._authCheckDone = true; // give up waiting; show login screen if no cached user
     window._homeDataSyncDone = true; // no Firestore to wait on — stop showing a loading skeleton
-    window._homeStatsDataSyncDone = true;
     render(); // re-render now that we're allowed to show the login screen if needed
     return; // App already rendered from cache above — user can still use it
   }
@@ -34758,7 +34336,6 @@ async function initApp() {
   if (!authOk) {
     console.warn('[initApp] No Firebase Auth session — skipping Firestore sync to avoid PERMISSION_DENIED');
     window._homeDataSyncDone = true; // not syncing at all (no session) — stop showing a loading skeleton
-    window._homeStatsDataSyncDone = true;
     render();
     return;
   }
@@ -34818,47 +34395,11 @@ async function initApp() {
   // cache yet — matching the cache-first design already documented above
   // (see _MANUAL_REFRESH_COOLDOWN_MS) where the 🔄 button is meant to be
   // the only thing that forces a real re-read.
-  // ── FIX: _homeDataSyncDone must wait for BOTH data chains ──────────────
-  // Home's "Total Points" / "Contests Joined" numbers come from `currentUser`
-  // and `dream11Teams`, which are populated by the SECOND Promise.all below
-  // (_loadAllUsersFromFirestore, H2H, custom contests, etc) — a completely
-  // separate wait chain from the "matches ready" one right above. The old
-  // code let EITHER chain flip _homeDataSyncDone to true on its own, so on
-  // a device where matches/dream11Matches happened to sync fast (e.g. from
-  // local cache) but the users/contests chain was still in flight, Home
-  // would show real match cards while Total Points/Contests Joined were
-  // still 0 (their real source hadn't landed yet) — exactly the "closed the
-  // app, reopened, briefly shows 0 until it self-corrects" bug reported.
-  // Track each chain's completion separately and only flip the shared flag
-  // once both are done.
-  window._homeMatchesChainDone = false;
-  window._homeUsersChainDone = false;
-  window._homeStatsDataSyncDone = false;
-  const _maybeFinishHomeSync = () => {
-    if (window._homeMatchesChainDone && !window._homeDataSyncDone) {
-      window._homeDataSyncDone = true;
-      render();
-    }
-    if (window._homeMatchesChainDone && window._homeUsersChainDone) {
-      window._homeStatsDataSyncDone = true;
-      render();
-    }
-  };
-
   const _homeMatchesReady = Promise.all([
     _loadAllMatchesFromFirestore(false, true),
-    // FIX: force=true here. Previously this ran with forceRefresh=false, so on
-    // a device with an existing localStorage summary cache the placeholder
-    // dream11Matches (mega/mini-mega/free join counts) got built straight from
-    // that stale cache and never got corrected until the person manually hit
-    // 🔄 — the exact "open app shows old counts, refresh shows new counts" bug.
-    // This summary doc is tiny (one doc read), so forcing it on every app open
-    // doesn't reintroduce the quota problem the earlier `false` change was
-    // guarding against (that was about the ~9 FULL collections below, not this
-    // 1-doc summary read).
-    typeof d11LoadMatchesSummaryFirst === 'function' ? d11LoadMatchesSummaryFirst(true) : _loadAllDream11MatchesFromFirestore(false, true),
+    typeof d11LoadMatchesSummaryFirst === 'function' ? d11LoadMatchesSummaryFirst() : _loadAllDream11MatchesFromFirestore(false, true),
   ]).then(() => {
-    // ── FIX: "flash of 0" / premature empty-state ──────────────────────
+    // ── FIX: "flash of 0" ──────────────────────────────────────────────
     // _liveLoadCollection (see its own fix above) now resolves as soon as
     // it paints from cache, without waiting for the real network snapshot
     // — great for speed, but it means this .then() can fire while `matches`
@@ -34866,39 +34407,34 @@ async function initApp() {
     // yet, or the gap between the fast cache-resolve and the slower real
     // snapshot actually landing). Marking _homeDataSyncDone=true right here
     // made renderHome() briefly show "Upcoming (0)/Live (0)/Completed (0)"
-    // or even the full "No upcoming contests" empty-state — which looks
-    // exactly like "you genuinely have nothing" rather than "still
-    // loading". A short 4-second timeout here was tried and wasn't enough
-    // on slower connections — it kept firing before data landed. There is
-    // now NO timeout for the normal case: this keeps polling (every 300ms,
-    // cheap — just checking objects already in memory, not new Firestore
-    // reads) until real data is confirmed present, so "Loading your
-    // matches…" stays up for exactly as long as it genuinely takes, never
-    // less. The only thing that can end the wait early is the underlying
-    // Firestore listener actually reporting an error (network dead,
-    // permission denied, etc — see the listener's err callback in
-    // _liveLoadCollection, which resolves its promise on failure) — a
-    // generous 30s safety net below still exists purely to stop a
-    // genuinely broken listener from spinning forever, not as the expected
-    // path.
+    // — which looks like "no matches" rather than "still loading" — before
+    // the real snapshot arrived a moment later and corrected it. Instead:
+    // if we already have SOME match data, we're good, show it now. If not,
+    // give the live listener a short grace window to deliver its first real
+    // snapshot (it always does, per the fix above) before giving up and
+    // showing an honest empty state — this keeps the "Loading your
+    // matches…" skeleton up through that gap instead of a misleading "0".
     const haveData = Object.keys(matches||{}).length > 0 || Object.keys(dream11Matches||{}).length > 0;
     if (haveData) {
-      window._homeMatchesChainDone = true;
-      _maybeFinishHomeSync();
+      window._homeDataSyncDone = true;
+      render();
     } else {
       let settled = false;
-      const finish = () => { if (!settled) { settled = true; window._homeMatchesChainDone = true; _maybeFinishHomeSync(); } };
+      const finish = () => { if (!settled) { settled = true; window._homeDataSyncDone = true; render(); } };
+      // Poll briefly for the listener's real snapshot to land (checked every
+      // 300ms) rather than a single fixed timer, so this resolves the moment
+      // data actually shows up instead of always waiting the full window.
       const pollId = setInterval(() => {
         if (Object.keys(matches||{}).length > 0 || Object.keys(dream11Matches||{}).length > 0) {
           clearInterval(pollId);
           finish();
         }
       }, 300);
-      setTimeout(() => { clearInterval(pollId); finish(); }, 30000); // generous safety net only — not the expected path
+      setTimeout(() => { clearInterval(pollId); finish(); }, 4000); // hard cap — never wait forever, genuinely-empty accounts still resolve
     }
   }).catch(() => {
-    window._homeMatchesChainDone = true; // don't get stuck loading forever even if this pair fails
-    _maybeFinishHomeSync();
+    window._homeDataSyncDone = true; // don't get stuck loading forever even if this pair fails
+    render();
   });
 
   Promise.all([
@@ -34963,8 +34499,7 @@ async function initApp() {
     if (currentUser && users[currentUser.email]) {
       currentUser = { ...users[currentUser.email], email: currentUser.email };
     }
-    window._homeUsersChainDone = true; // this chain's real Firestore data has landed
-    _maybeFinishHomeSync(); // real Firestore data has landed — 0/empty now means genuinely empty (once matches chain is also done)
+    window._homeDataSyncDone = true; // real Firestore data has landed — 0/empty now means genuinely empty
     render(); // Re-render with fresh data (silent update)
     // Catch-up trigger for Cricket Live Line 5 automatic sync (both the
     // pre-deadline Playing XI check and the post-deadline scorecard sync)
@@ -34976,17 +34511,9 @@ async function initApp() {
     // background loop's own next tick.
     if (typeof d11AutoCheckLl5PlayingXI === 'function') d11AutoCheckLl5PlayingXI().catch(function(){});
     if (typeof d11AutoSyncLl5PostDeadline === 'function') d11AutoSyncLl5PostDeadline().catch(function(){});
-    // Same catch-up trigger for Advance Live Line (Sportbex) and Cricket
-    // Live Line 3 automatic sync — same "🤖 Automatic" pattern as LL5.
-    if (typeof d11AutoCheckSbxPlayingXI === 'function') d11AutoCheckSbxPlayingXI().catch(function(){});
-    if (typeof d11AutoSyncSbxPostDeadline === 'function') d11AutoSyncSbxPostDeadline().catch(function(){});
-    if (typeof d11AutoCheckLl3PlayingXI === 'function') d11AutoCheckLl3PlayingXI().catch(function(){});
-    if (typeof d11AutoSyncLl3PostDeadline === 'function') d11AutoSyncLl3PostDeadline().catch(function(){});
-    if (typeof d11AutoCheckAllPlayingXI === 'function') d11AutoCheckAllPlayingXI().catch(function(){});
-    if (typeof d11AutoSyncAllPostDeadline === 'function') d11AutoSyncAllPostDeadline().catch(function(){});
+  }).catch(err => {
     console.error('[initApp] background Firestore sync failed:', err);
-    window._homeUsersChainDone = true; // sync failed, but stop showing a loading skeleton forever — fall back to whatever we have
-    _maybeFinishHomeSync();
+    window._homeDataSyncDone = true; // sync failed, but stop showing a loading skeleton forever — fall back to whatever we have
     render();
   });
   // Render now with whatever we already have (cache/auth), don't wait on the sync.
@@ -35038,22 +34565,11 @@ if ('serviceWorker' in navigator) {
     render();
     if (typeof d11AutoCheckLl5PlayingXI === 'function') d11AutoCheckLl5PlayingXI().catch(function(){});
     if (typeof d11AutoSyncLl5PostDeadline === 'function') d11AutoSyncLl5PostDeadline().catch(function(){});
-    // Same 5-min-loop coverage for Advance Live Line (Sportbex) and Cricket
-    // Live Line 3 automatic sync — same "🤖 Automatic" pattern as LL5.
-    if (typeof d11AutoCheckSbxPlayingXI === 'function') d11AutoCheckSbxPlayingXI().catch(function(){});
-    if (typeof d11AutoSyncSbxPostDeadline === 'function') d11AutoSyncSbxPostDeadline().catch(function(){});
-    if (typeof d11AutoCheckLl3PlayingXI === 'function') d11AutoCheckLl3PlayingXI().catch(function(){});
-    if (typeof d11AutoSyncLl3PostDeadline === 'function') d11AutoSyncLl3PostDeadline().catch(function(){});
-    // Same 5-min-loop coverage for Advance Live Line ("All" wagons/newpoint2
-    // provider) automatic sync — same "🤖 Automatic" pattern as the others.
-    if (typeof d11AutoCheckAllPlayingXI === 'function') d11AutoCheckAllPlayingXI().catch(function(){});
-    if (typeof d11AutoSyncAllPostDeadline === 'function') d11AutoSyncAllPostDeadline().catch(function(){});
     // d11AutoFetchFinalResult removed — final result is now always fetched
     // manually by the admin via "🏁 Fetch Final Result", to stop this
-    // scheduler's silent API usage entirely. (Cricket Live Line 5, Advance
-    // Live Line/Sportbex, and Cricket Live Line 3 are the exceptions, per
-    // explicit request — see d11AutoSyncLl5PostDeadline above, all gated
-    // behind their own per-match "🤖 Automatic" toggle.)
+    // scheduler's silent API usage entirely. (Cricket Live Line 5 is the
+    // one exception, per explicit request — see d11AutoSyncLl5PostDeadline
+    // above, gated behind the per-match "🤖 Automatic" toggle.)
   },5*60*1000);
 })();
 
@@ -35151,7 +34667,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.49.0";
+const APP_VERSION = "4.42.10";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
