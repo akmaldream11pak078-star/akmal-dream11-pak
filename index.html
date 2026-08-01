@@ -33448,16 +33448,30 @@ async function initApp() {
   _navEnsureSentinel();
 
   // Step 1: Load cache instantly → render right away (feels instant)
-  // NOTE: matches/contests are no longer cached in localStorage (loadLocalCache
-  // is a no-op), so on every fresh app open `matches`/`dream11Matches` really
-  // are empty here until the Firestore sync in Step 3 lands. Without a flag
-  // to distinguish "still loading" from "genuinely nothing to show", the very
-  // first render() below would paint "Upcoming (0)" / the empty-state message
-  // as if that were the final answer — a false "you have nothing" impression
-  // for a split second (or longer on a slow connection) before the real data
-  // pops in. window._homeDataSyncDone lets renderHome() show a loading
-  // skeleton instead until the first real sync finishes (see Step 3).
-  window._homeDataSyncDone = false;
+  // loadLocalCache() itself is a no-op by design (matches/contests aren't
+  // cached in general), but Home's "My Matches" (Upcoming/Live/Completed)
+  // specifically needs to paint instantly on every open — waiting for a
+  // live Firestore round-trip before showing anything was taking 30-40+
+  // seconds on a weak connection (the ONLY thing making it slow was
+  // window._homeDataSyncDone staying false, forcing a loading skeleton,
+  // until onSnapshot's first server round-trip completed for the full
+  // players[]-carrying pp_dream11_matches collection). Read back just the
+  // two cache keys _liveLoadCollection already writes on every successful
+  // load (pp_matches_cache / pp_dream11_matches_cache) so Home shows
+  // real (possibly a few seconds/minutes stale) match cards immediately;
+  // the live sync below still runs exactly as before and silently
+  // repaints with fresh data the moment it lands — the user never sees a
+  // loading screen for this again unless it's a genuinely brand-new
+  // device with no cache at all.
+  try {
+    const _cachedMatches = localStorage.getItem('pp_matches_cache');
+    const _cachedD11Matches = localStorage.getItem('pp_dream11_matches_cache');
+    if (_cachedMatches) matches = JSON.parse(_cachedMatches);
+    if (_cachedD11Matches) dream11Matches = JSON.parse(_cachedD11Matches);
+    window._homeDataSyncDone = !!(_cachedMatches || _cachedD11Matches);
+  } catch(e) {
+    window._homeDataSyncDone = false;
+  }
   loadLocalCache();
   loadSession(); // optimistic instant paint from localStorage (legacy/cache only)
   applySavedAppTheme(); // apply saved Light/Dark Mode preference before first paint
@@ -33838,7 +33852,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.39.0";
+const APP_VERSION = "4.39.1";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
