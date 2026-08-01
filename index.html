@@ -19723,7 +19723,20 @@ async function d11SyncLiveMatch(matchId, showToast) {
 
 function _d11TeamNameMatches(cricbuzzName, ourTeamName) {
   if (!cricbuzzName || !ourTeamName) return false;
-  const words = ourTeamName.toLowerCase().split(/\s+/).filter(w=>w.length>2);
+  // BUGFIX: generic gender/format suffixes like "(Men)", "(Women)" appear on
+  // almost every team name in this app (The Hundred, most leagues), and are
+  // NOT distinguishing — "London Spirit (Men)" and "Southern Brave (Men)"
+  // both contain the word "(men)". Since matching used to be "any word
+  // matches", both teams' names could match the SAME provider score row on
+  // that shared suffix alone, cross-assigning one team's score to the
+  // other (reported bug: London Spirit's card showed Southern Brave's
+  // score). Strip these generic words out first so only genuinely
+  // team-specific words (e.g. "london", "spirit") are compared.
+  const GENERIC_SUFFIX_WORDS = new Set(['men', 'women', 'man', 'woman', 'xi', "men's", "women's"]);
+  const words = ourTeamName.toLowerCase().split(/\s+/)
+    .map(w => w.replace(/[()]/g, ''))
+    .filter(w => w.length > 2 && !GENERIC_SUFFIX_WORDS.has(w));
+  if (words.length === 0) return false; // nothing distinguishing left to match on — fail safe rather than match everything
   return words.some(w => cricbuzzName.includes(w));
 }
 
@@ -34163,7 +34176,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.41.1";
+const APP_VERSION = "4.42.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
