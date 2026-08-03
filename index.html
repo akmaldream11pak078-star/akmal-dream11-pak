@@ -829,9 +829,9 @@ const MATCH_DELETE_PASSWORD = "Del1234"; // Required to delete any match (Predic
 
 // ── Dream11 Contest constants (separate from Prediction Mega/H2H) ──
 const D11_MEGA_ENTRY_FEE = 30; // Rs 30 entry fee to join Dream11 Mega Contest
-const D11_MEGA_COMPANY_SHARE = 0.07; // 7% of Dream11 mega pool goes to company, 93% split among winners
+const D11_MEGA_COMPANY_SHARE = 0.05; // 5% of Dream11 mega pool goes to company, 95% split among winners (top 50%, rank-taper)
 const D11_MINI_MEGA_ENTRY_FEE = 10; // Rs 10 entry fee to join Dream11 Mini Mega Contest (same rules/brackets as Mega, cheaper entry)
-const D11_MINI_MEGA_COMPANY_SHARE = 0.07; // 7% of Dream11 mini mega pool goes to company, 93% split among winners
+const D11_MINI_MEGA_COMPANY_SHARE = 0.05; // 5% of Dream11 mini mega pool goes to company, 95% split among winners (top 50%, rank-taper)
 const D11_H2H_ENTRY_FEE = 100; // Rs 100 per user for Dream11 H2H
 const D11_H2H_COMPANY_SHARE = 0.05; // 5% company cut, 95% to the winner
 const D11_TRIO_ENTRY_FEE = 80; // Rs 80 per user for Dream11 Trio (3 users, 1 winner)
@@ -843,7 +843,7 @@ const D11_SLOT20_MAX_PLAYERS = 20; // Contest closes to new joiners once this ma
 const D11_SLOT20_WINNER_SHARE = 0.50; // Top 50% of joiners win a prize (rounded DOWN — see getD11Slot20WinnerCount)
 const D11_CUSTOM_CONTEST_MAX_PLAYERS = 100; // Max players allowed in a user-created Dream11 contest
 const D11_CUSTOM_CONTEST_MAX_PER_USER = 2; // Max number of Custom Contests one user can create per match
-const D11_CUSTOM_CONTEST_COMPANY_SHARE = 0.07; // 7% company cut
+const D11_CUSTOM_CONTEST_COMPANY_SHARE = 0.05; // 5% company cut, 95% split among winners (top 50%, rank-taper)
 const D11_TOURNAMENT_CREATION_FEE = 0; // Rs creator pays the company to create a tournament (temporarily 0, raise later)
 const D11_TOURNAMENT_MAX_PARTICIPANTS = 100; // Max users allowed to join one tournament
 const D11_TOURNAMENT_COMPANY_SHARE = 0.07; // 7% company cut on the entry-fee pool (when creator sets a paid entry)
@@ -22241,6 +22241,31 @@ async function joinD11MegaContest(matchId, teamId) {
 // keeps exactly 10% — never more, never less — regardless of how many users
 // joined within a bracket's range.
 // Each bracket is { min, max, weights: [rank1, rank2, rank3, ...] }.
+// ── NEW RULE (applies to Mega, Mini Mega, and Custom Contest for any match
+// scored from now on — already-completed matches keep their original
+// weighted-bracket payout since those are guarded by *Distributed/status
+// flags and this code path never re-runs for them):
+// 5% company cut, 95% of the pool split among the TOP 50% of joiners
+// (rounded UP — e.g. 5 joiners → 3 winners, 2 losers), with a rank-based
+// taper so rank 1 gets somewhat more than the last winning rank, rather
+// than a flat equal split.
+// Examples from the spec: 4 join → 2 win / 2 lose. 6 join → 3 win / 3 lose.
+// 2 join → 1 win / 1 lose.
+function getD11HalfSplitWinnerCount(joinCount) {
+  if (joinCount <= 1) return joinCount; // 1 joiner handled separately (refund)
+  return Math.max(1, Math.ceil(joinCount / 2)); // round UP to nearest half
+}
+// Decreasing weight table of length `winnerCount` — rank 1 gets the largest
+// weight, tapering down smoothly to the last winning rank. Same taper shape
+// used elsewhere in this app (buildD11CustomContestWeights / Slot 20).
+function buildD11HalfSplitWeights(winnerCount) {
+  const weights = [];
+  for (let i = 0; i < winnerCount; i++) {
+    weights.push(Math.round(100 / Math.pow(i + 1, 0.65)) + 8);
+  }
+  return weights;
+}
+
 const D11_MEGA_BRACKETS = [
   { min: 2,  max: 3,   weights: [51, 30, 0] },
   { min: 4,  max: 10,  weights: [100, 60, 40, 23, 23, 23] },
@@ -22283,26 +22308,12 @@ async function distributeD11MegaPrizes(matchId) {
     return;
   }
 
-  const bracket = getD11MegaBracket(parts.length);
-  if (!bracket) {
-    console.warn('D11 Mega: joiner count outside defined brackets', parts.length);
-  }
-  const fullWeights = bracket ? bracket.weights : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].weights;
+  // NEW RULE: top 50% of joiners win (rounded UP), 95% of pool split with
+  // a rank taper. Replaces the old fixed-bracket weight tables.
+  const winnerCount = getD11HalfSplitWinnerCount(parts.length);
+  const weightTable = buildD11HalfSplitWeights(winnerCount);
 
-  // The published weight tables are sized for a bracket's MAX joiner count
-  // (e.g. 6 winners is correct for 10 joiners in Bracket 2, but pays too many
-  // relative to the pool if only 4 join). Scale the winner count down to match
-  // the same winners-to-joiners RATIO, then resample the weight curve to that
-  // many entries — this keeps the same prize shape (1st >> 2nd >> ... ) while
-  // guaranteeing the company's 10% share stays accurate at any joiner count.
-  const bracketMax = bracket ? bracket.max : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].max;
-  const winnerRatio = fullWeights.length / bracketMax;
-  const winnerCount = Math.max(1, Math.min(parts.length, Math.round(parts.length * winnerRatio)));
-  const weightTable = winnerCount >= fullWeights.length
-    ? fullWeights.slice()
-    : Array.from({length: winnerCount}, (_,k) => fullWeights[Math.floor(k * (fullWeights.length / winnerCount))]);
-
-  // Real pool collected for this match (entry fee × actual joiners), scaled to 93%.
+  // Real pool collected for this match (entry fee × actual joiners), scaled to 95%.
   const pool = d11m.megaPool || (parts.length * D11_MEGA_ENTRY_FEE);
   const distributable = Math.round(pool * (1 - D11_MEGA_COMPANY_SHARE));
   const weightSum = weightTable.reduce((a,b) => a+b, 0);
@@ -22571,18 +22582,10 @@ async function distributeD11MiniMegaPrizes(matchId) {
     return;
   }
 
-  const bracket = getD11MegaBracket(parts.length);
-  if (!bracket) {
-    console.warn('D11 Mini Mega: joiner count outside defined brackets', parts.length);
-  }
-  const fullWeights = bracket ? bracket.weights : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].weights;
-
-  const bracketMax = bracket ? bracket.max : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].max;
-  const winnerRatio = fullWeights.length / bracketMax;
-  const winnerCount = Math.max(1, Math.min(parts.length, Math.round(parts.length * winnerRatio)));
-  const weightTable = winnerCount >= fullWeights.length
-    ? fullWeights.slice()
-    : Array.from({length: winnerCount}, (_,k) => fullWeights[Math.floor(k * (fullWeights.length / winnerCount))]);
+  // NEW RULE: same as Mega — top 50% of joiners win (rounded UP), 95% of
+  // pool split with a rank taper.
+  const winnerCount = getD11HalfSplitWinnerCount(parts.length);
+  const weightTable = buildD11HalfSplitWeights(winnerCount);
 
   const pool = d11m.miniMegaPool || (parts.length * D11_MINI_MEGA_ENTRY_FEE);
   const distributable = Math.round(pool * (1 - D11_MINI_MEGA_COMPANY_SHARE));
@@ -23678,9 +23681,10 @@ async function finalizeD11CustomContests(matchId) {
 
     const distributable = Math.round(cc.pool * (1 - D11_CUSTOM_CONTEST_COMPANY_SHARE));
 
-    // Mega-style: ~70% of joiners win, weighted taper from rank 1 downward.
-    const winnerCount = Math.min(ranked.length, getD11CustomContestWinnerCount(ranked.length));
-    const weightTable = buildD11CustomContestWeights(winnerCount);
+    // NEW RULE: top 50% of joiners win (rounded UP), 95% of pool split
+    // with a rank taper.
+    const winnerCount = getD11HalfSplitWinnerCount(ranked.length);
+    const weightTable = buildD11HalfSplitWeights(winnerCount);
     const weightSum = weightTable.reduce((a,b) => a+b, 0);
 
     const prizes = {};
@@ -24928,11 +24932,7 @@ function renderD11JoinContest() {
     if (megaJoinCount === 1) {
       megaPrizeRows = [{rank:1, prize: D11_MEGA_ENTRY_FEE + ' (refund)'}];
     } else if (megaJoinCount > 1) {
-      const bracket = getD11MegaBracket(megaJoinCount);
-      const fullW = bracket ? bracket.weights : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].weights;
-      const bMax = bracket ? bracket.max : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].max;
-      const wCount = Math.max(1, Math.min(megaJoinCount, Math.round(megaJoinCount * fullW.length / bMax)));
-      const wTable = wCount >= fullW.length ? fullW.slice() : Array.from({length:wCount},(_,k)=>fullW[Math.floor(k*(fullW.length/wCount))]);
+      const wTable = buildD11HalfSplitWeights(getD11HalfSplitWinnerCount(megaJoinCount));
       const megaPool2 = d11m.megaPool || (megaJoinCount * D11_MEGA_ENTRY_FEE);
       const megaDist2 = Math.round(megaPool2 * (1 - D11_MEGA_COMPANY_SHARE));
       const wSum = wTable.reduce((a,b)=>a+b,0);
@@ -24964,11 +24964,7 @@ function renderD11JoinContest() {
     if (miniMegaJoinCount === 1) {
       miniMegaPrizeRows = [{rank:1, prize: D11_MINI_MEGA_ENTRY_FEE + ' (refund)'}];
     } else if (miniMegaJoinCount > 1) {
-      const bracket = getD11MegaBracket(miniMegaJoinCount);
-      const fullW = bracket ? bracket.weights : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].weights;
-      const bMax = bracket ? bracket.max : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].max;
-      const wCount = Math.max(1, Math.min(miniMegaJoinCount, Math.round(miniMegaJoinCount * fullW.length / bMax)));
-      const wTable = wCount >= fullW.length ? fullW.slice() : Array.from({length:wCount},(_,k)=>fullW[Math.floor(k*(fullW.length/wCount))]);
+      const wTable = buildD11HalfSplitWeights(getD11HalfSplitWinnerCount(miniMegaJoinCount));
       const mmPool2 = d11m.miniMegaPool || (miniMegaJoinCount * D11_MINI_MEGA_ENTRY_FEE);
       const mmDist2 = Math.round(mmPool2 * (1 - D11_MINI_MEGA_COMPANY_SHARE));
       const wSum = wTable.reduce((a,b)=>a+b,0);
@@ -25205,11 +25201,7 @@ function renderD11ContestParticipants() {
     // Prize preview per rank
     function megaPrizePreview() {
       if (megaParts.length <= 1) return [];
-      const bracket = getD11MegaBracket(megaParts.length);
-      const fullW = bracket ? bracket.weights : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].weights;
-      const bMax = bracket ? bracket.max : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].max;
-      const wCount = Math.max(1, Math.min(megaParts.length, Math.round(megaParts.length * fullW.length / bMax)));
-      const wTable = wCount >= fullW.length ? fullW.slice() : Array.from({length:wCount},(_,k)=>fullW[Math.floor(k*(fullW.length/wCount))]);
+      const wTable = buildD11HalfSplitWeights(getD11HalfSplitWinnerCount(megaParts.length));
       const wSum = wTable.reduce((a,b)=>a+b,0);
       return wTable.map((w,i)=>({rank:i+1, prize: Math.round(dist*(w/wSum))}));
     }
@@ -25236,11 +25228,7 @@ function renderD11ContestParticipants() {
     const comp = pool - dist;
     function miniMegaPrizePreview() {
       if (miniParts.length <= 1) return [];
-      const bracket = getD11MegaBracket(miniParts.length);
-      const fullW = bracket ? bracket.weights : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].weights;
-      const bMax = bracket ? bracket.max : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].max;
-      const wCount = Math.max(1, Math.min(miniParts.length, Math.round(miniParts.length * fullW.length / bMax)));
-      const wTable = wCount >= fullW.length ? fullW.slice() : Array.from({length:wCount},(_,k)=>fullW[Math.floor(k*(fullW.length/wCount))]);
+      const wTable = buildD11HalfSplitWeights(getD11HalfSplitWinnerCount(miniParts.length));
       const wSum = wTable.reduce((a,b)=>a+b,0);
       return wTable.map((w,i)=>({rank:i+1, prize: Math.round(dist*(w/wSum))}));
     }
@@ -25334,8 +25322,8 @@ function renderD11ContestParticipants() {
       ccPrizeRows = [{rank:1, prize: cc.entryFee + ' (refund)'}];
     } else if (joinCount > 1) {
       const distributable = Math.round(cc.pool * (1 - D11_CUSTOM_CONTEST_COMPANY_SHARE));
-      const winnerCount = Math.min(joinCount, getD11CustomContestWinnerCount(joinCount));
-      const weightTable = buildD11CustomContestWeights(winnerCount);
+      const winnerCount = getD11HalfSplitWinnerCount(joinCount);
+      const weightTable = buildD11HalfSplitWeights(winnerCount);
       const weightSum = weightTable.reduce((a,b) => a+b, 0);
       ccPrizeRows = weightTable.map((w,i) => ({ rank: i+1, prize: Math.round(distributable * (w/weightSum)) }));
     }
@@ -28659,11 +28647,7 @@ function renderAdminD11ParticipantsPanel(matchId) {
   function getMegaPrizeRows() {
     if (megaList.length===0) return [];
     if (megaList.length===1) return [{rank:1, prize: D11_MEGA_ENTRY_FEE + ' (refund)'}];
-    const bracket = getD11MegaBracket(megaList.length);
-    const fullW = bracket ? bracket.weights : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].weights;
-    const bMax = bracket ? bracket.max : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].max;
-    const wCount = Math.max(1, Math.min(megaList.length, Math.round(megaList.length * fullW.length / bMax)));
-    const wTable = wCount >= fullW.length ? fullW.slice() : Array.from({length:wCount},(_,k)=>fullW[Math.floor(k*(fullW.length/wCount))]);
+    const wTable = buildD11HalfSplitWeights(getD11HalfSplitWinnerCount(megaList.length));
     const pool = d11m.megaPool || (megaList.length * D11_MEGA_ENTRY_FEE);
     const dist = Math.round(pool * (1 - D11_MEGA_COMPANY_SHARE));
     const wSum = wTable.reduce((a,b)=>a+b,0);
@@ -28676,11 +28660,7 @@ function renderAdminD11ParticipantsPanel(matchId) {
   function getMiniMegaPrizeRows() {
     if (miniMegaList.length===0) return [];
     if (miniMegaList.length===1) return [{rank:1, prize: D11_MINI_MEGA_ENTRY_FEE + ' (refund)'}];
-    const bracket = getD11MegaBracket(miniMegaList.length);
-    const fullW = bracket ? bracket.weights : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].weights;
-    const bMax = bracket ? bracket.max : D11_MEGA_BRACKETS[D11_MEGA_BRACKETS.length-1].max;
-    const wCount = Math.max(1, Math.min(miniMegaList.length, Math.round(miniMegaList.length * fullW.length / bMax)));
-    const wTable = wCount >= fullW.length ? fullW.slice() : Array.from({length:wCount},(_,k)=>fullW[Math.floor(k*(fullW.length/wCount))]);
+    const wTable = buildD11HalfSplitWeights(getD11HalfSplitWinnerCount(miniMegaList.length));
     const mmPool = d11m.miniMegaPool || (miniMegaList.length * D11_MINI_MEGA_ENTRY_FEE);
     const mmDist = Math.round(mmPool * (1 - D11_MINI_MEGA_COMPANY_SHARE));
     const wSum = wTable.reduce((a,b)=>a+b,0);
@@ -30741,9 +30721,9 @@ let adminUserDetailEmail = null; // set to open the full-detail view for one use
 // every user's ledger for exactly that mismatch and lets admin refund them
 // in one tap, instead of hunting for each case by hand.
 const ORPHAN_CHECK_TX_TYPES = {
-  'd11_mega_entry':      { collection: 'dream11Matches', participantsField: 'megaParticipants',     label: 'Dream11 Mega Contest' },
-  'd11_mini_mega_entry': { collection: 'dream11Matches', participantsField: 'miniMegaParticipants', label: 'Dream11 Mini Mega Contest' },
-  'mega_entry':          { collection: 'matches',        participantsField: 'megaParticipants',     label: 'Mega Contest' },
+  'd11_mega_entry':      { collection: 'dream11Matches', participantsField: 'megaParticipants',     cancelledField: 'megaCancelled',     label: 'Dream11 Mega Contest' },
+  'd11_mini_mega_entry': { collection: 'dream11Matches', participantsField: 'miniMegaParticipants', cancelledField: 'miniMegaCancelled', label: 'Dream11 Mini Mega Contest' },
+  'mega_entry':          { collection: 'matches',        participantsField: 'megaParticipants',     cancelledField: 'megaCancelled',     label: 'Mega Contest' },
 };
 // BUGFIX: findOrphanedContestEntries() below scans whatever's already sitting
 // in local memory (dream11Matches/matches/users) with no fresh read of its
@@ -30791,9 +30771,24 @@ function findOrphanedContestEntries() {
     (u.transactions || []).forEach(tx => {
       const rule = ORPHAN_CHECK_TX_TYPES[tx.type];
       if (!rule || !tx.matchId) return;
-      if (alreadyRefundedTxIds.has(tx.id)) return; // already fixed — don't resurface it
+      if (alreadyRefundedTxIds.has(tx.id)) return; // already fixed by THIS tool — don't resurface it
       const store = rule.collection === 'dream11Matches' ? dream11Matches : matches;
       const record = store[tx.matchId];
+      // BUGFIX: if admin already used the match-level "↩️ Refund All"
+      // button (d11RunAllRefunds) to cancel/refund this whole contest, the
+      // match doc gets a "cancelled" flag (e.g. megaCancelled = true) and
+      // the participants list is emptied — but that tool writes its own
+      // refund transactions with a note like "Mega Contest
+      // cancelled/refunded by admin", NOT the "(tx <id>)" pattern this
+      // scanner's de-dup check above looks for (that pattern is only ever
+      // written by THIS orphan-fixing tool itself). Without this check,
+      // the original charge transaction — still sitting untouched in the
+      // user's history either way — kept getting flagged as orphaned
+      // again on every scan, even though it had genuinely already been
+      // refunded through the proper match-level tool (reported bug:
+      // "admin ne Refund All se refund kiya, phir bhi orphaned list mein
+      // dikh raha hai").
+      if (record && rule.cancelledField && record[rule.cancelledField]) return;
       // No match record at all, or the participants list doesn't include
       // this user — the entry fee was charged (this transaction exists)
       // but they never actually made it into the contest.
@@ -34527,7 +34522,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.45.0";
+const APP_VERSION = "4.45.1";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
