@@ -8819,19 +8819,28 @@ async function permanentlyDeleteD11Match(matchId) {
 // via the fallback API), and manually-created matches leave it blank
 // unless typed in at creation time — until now there was no way to add or
 // correct it after the fact without deleting and recreating the match. ──
-function d11EditSeriesName(matchId) {
+async function d11EditSeriesName(matchId) {
   const m = matches[matchId];
   if (!m) return;
   const current = m.seriesName || '';
   const newVal = prompt('Series / Tournament / League name:\n(e.g. "ICC T20 World Cup 2026", "Lanka Premier League 2026")\n\nCurrent: ' + (current || '(not set)'), current);
   if (newVal === null) return; // cancelled
+  const prevSeriesName = m.seriesName;
   m.seriesName = newVal.trim();
-  _saveMatchToFirestore(matchId, m);
   render();
-  showNotif(m.seriesName ? '✅ Series name updated: ' + m.seriesName : '✅ Series name cleared');
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    render();
+    showNotif(m.seriesName ? '✅ Series name updated: ' + m.seriesName : '✅ Series name cleared');
+  } catch(e) {
+    m.seriesName = prevSeriesName;
+    console.error('Series name save failed:', e);
+    showNotif('❌ Series name did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
-function d11EditDeadline(matchId) {
+async function d11EditDeadline(matchId) {
   const m = matches[matchId];
   if (!m) return;
   const current = m.deadline ? new Date(m.deadline) : new Date(Date.now() + 86400000);
@@ -8841,10 +8850,19 @@ function d11EditDeadline(matchId) {
   if (!newVal) return;
   const parsed = new Date(newVal);
   if (isNaN(parsed.getTime())) { showNotif('Invalid date — use format YYYY-MM-DDTHH:MM', 'error'); return; }
+  const prevDeadline = m.deadline;
   m.deadline = parsed.getTime();
-  _saveMatchToFirestore(matchId, m);
   render();
-  showNotif('✅ Deadline updated: ' + pkDateTimeYear(parsed));
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    render();
+    showNotif('✅ Deadline updated: ' + pkDateTimeYear(parsed));
+  } catch(e) {
+    m.deadline = prevDeadline;
+    console.error('Deadline save failed:', e);
+    showNotif('❌ Deadline change did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
 // ── Admin: change a Dream11 match's cricket format (T20/ODI/Test) even after
@@ -8853,7 +8871,7 @@ function d11EditDeadline(matchId) {
 // entered, since T20/ODI/Test each use different points values (see
 // D11_SCORING). Safe to use any time; does NOT touch players, teams, or
 // publish/lock state, only the format tag + recalculated points. ──
-function d11EditFormat(matchId) {
+async function d11EditFormat(matchId) {
   const m = matches[matchId];
   const d11m = dream11Matches[matchId];
   if (!m) return;
@@ -8867,19 +8885,47 @@ function d11EditFormat(matchId) {
   if (!clean) { showNotif('Invalid format — type exactly T20, ODI, Test, or H100', 'error'); return; }
   if (clean === current) { showNotif('Format unchanged'); return; }
   if (!confirm(`Change format from ${current} to ${clean}?\n\nThis will recalculate every player's fantasy points using ${clean} scoring rules (per-run/wicket bonuses, milestones, SR/ER bands etc. all differ by format).`)) return;
+
+  // BUGFIX: was firing all three Firestore saves without awaiting any of
+  // them, then immediately showing "✅ Format changed" regardless of
+  // whether the writes actually landed — a failed save (network blip,
+  // permission issue, etc.) left the admin thinking the change was saved
+  // when it wasn't, and the next app load reverted to the old format
+  // (exact bug reported: change Format, close app, reopen, old format is
+  // back). Now properly awaits each save and rolls back the local change
+  // if any of them fail, with a clear error instead of a false success.
+  const prevFormat = m.format;
+  const prevPlayersSnapshot = d11m ? (d11m.players || []).map(p => ({ id: p.id, stats: p.stats, points: p.points })) : null;
   m.format = clean;
-  _saveMatchToFirestore(matchId, m);
-  if (d11m) {
-    // Recalculate every player's points under the new format's scoring rules
-    (d11m.players || []).forEach(p => {
-      if (p.stats) p.points = calcDream11PlayerPoints(p.stats, matchId);
-    });
-    recalcDream11MatchPoints(d11m);
-    _saveDream11MatchToFirestore(matchId, d11m);
-    d11RefreshLiveTeamPoints(matchId);
-  }
   render();
-  showNotif(`✅ Format changed to ${clean} — all points recalculated`);
+  showNotif('⏳ Saving format change…');
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    if (d11m) {
+      // Recalculate every player's points under the new format's scoring rules
+      (d11m.players || []).forEach(p => {
+        if (p.stats) p.points = calcDream11PlayerPoints(p.stats, matchId);
+      });
+      recalcDream11MatchPoints(d11m);
+      await _saveDream11MatchToFirestore(matchId, d11m);
+      await d11RefreshLiveTeamPoints(matchId);
+    }
+    render();
+    showNotif(`✅ Format changed to ${clean} — all points recalculated`);
+  } catch(e) {
+    // Roll back the local change so the UI doesn't show a format that
+    // never actually made it to Firestore
+    m.format = prevFormat;
+    if (d11m && prevPlayersSnapshot) {
+      prevPlayersSnapshot.forEach(snap => {
+        const p = (d11m.players || []).find(pp => pp.id === snap.id);
+        if (p) { p.stats = snap.stats; p.points = snap.points; }
+      });
+    }
+    console.error('Format change save failed:', e);
+    showNotif('❌ Format change did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
 function openDream11Match(matchId) {
@@ -12645,37 +12691,64 @@ async function d11SearchLiveMatchCll(matchId) {
   }
 }
 
-function d11LinkCllMatch(matchId, cllMatchId) {
+async function d11LinkCllMatch(matchId, cllMatchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevCllMatchId = m.cllMatchId;
   m.cllMatchId = cllMatchId;
-  _saveMatchToFirestore(matchId, m);
   _d11CllSearchResults = [];
   d11CllLinkPickerMatchId = null;
-  showNotif('🔗 Linked to Cricket Live Line! Fetching squad…');
   render();
-  d11FetchSquadFromCll(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line link failed:', e.message));
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('🔗 Linked to Cricket Live Line! Fetching squad…');
+    render();
+    d11FetchSquadFromCll(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line link failed:', e.message));
+  } catch(e) {
+    m.cllMatchId = prevCllMatchId;
+    console.error('Cricket Live Line link save failed:', e);
+    showNotif('❌ Link did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
-function d11UnlinkCllMatch(matchId) {
+async function d11UnlinkCllMatch(matchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevCllMatchId = m.cllMatchId;
   delete m.cllMatchId;
-  _saveMatchToFirestore(matchId, m);
-  showNotif('Unlinked from Cricket Live Line — switched back to manual paste');
   render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('Unlinked from Cricket Live Line — switched back to manual paste');
+    render();
+  } catch(e) {
+    m.cllMatchId = prevCllMatchId;
+    console.error('Cricket Live Line unlink save failed:', e);
+    showNotif('❌ Unlink did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
-function d11UnlinkCb2Match(matchId) {
+async function d11UnlinkCb2Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevSnapshot = { cb2MatchId: m.cb2MatchId, cb2Team1Id: m.cb2Team1Id, cb2Team2Id: m.cb2Team2Id, cb2SeriesId: m.cb2SeriesId };
   delete m.cb2MatchId;
   delete m.cb2Team1Id;
   delete m.cb2Team2Id;
   delete m.cb2SeriesId;
-  _saveMatchToFirestore(matchId, m);
-  showNotif('Unlinked from Cricbuzz No 2 — switched back to manual paste');
   render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('Unlinked from Cricbuzz No 2 — switched back to manual paste');
+    render();
+  } catch(e) {
+    Object.assign(m, prevSnapshot);
+    console.error('Cricbuzz No 2 unlink save failed:', e);
+    showNotif('❌ Unlink did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
 function d11OpenCllLinkPicker(matchId) {
@@ -13015,25 +13088,43 @@ async function d11SearchLiveMatchSbx(matchId) {
   }
 }
 
-function d11LinkSbxMatch(matchId, sbxMatchId) {
+async function d11LinkSbxMatch(matchId, sbxMatchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevSbxMatchId = m.sbxMatchId;
   m.sbxMatchId = sbxMatchId;
-  _saveMatchToFirestore(matchId, m);
   _d11SbxSearchResults = [];
   d11SbxLinkPickerMatchId = null;
-  showNotif('🔗 Linked to Sportbex! Fetching squad…');
   render();
-  d11FetchSquadFromSbx(matchId).catch(e => console.warn('Auto squad fetch after Sportbex link failed:', e.message));
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('🔗 Linked to Sportbex! Fetching squad…');
+    render();
+    d11FetchSquadFromSbx(matchId).catch(e => console.warn('Auto squad fetch after Sportbex link failed:', e.message));
+  } catch(e) {
+    m.sbxMatchId = prevSbxMatchId;
+    console.error('Sportbex link save failed:', e);
+    showNotif('❌ Link did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
-function d11UnlinkSbxMatch(matchId) {
+async function d11UnlinkSbxMatch(matchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevSbxMatchId = m.sbxMatchId;
   delete m.sbxMatchId;
-  _saveMatchToFirestore(matchId, m);
-  showNotif('Unlinked from Sportbex — switched back to manual paste');
   render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('Unlinked from Sportbex — switched back to manual paste');
+    render();
+  } catch(e) {
+    m.sbxMatchId = prevSbxMatchId;
+    console.error('Sportbex unlink save failed:', e);
+    showNotif('❌ Unlink did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
 function d11OpenSbxLinkPicker(matchId) {
@@ -13747,39 +13838,66 @@ async function d11SearchLiveMatchAll(matchId) {
   }
 }
 
-function d11LinkAllMatch(matchId, allMatchId, seriesId) {
+async function d11LinkAllMatch(matchId, allMatchId, seriesId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevSnapshot = { allMatchId: m.allMatchId, allSeriesId: m.allSeriesId };
   m.allMatchId = allMatchId;
   if (seriesId) m.allSeriesId = seriesId;
-  _saveMatchToFirestore(matchId, m);
   _d11AllSearchResults = [];
   d11AllLinkPickerMatchId = null;
-  showNotif('🔗 Linked to Advance Live Line! Fetching squad…');
   render();
-  d11FetchSquadFromAll(matchId).catch(e => console.warn('Auto squad fetch after Advance Live Line link failed:', e.message));
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('🔗 Linked to Advance Live Line! Fetching squad…');
+    render();
+    d11FetchSquadFromAll(matchId).catch(e => console.warn('Auto squad fetch after Advance Live Line link failed:', e.message));
+  } catch(e) {
+    Object.assign(m, prevSnapshot);
+    console.error('Advance Live Line link save failed:', e);
+    showNotif('❌ Link did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
-function d11UnlinkAllMatch(matchId) {
+async function d11UnlinkAllMatch(matchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevSnapshot = { allMatchId: m.allMatchId, allSeriesId: m.allSeriesId, allAutoSync: m.allAutoSync };
   delete m.allMatchId;
   delete m.allSeriesId;
   delete m.allAutoSync;
-  _saveMatchToFirestore(matchId, m);
-  showNotif('Unlinked from Advance Live Line — switched back to manual paste');
   render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('Unlinked from Advance Live Line — switched back to manual paste');
+    render();
+  } catch(e) {
+    Object.assign(m, prevSnapshot);
+    console.error('Advance Live Line unlink save failed:', e);
+    showNotif('❌ Unlink did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
-function d11ToggleAllAutoSync(matchId) {
+async function d11ToggleAllAutoSync(matchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevAutoSync = m.allAutoSync;
   m.allAutoSync = !m.allAutoSync;
-  _saveMatchToFirestore(matchId, m);
-  showNotif(m.allAutoSync
-    ? '🤖 Automatic armed — deadline se pehle 20/15/10/5min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
-    : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
   render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif(m.allAutoSync
+      ? '🤖 Automatic armed — deadline se pehle 20/15/10/5min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
+      : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
+    render();
+  } catch(e) {
+    m.allAutoSync = prevAutoSync;
+    console.error('Advance Live Line auto-sync toggle save failed:', e);
+    showNotif('❌ Toggle did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
 function d11OpenAllLinkPicker(matchId) {
@@ -14529,25 +14647,43 @@ async function d11SearchLiveMatchLl2(matchId) {
   }
 }
 
-function d11LinkLl2Match(matchId, ll2MatchId) {
+async function d11LinkLl2Match(matchId, ll2MatchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevLl2MatchId = m.ll2MatchId;
   m.ll2MatchId = ll2MatchId;
-  _saveMatchToFirestore(matchId, m);
   _d11Ll2SearchResults = [];
   d11Ll2LinkPickerMatchId = null;
-  showNotif('🔗 Linked to Cricket Live Line 2! Fetching squad…');
   render();
-  d11FetchSquadFromLl2(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 2 link failed:', e.message));
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('🔗 Linked to Cricket Live Line 2! Fetching squad…');
+    render();
+    d11FetchSquadFromLl2(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 2 link failed:', e.message));
+  } catch(e) {
+    m.ll2MatchId = prevLl2MatchId;
+    console.error('Cricket Live Line 2 link save failed:', e);
+    showNotif('❌ Link did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
-function d11UnlinkLl2Match(matchId) {
+async function d11UnlinkLl2Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevLl2MatchId = m.ll2MatchId;
   delete m.ll2MatchId;
-  _saveMatchToFirestore(matchId, m);
-  showNotif('Unlinked from Cricket Live Line 2 — switched back to manual paste');
   render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('Unlinked from Cricket Live Line 2 — switched back to manual paste');
+    render();
+  } catch(e) {
+    m.ll2MatchId = prevLl2MatchId;
+    console.error('Cricket Live Line 2 unlink save failed:', e);
+    showNotif('❌ Unlink did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
 function d11OpenLl2LinkPicker(matchId) {
@@ -14663,18 +14799,27 @@ async function d11SearchLiveMatchCb2(matchId) {
     render();
   }
 }
-function d11LinkCb2Match(matchId, cb2MatchId, team1Id, team2Id, seriesId) {
+async function d11LinkCb2Match(matchId, cb2MatchId, team1Id, team2Id, seriesId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevSnapshot = { cb2MatchId: m.cb2MatchId, cb2Team1Id: m.cb2Team1Id, cb2Team2Id: m.cb2Team2Id, cb2SeriesId: m.cb2SeriesId };
   m.cb2MatchId = cb2MatchId;
   if (team1Id) m.cb2Team1Id = team1Id;
   if (team2Id) m.cb2Team2Id = team2Id;
   if (seriesId) m.cb2SeriesId = seriesId;
-  _saveMatchToFirestore(matchId, m);
   d11Cb2LinkPickerMatchId = null;
   _d11Cb2SearchResults = [];
-  showNotif('✅ Linked to Cricbuzz No 2! Use 📥 Fetch Squad next.');
   render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('✅ Linked to Cricbuzz No 2! Use 📥 Fetch Squad next.');
+    render();
+  } catch(e) {
+    Object.assign(m, prevSnapshot);
+    console.error('Cricbuzz No 2 link save failed:', e);
+    showNotif('❌ Link did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 function renderD11Cb2LinkPickerModal() {
   if (!d11Cb2LinkPickerMatchId) return '';
@@ -16006,38 +16151,65 @@ async function d11SearchLiveMatchLl3(matchId) {
   }
 }
 
-function d11LinkLl3Match(matchId, ll3MatchId, seriesId) {
+async function d11LinkLl3Match(matchId, ll3MatchId, seriesId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevSnapshot = { ll3MatchId: m.ll3MatchId, ll3SeriesId: m.ll3SeriesId };
   m.ll3MatchId = ll3MatchId;
   if (seriesId) m.ll3SeriesId = seriesId; // captured at link time — avoids relying on the match/info endpoint later
-  _saveMatchToFirestore(matchId, m);
   _d11Ll3SearchResults = [];
   d11Ll3LinkPickerMatchId = null;
-  showNotif('🔗 Linked to Cricket Live Line 3! Fetching squad…');
   render();
-  d11FetchSquadFromLl3(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 3 link failed:', e.message));
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('🔗 Linked to Cricket Live Line 3! Fetching squad…');
+    render();
+    d11FetchSquadFromLl3(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 3 link failed:', e.message));
+  } catch(e) {
+    Object.assign(m, prevSnapshot);
+    console.error('Cricket Live Line 3 link save failed:', e);
+    showNotif('❌ Link did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
-function d11UnlinkLl3Match(matchId) {
+async function d11UnlinkLl3Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevSnapshot = { ll3MatchId: m.ll3MatchId, ll3AutoSync: m.ll3AutoSync };
   delete m.ll3MatchId;
   delete m.ll3AutoSync;
-  _saveMatchToFirestore(matchId, m);
-  showNotif('Unlinked from Cricket Live Line 3 — switched back to manual paste');
   render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('Unlinked from Cricket Live Line 3 — switched back to manual paste');
+    render();
+  } catch(e) {
+    Object.assign(m, prevSnapshot);
+    console.error('Cricket Live Line 3 unlink save failed:', e);
+    showNotif('❌ Unlink did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
-function d11ToggleLl3AutoSync(matchId) {
+async function d11ToggleLl3AutoSync(matchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevAutoSync = m.ll3AutoSync;
   m.ll3AutoSync = !m.ll3AutoSync;
-  _saveMatchToFirestore(matchId, m);
-  showNotif(m.ll3AutoSync
-    ? '🤖 Automatic armed — deadline se pehle 20/15/10/5min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
-    : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
   render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif(m.ll3AutoSync
+      ? '🤖 Automatic armed — deadline se pehle 20/15/10/5min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
+      : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
+    render();
+  } catch(e) {
+    m.ll3AutoSync = prevAutoSync;
+    console.error('Cricket Live Line 3 auto-sync toggle save failed:', e);
+    showNotif('❌ Toggle did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
 function d11OpenLl3LinkPicker(matchId) {
@@ -16944,25 +17116,43 @@ async function d11SearchLiveMatchLl4(matchId) {
   }
 }
 
-function d11LinkLl4Match(matchId, ll4MatchId) {
+async function d11LinkLl4Match(matchId, ll4MatchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevLl4MatchId = m.ll4MatchId;
   m.ll4MatchId = ll4MatchId;
-  _saveMatchToFirestore(matchId, m);
   _d11Ll4SearchResults = [];
   d11Ll4LinkPickerMatchId = null;
-  showNotif('🔗 Linked to Cricket Live Line 4! Fetching squad…');
   render();
-  d11FetchSquadFromLl4(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 4 link failed:', e.message));
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('🔗 Linked to Cricket Live Line 4! Fetching squad…');
+    render();
+    d11FetchSquadFromLl4(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 4 link failed:', e.message));
+  } catch(e) {
+    m.ll4MatchId = prevLl4MatchId;
+    console.error('Cricket Live Line 4 link save failed:', e);
+    showNotif('❌ Link did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
-function d11UnlinkLl4Match(matchId) {
+async function d11UnlinkLl4Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevLl4MatchId = m.ll4MatchId;
   delete m.ll4MatchId;
-  _saveMatchToFirestore(matchId, m);
-  showNotif('Unlinked from Cricket Live Line 4 — switched back to manual paste');
   render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('Unlinked from Cricket Live Line 4 — switched back to manual paste');
+    render();
+  } catch(e) {
+    m.ll4MatchId = prevLl4MatchId;
+    console.error('Cricket Live Line 4 unlink save failed:', e);
+    showNotif('❌ Unlink did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
 function d11OpenLl4LinkPicker(matchId) {
@@ -17761,28 +17951,46 @@ async function d11SearchLiveMatchLl5(matchId) {
   }
 }
 
-function d11LinkLl5Match(matchId, ll5MatchId, seriesId) {
+async function d11LinkLl5Match(matchId, ll5MatchId, seriesId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevSnapshot = { ll5MatchId: m.ll5MatchId, ll5SeriesId: m.ll5SeriesId };
   m.ll5MatchId = ll5MatchId;
   if (seriesId) m.ll5SeriesId = seriesId; // captured at link time — avoids relying on a separate lookup later
-  _saveMatchToFirestore(matchId, m);
   _d11Ll5SearchResults = [];
   d11Ll5LinkPickerMatchId = null;
-  showNotif('🔗 Linked to Cricket Live Line 5! Fetching squad…');
   render();
-  d11FetchSquadFromLl5(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 5 link failed:', e.message));
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('🔗 Linked to Cricket Live Line 5! Fetching squad…');
+    render();
+    d11FetchSquadFromLl5(matchId).catch(e => console.warn('Auto squad fetch after Cricket Live Line 5 link failed:', e.message));
+  } catch(e) {
+    Object.assign(m, prevSnapshot);
+    console.error('Cricket Live Line 5 link save failed:', e);
+    showNotif('❌ Link did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
-function d11UnlinkLl5Match(matchId) {
+async function d11UnlinkLl5Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevSnapshot = { ll5MatchId: m.ll5MatchId, ll5SeriesId: m.ll5SeriesId, ll5AutoSync: m.ll5AutoSync };
   delete m.ll5MatchId;
   delete m.ll5SeriesId;
   delete m.ll5AutoSync;
-  _saveMatchToFirestore(matchId, m);
-  showNotif('Unlinked from Cricket Live Line 5 — switched back to manual paste');
   render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('Unlinked from Cricket Live Line 5 — switched back to manual paste');
+    render();
+  } catch(e) {
+    Object.assign(m, prevSnapshot);
+    console.error('Cricket Live Line 5 unlink save failed:', e);
+    showNotif('❌ Unlink did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
 // ── Cricket Live Line 5 — Automatic sync toggle (Playing XI + Sync Now) ──
@@ -17796,15 +18004,24 @@ function d11UnlinkLl5Match(matchId) {
 // matches the "admin phone off, still works" requirement — the trigger
 // just needs SOME active tab (any user's, at any later time), not the
 // admin's specifically.
-function d11ToggleLl5AutoSync(matchId) {
+async function d11ToggleLl5AutoSync(matchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevAutoSync = m.ll5AutoSync;
   m.ll5AutoSync = !m.ll5AutoSync;
-  _saveMatchToFirestore(matchId, m);
-  showNotif(m.ll5AutoSync
-    ? '🤖 Automatic armed — deadline se pehle 20/15/10/5min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
-    : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
   render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif(m.ll5AutoSync
+      ? '🤖 Automatic armed — deadline se pehle 20/15/10/5min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
+      : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
+    render();
+  } catch(e) {
+    m.ll5AutoSync = prevAutoSync;
+    console.error('Cricket Live Line 5 auto-sync toggle save failed:', e);
+    showNotif('❌ Toggle did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
 function d11OpenLl5LinkPicker(matchId) {
@@ -19285,37 +19502,55 @@ function renderReceiptImageModal() {
   </div>`;
 }
 
-function d11LinkLiveMatch(matchId, cricbuzzMatchId, team1Id, team2Id, seriesId) {
+async function d11LinkLiveMatch(matchId, cricbuzzMatchId, team1Id, team2Id, seriesId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevSnapshot = { cricketDataMatchId: m.cricketDataMatchId, cricbuzzTeam1Id: m.cricbuzzTeam1Id, cricbuzzTeam2Id: m.cricbuzzTeam2Id, cricbuzzSeriesId: m.cricbuzzSeriesId };
   m.cricketDataMatchId = cricbuzzMatchId; // field name kept for backward compatibility with earlier saved links
   if (team1Id) m.cricbuzzTeam1Id = team1Id;
   if (team2Id) m.cricbuzzTeam2Id = team2Id;
   if (seriesId) m.cricbuzzSeriesId = seriesId; // used as a fallback for squads before the match's own squad is announced
-  _saveMatchToFirestore(matchId, m);
   _d11LiveSyncSearchResults = [];
-  showNotif('🔗 Linked to Cricbuzz! Fetching squad…');
   render();
-  // Auto-fetch the squad right away so the admin doesn't need a separate
-  // manual "📥 Fetch Squad" tap for every match — linking and squad-pull are
-  // now one step. Sync Now / Fetch Final Result remain fully manual,
-  // admin-triggered actions (no background auto-scheduler for either).
-  // Always attempted now — even when team1Id/
-  // team2Id weren't passed in (e.g. schedule-based import didn't have
-  // them), d11FetchSquadFromCricbuzz has its own one-call fallback to
-  // derive them, so gating the call itself here would skip that recovery.
-  d11FetchSquadFromCricbuzz(matchId).catch(e => console.warn('Auto squad fetch after link failed:', e.message));
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('🔗 Linked to Cricbuzz! Fetching squad…');
+    render();
+    // Auto-fetch the squad right away so the admin doesn't need a separate
+    // manual "📥 Fetch Squad" tap for every match — linking and squad-pull are
+    // now one step. Sync Now / Fetch Final Result remain fully manual,
+    // admin-triggered actions (no background auto-scheduler for either).
+    // Always attempted now — even when team1Id/
+    // team2Id weren't passed in (e.g. schedule-based import didn't have
+    // them), d11FetchSquadFromCricbuzz has its own one-call fallback to
+    // derive them, so gating the call itself here would skip that recovery.
+    d11FetchSquadFromCricbuzz(matchId).catch(e => console.warn('Auto squad fetch after link failed:', e.message));
+  } catch(e) {
+    Object.assign(m, prevSnapshot);
+    console.error('Cricbuzz link save failed:', e);
+    showNotif('❌ Link did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
-function d11UnlinkLiveMatch(matchId) {
+async function d11UnlinkLiveMatch(matchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevSnapshot = { cricketDataMatchId: m.cricketDataMatchId, cricbuzzTeam1Id: m.cricbuzzTeam1Id, cricbuzzTeam2Id: m.cricbuzzTeam2Id };
   delete m.cricketDataMatchId;
   delete m.cricbuzzTeam1Id;
   delete m.cricbuzzTeam2Id;
-  _saveMatchToFirestore(matchId, m);
-  showNotif('Unlinked from Cricbuzz — switched back to manual paste');
   render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('Unlinked from Cricbuzz — switched back to manual paste');
+    render();
+  } catch(e) {
+    Object.assign(m, prevSnapshot);
+    console.error('Cricbuzz unlink save failed:', e);
+    showNotif('❌ Unlink did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
 // Live sync is fully manual now (see d11LinkLiveMatch) — no background
@@ -19375,26 +19610,44 @@ async function d11SearchLiveMatchEspn(matchId) {
   }
 }
 
-function d11LinkEspnMatch(matchId, espnObjectId, espnSeriesId) {
+async function d11LinkEspnMatch(matchId, espnObjectId, espnSeriesId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevSnapshot = { espnMatchId: m.espnMatchId, espnSeriesId: m.espnSeriesId };
   m.espnMatchId = espnObjectId;
   if (espnSeriesId) m.espnSeriesId = espnSeriesId;
-  _saveMatchToFirestore(matchId, m);
   _d11EspnSearchResults = [];
-  showNotif('🔗 Linked to ESPN Cricinfo! Fetching squad…');
   render();
-  d11FetchSquadFromEspn(matchId).catch(e => console.warn('Auto squad fetch after ESPN link failed:', e.message));
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('🔗 Linked to ESPN Cricinfo! Fetching squad…');
+    render();
+    d11FetchSquadFromEspn(matchId).catch(e => console.warn('Auto squad fetch after ESPN link failed:', e.message));
+  } catch(e) {
+    Object.assign(m, prevSnapshot);
+    console.error('ESPN link save failed:', e);
+    showNotif('❌ Link did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
-function d11UnlinkEspnMatch(matchId) {
+async function d11UnlinkEspnMatch(matchId) {
   const m = matches[matchId];
   if (!m) return;
+  const prevSnapshot = { espnMatchId: m.espnMatchId, espnSeriesId: m.espnSeriesId };
   delete m.espnMatchId;
   delete m.espnSeriesId;
-  _saveMatchToFirestore(matchId, m);
-  showNotif('Unlinked from ESPN Cricinfo — switched back to manual paste');
   render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('Unlinked from ESPN Cricinfo — switched back to manual paste');
+    render();
+  } catch(e) {
+    Object.assign(m, prevSnapshot);
+    console.error('ESPN unlink save failed:', e);
+    showNotif('❌ Unlink did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
 let d11EspnLinkPickerMatchId = null;
@@ -29755,9 +30008,11 @@ function renderD11QuickScoreSelector() {
   }).join('')}`;
 }
 
-function d11QuickSaveAllStats(matchId) {
+async function d11QuickSaveAllStats(matchId) {
   const d11m = dream11Matches[matchId];
   if (!d11m) return;
+  const prevSnapshot = d11m.players.map(p => ({ id: p.id, stats: p.stats, points: p.points, isPlayingXI: p.isPlayingXI }));
+  const prevLastLiveUpdateAt = d11m.lastLiveUpdateAt;
   let count = 0;
   d11m.players.forEach(p => {
     const get = (f) => { const el = document.getElementById('qs-'+matchId+'-'+p.id+'-'+f); return el ? el.value : ''; };
@@ -29777,10 +30032,25 @@ function d11QuickSaveAllStats(matchId) {
     count++;
   });
   d11m.lastLiveUpdateAt = getDateTime();
-  _saveDream11MatchToFirestore(matchId, d11m);
-  d11RefreshLiveTeamPoints(matchId);
-  showNotif(`✅ ${count} players ke stats save ho gaye — live points update 🔴`);
   render();
+  showNotif('⏳ Saving stats for ' + count + ' players…');
+  try {
+    await _saveDream11MatchToFirestore(matchId, d11m);
+    await d11RefreshLiveTeamPoints(matchId);
+    render();
+    showNotif(`✅ ${count} players ke stats save ho gaye — live points update 🔴`);
+  } catch(e) {
+    // Roll back — this was a bulk edit of every player's stats, so a
+    // failed save must not leave the admin thinking it went through
+    prevSnapshot.forEach(snap => {
+      const p = d11m.players.find(pp => pp.id === snap.id);
+      if (p) { p.stats = snap.stats; p.points = snap.points; p.isPlayingXI = snap.isPlayingXI; }
+    });
+    d11m.lastLiveUpdateAt = prevLastLiveUpdateAt;
+    console.error('Quick Score save failed:', e);
+    showNotif('❌ Stats did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
 }
 
 function renderD11QuickScoreTable() {
@@ -34257,7 +34527,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.44.0";
+const APP_VERSION = "4.45.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
