@@ -1120,7 +1120,7 @@ let adminTab = 'dream11admin';
 // from Cricket Live Line's playerRankingList endpoint into Firestore; users
 // browse a read-only list grouped by format + role.
 const RANKING_API_HOST = "cricket-live-line4.p.rapidapi.com";
-const RANKING_API_URL = "https://cricket-live-line4.p.rapidapi.com/apiv5/playerRankingList/586080c68703a2a19e2984fc323f0008";
+const RANKING_API_URL = "https://cricket-live-line4.p.rapidapi.com/apiv5/playerRanking/586080c68703a2a19e2984fc323f0008";
 const RANKING_API_KEY = "a957688052msh0344d11d0be5533p1804f8jsnec67a9ab817f";
 // type param mapping per the API docs (men's only — 1-9):
 // 1=Test Batsman, 2=Test Bowlers, 3=Test Allrounders,
@@ -5124,6 +5124,11 @@ async function adminSyncPlayerRankings() {
     for (const [key, cfg] of Object.entries(RANKING_TYPES)) {
       let res;
       try {
+        // Confirmed via a working curl example: this endpoint actually
+        // wants x-www-form-urlencoded, not FORM_DATA/multipart as the
+        // RapidAPI docs page implied — the real cause of the earlier 404
+        // was the endpoint path (playerRankingList instead of the correct
+        // playerRanking), not the body format.
         const body = new URLSearchParams();
         body.append('type', String(cfg.type));
         res = await fetch(RANKING_API_URL, {
@@ -34793,7 +34798,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.47.1";
+const APP_VERSION = "4.47.3";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
