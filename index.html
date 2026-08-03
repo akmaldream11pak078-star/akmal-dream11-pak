@@ -14088,16 +14088,22 @@ async function d11CheckPlayingXIAnnouncedAll(matchId, silent) {
   if (!m || !d11m || !m.allMatchId) return;
   notify('🔍 Checking Advance Live Line for Playing XI…');
   try {
-    // GET matches/{matchId}/newpoint2 — per-team fantasy points payload;
-    // any player listed under points.teama/teamb.playing11 with
-    // starting11 truthy is confirmed in the Playing XI (same shape as the
-    // sample scorecard response's "points" block).
-    const raw = await _allFetch(`matches/${m.allMatchId}/newpoint2`, { feature: silent ? 'Auto Playing XI Check' : 'Check Playing XI', matchId });
+    // GET matches/{matchId}/info — per RapidAPI docs, this returns
+    // squads.teama/teamb.squads[], each entry carrying name + playing11
+    // ("true"/"false" as a STRING, not boolean) directly. This is the
+    // correct endpoint for Playing XI confirmation — previously this used
+    // /newpoint2 (a fantasy-points payload) which doesn't reliably carry
+    // an explicit "confirmed in the XI" signal the way /info's playing11
+    // field does.
+    const raw = await _allFetch(`matches/${m.allMatchId}/info`, { feature: silent ? 'Auto Playing XI Check' : 'Check Playing XI', matchId });
     _d11AllDebugData = { allRaw: raw, allMatchId: m.allMatchId };
-    const points = raw?.response?.points || {};
+    const squads = raw?.response?.squads || raw?.squads || {};
     const namesInXI = new Set();
-    [points.teama, points.teamb].forEach(t => {
-      (t?.playing11 || []).forEach(p => { if (Number(p.starting11) > 0) { const n = (p.name||'').trim(); if (n) namesInXI.add(n.toLowerCase()); } });
+    [squads.teama, squads.teamb].forEach(t => {
+      (t?.squads || []).forEach(p => {
+        const isXI = p.playing11 === true || p.playing11 === 'true';
+        if (isXI) { const n = (p.name||'').trim(); if (n) namesInXI.add(n.toLowerCase()); }
+      });
     });
     if (namesInXI.size === 0) {
       notify('Playing XI not announced yet on Advance Live Line — try again closer to match time.', 'error');
