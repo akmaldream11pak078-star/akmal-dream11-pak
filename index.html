@@ -1114,6 +1114,37 @@ let forgotEmailPending = ''; // holds the email the OTP was sent to, across step
 let authError = '';
 let adminTab = 'dream11admin';
 
+// ── Player Ranking feature — admin syncs official ICC-style player
+// rankings (Test/ODI/T20 x Batsman/Bowler/All-rounder = 9 combinations,
+// out of the API's 15 total including women's rankings which we don't use)
+// from Cricket Live Line's playerRankingList endpoint into Firestore; users
+// browse a read-only list grouped by format + role.
+const RANKING_API_HOST = "cricket-live-line4.p.rapidapi.com";
+const RANKING_API_URL = "https://cricket-live-line4.p.rapidapi.com/apiv5/playerRankingList/586080c68703a2a19e2984fc323f0008";
+const RANKING_API_KEY = "a957688052msh0344d11d0be5533p1804f8jsnec67a9ab817f";
+// type param mapping per the API docs (men's only — 1-9):
+// 1=Test Batsman, 2=Test Bowlers, 3=Test Allrounders,
+// 4=ODI Batsman, 5=ODI Bowlers, 6=ODI Allrounders,
+// 7=T20 Batsman, 8=T20 Bowlers, 9=T20 Allrounders
+const RANKING_TYPES = {
+  test_bat: { type: 1, format: 'Test', role: 'Batsman', label: 'Test · Batsman', color: '#f87171' },
+  test_bowl: { type: 2, format: 'Test', role: 'Bowler', label: 'Test · Bowler', color: '#fb923c' },
+  test_ar: { type: 3, format: 'Test', role: 'All-Rounder', label: 'Test · All-Rounder', color: '#facc15' },
+  odi_bat: { type: 4, format: 'ODI', role: 'Batsman', label: 'ODI · Batsman', color: '#60a5fa' },
+  odi_bowl: { type: 5, format: 'ODI', role: 'Bowler', label: 'ODI · Bowler', color: '#38bdf8' },
+  odi_ar: { type: 6, format: 'ODI', role: 'All-Rounder', label: 'ODI · All-Rounder', color: '#22d3ee' },
+  t20_bat: { type: 7, format: 'T20', role: 'Batsman', label: 'T20 · Batsman', color: '#4ade80' },
+  t20_bowl: { type: 8, format: 'T20', role: 'Bowler', label: 'T20 · Bowler', color: '#34d399' },
+  t20_ar: { type: 9, format: 'T20', role: 'All-Rounder', label: 'T20 · All-Rounder', color: '#2dd4bf' },
+};
+let playerRankings = {}; // { [key in RANKING_TYPES]: [ {rank, name, country, rating, ...}, ... ] }
+let playerRankingsLastSyncedAt = null;
+let playerRankingsSyncing = false;
+let playerRankingsSyncError = null;
+let playerRankingsLoading = false;
+let playerRankingsError = null;
+let activePlayerRankingKey = null; // which of RANKING_TYPES the user is currently viewing (null = category grid)
+
 // ── News feature — admin syncs latest cricket news from an external news
 // API into Firestore; users browse a read-only list + detail view.
 const NEWS_API_HOST = "cricket-live-line4.p.rapidapi.com";
@@ -5027,6 +5058,216 @@ function renderAdminNews() {
   `;
 }
 
+// ── Player Ranking: load cached rankings from Firestore (fast, shown to
+// all users), and a separate admin-triggered sync that hits the ranking
+// API once per type (9 calls total for men's Test/ODI/T20 x Bat/Bowl/AR)
+// and refreshes the Firestore cache for everyone.
+async function _loadPlayerRankingsFromFirestore() {
+  try {
+    if (!window._fbDb || !window._fbFns) {
+      throw new Error('App is still connecting — please try again in a moment.');
+    }
+    const { doc, getDoc } = window._fbFns;
+    const snap = await getDoc(doc(window._fbDb, 'pp_meta', 'player_rankings_cache'));
+    if (snap.exists()) {
+      const d = snap.data();
+      playerRankings = d.rankings || {};
+      playerRankingsLastSyncedAt = d.syncedAt || null;
+    } else {
+      playerRankings = {};
+    }
+  } catch (e) {
+    console.warn('Could not load cached player rankings:', e.message);
+    playerRankingsError = 'Could not load rankings — ' + (e.message || 'unknown error') + (e.code ? ` (${e.code})` : '');
+    throw e;
+  }
+}
+
+async function loadPlayerRankingsTab() {
+  playerRankingsLoading = true;
+  playerRankingsError = null;
+  render();
+  try {
+    await _loadPlayerRankingsFromFirestore();
+  } catch (e) {
+    console.error(e);
+    if (!playerRankingsError) playerRankingsError = 'Could not load rankings right now.';
+  } finally {
+    playerRankingsLoading = false;
+    render();
+  }
+}
+
+// Confirmed live response shape (Cricket Live Line playerRankingList):
+// { status, msg, data: [ {rank, name, country, rating, player_id, img}, ... ] }
+// data is a flat array — no nested .list/.players wrapper. Keeping a couple
+// of fallback field names in case a different type/format ever returns a
+// slightly different shape, but img/rating/country/name/rank are confirmed.
+function _normalizeRankingPlayer(p, idx) {
+  return {
+    rank: p.rank ?? p.ranking ?? p.position ?? (idx + 1),
+    name: p.name ?? p.player_name ?? p.playerName ?? p.full_name ?? 'Unknown',
+    country: p.country ?? p.team ?? p.team_name ?? p.nationality ?? '',
+    rating: p.rating ?? p.points ?? p.rating_points ?? p.ratingPoints ?? '',
+    image: p.img ?? p.image ?? p.player_image ?? p.photo ?? null,
+    playerId: p.player_id ?? null,
+  };
+}
+
+async function adminSyncPlayerRankings() {
+  playerRankingsSyncing = true;
+  playerRankingsSyncError = null;
+  render();
+  try {
+    const newRankings = {};
+    let totalPlayers = 0;
+    for (const [key, cfg] of Object.entries(RANKING_TYPES)) {
+      let res;
+      try {
+        const body = new URLSearchParams();
+        body.append('type', String(cfg.type));
+        res = await fetch(RANKING_API_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'x-rapidapi-host': RANKING_API_HOST,
+            'x-rapidapi-key': RANKING_API_KEY
+          },
+          body
+        });
+      } catch (e) {
+        throw new Error(`Could not reach the ranking API for ${cfg.label} — check your internet connection and try again.`);
+      }
+      if (!res.ok) throw new Error(`Ranking API returned HTTP ${res.status} for ${cfg.label}`);
+      const json = await res.json();
+      // Confirmed shape (sample from type=7, T20 Batsman): { status, msg,
+      // data: [ {rank, name, country, rating, player_id, img}, ... ] } —
+      // data is a flat array directly. Fallbacks below stay only as a
+      // safety net in case another type value ever nests it differently.
+      let list = null;
+      if (Array.isArray(json?.data)) list = json.data;
+      else if (Array.isArray(json?.data?.list)) list = json.data.list;
+      else if (Array.isArray(json?.data?.players)) list = json.data.players;
+      else if (Array.isArray(json?.list)) list = json.list;
+      if (!list) {
+        console.warn(`Ranking API unexpected shape for ${cfg.label}:`, json);
+        newRankings[key] = [];
+        continue;
+      }
+      newRankings[key] = list.map(_normalizeRankingPlayer);
+      totalPlayers += newRankings[key].length;
+    }
+    playerRankings = newRankings;
+    playerRankingsLastSyncedAt = getDateTime();
+    if (!window._fbDb || !window._fbFns) throw new Error('Firestore is not ready yet — try again in a moment.');
+    const { doc, setDoc } = window._fbFns;
+    await setDoc(doc(window._fbDb, 'pp_meta', 'player_rankings_cache'), {
+      rankings: playerRankings,
+      syncedAt: playerRankingsLastSyncedAt
+    });
+    showNotif(`✅ Synced player rankings — ${totalPlayers} players across ${Object.keys(RANKING_TYPES).length} categories!`);
+  } catch (e) {
+    console.error('Player rankings sync failed:', e);
+    playerRankingsSyncError = e.message || 'Unknown error';
+    showNotif('Could not sync rankings — ' + playerRankingsSyncError, 'error');
+  } finally {
+    playerRankingsSyncing = false;
+    render();
+  }
+}
+
+function goPlayerRankingTab() {
+  tab = 'playerRankings';
+  activePlayerRankingKey = null;
+  render();
+  window.scrollTo(0,0);
+  loadPlayerRankingsTab();
+}
+
+function openPlayerRankingCategory(key) {
+  activePlayerRankingKey = key;
+  render();
+  window.scrollTo(0,0);
+}
+
+function closePlayerRankingCategory() {
+  activePlayerRankingKey = null;
+  render();
+  window.scrollTo(0,0);
+}
+
+function renderPlayerRankingsTab() {
+  if (activePlayerRankingKey) return renderPlayerRankingList();
+
+  return `
+  <div class="section-title">🏆 Player Rankings</div>
+  <button class="btn-secondary btn-block mb14" style="font-size:12px;padding:9px" onclick="loadPlayerRankingsTab()">🔄 Refresh</button>
+  ${playerRankingsLoading ? `<div class="empty-state"><div class="empty-icon">🏆</div>Loading rankings…</div>` : ''}
+  ${playerRankingsError && !playerRankingsLoading ? `<div class="empty-state"><div class="empty-icon">📭</div>${playerRankingsError}</div>` : ''}
+  ${!playerRankingsLoading && !playerRankingsError ? `
+    <div style="font-size:11.5px;color:var(--dim);margin-bottom:12px">Tap a category to see the full list.</div>
+    ${['Test','ODI','T20'].map(fmt => `
+      <div style="font-size:12.5px;font-weight:700;color:var(--text);margin:14px 0 8px">${fmt}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:6px">
+        ${Object.entries(RANKING_TYPES).filter(([k,cfg]) => cfg.format === fmt).map(([key,cfg]) => `
+          <button onclick="openPlayerRankingCategory('${key}')" style="background:${cfg.color}22;border:1px solid ${cfg.color}55;color:${cfg.color};padding:12px 6px;border-radius:10px;font-size:11px;font-weight:700;text-align:center">
+            ${cfg.role}<br/><span style="font-size:9.5px;opacity:0.75;font-weight:600">${(playerRankings[key]||[]).length} players</span>
+          </button>
+        `).join('')}
+      </div>
+    `).join('')}
+  ` : ''}
+  `;
+}
+
+function renderPlayerRankingList() {
+  const cfg = RANKING_TYPES[activePlayerRankingKey];
+  const list = playerRankings[activePlayerRankingKey] || [];
+  if (!cfg) return `<div class="empty-state"><div class="empty-icon">📭</div>Category not found.</div>
+    <button class="btn-secondary btn-block" onclick="closePlayerRankingCategory()">← Back</button>`;
+  return `
+  <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="closePlayerRankingCategory()">← Back to Rankings</button>
+  <div class="section-title" style="color:${cfg.color}">🏆 ${cfg.label} Rankings</div>
+  ${list.length === 0 ? `<div class="empty-state"><div class="empty-icon">📭</div>No rankings synced for this category yet.</div>` : ''}
+  ${list.map(p => `
+    <div class="card mb10" style="display:flex;align-items:center;gap:12px;padding:11px 14px;border-left:3px solid ${cfg.color}">
+      <div style="font-size:16px;font-weight:800;color:${cfg.color};min-width:28px;text-align:center">${p.rank}</div>
+      ${p.image ? `<img src="${p.image}" style="width:38px;height:38px;border-radius:50%;object-fit:cover;flex-shrink:0" onerror="this.style.display='none'" />` : ''}
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;font-weight:700">${p.name}</div>
+        ${p.country ? `<div style="font-size:10.5px;color:var(--dim)">${p.country}</div>` : ''}
+      </div>
+      ${p.rating !== '' ? `<div style="font-size:13px;font-weight:800;color:${cfg.color}">${p.rating}</div>` : ''}
+    </div>
+  `).join('')}
+  `;
+}
+
+function renderAdminPlayerRankings() {
+  const totalCached = Object.values(playerRankings).reduce((s,l) => s + (l?.length||0), 0);
+  return `
+  <div class="section-title">🏆 Player Rankings Sync</div>
+  <div class="card mb14">
+    <div style="font-size:12px;color:var(--dim);margin-bottom:10px">
+      Pulls Test/ODI/T20 Batsman/Bowler/All-Rounder rankings (9 API calls) and publishes them to all users.
+      ${playerRankingsLastSyncedAt ? `<br/>Last synced: <b style="color:var(--text)">${playerRankingsLastSyncedAt}</b>` : '<br/>Never synced yet.'}
+      <br/>Currently cached: <b style="color:var(--text)">${totalCached}</b> player(s) across ${Object.keys(RANKING_TYPES).length} categories.
+    </div>
+    ${playerRankingsSyncError ? `<div style="background:rgba(220,38,38,0.1);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:10px;font-size:12px;color:#f87171;margin-bottom:10px">${playerRankingsSyncError}</div>` : ''}
+    <button class="btn-primary btn-block" style="background:linear-gradient(135deg,#a855f7,#7e22ce)" onclick="adminSyncPlayerRankings()" ${playerRankingsSyncing ? 'disabled' : ''}>${playerRankingsSyncing ? '🔄 Syncing… (9 requests)' : '🔄 Sync Player Rankings Now'}</button>
+  </div>
+  ${totalCached > 0 ? `
+  <div class="section-title" style="font-size:13px">Cached Per Category</div>
+  ${Object.entries(RANKING_TYPES).map(([key,cfg]) => `
+    <div class="card mb10" style="display:flex;justify-content:space-between;align-items:center;border-left:3px solid ${cfg.color}">
+      <div style="font-size:12.5px;font-weight:700">${cfg.label}</div>
+      <div style="font-size:12px;color:var(--dim)">${(playerRankings[key]||[]).length} players</div>
+    </div>
+  `).join('')}
+  ` : ''}
+  `;
+}
+
 
 async function submitWithdraw() {
   const method = document.getElementById('wd-method')?.value;
@@ -5605,6 +5846,7 @@ function _renderInner() {
       ${tab==='deposit' ? renderDeposit() : ''}
       ${tab==='withdraw' ? renderWithdraw() : ''}
       ${tab==='news' ? renderNewsTab() : ''}
+      ${tab==='playerRankings' ? renderPlayerRankingsTab() : ''}
       ${tab==='history' ? renderHistory() : ''}
       ${tab==='referral' ? renderReferral() : ''}
     </div>
@@ -5772,7 +6014,10 @@ function renderHome() {
         <button onclick="goTab('withdraw')" style="background:rgba(220,38,38,0.12);border:1px solid rgba(220,38,38,0.3);color:#f87171;padding:7px 11px;border-radius:9px;font-size:11px;font-weight:700">⬆ Withdraw</button>
       </div>
     </div>
-    <button onclick="goNewsTab()" style="width:100%;margin-top:10px;background:rgba(234,179,8,0.12);border:1px solid rgba(234,179,8,0.3);color:#facc15;padding:8px 12px;border-radius:9px;font-size:11.5px;font-weight:700">📰 News</button>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button onclick="goNewsTab()" style="flex:1;background:rgba(234,179,8,0.12);border:1px solid rgba(234,179,8,0.3);color:#facc15;padding:8px 12px;border-radius:9px;font-size:11.5px;font-weight:700">📰 News</button>
+      <button onclick="goPlayerRankingTab()" style="flex:1;background:rgba(168,85,247,0.12);border:1px solid rgba(168,85,247,0.3);color:#c084fc;padding:8px 12px;border-radius:9px;font-size:11.5px;font-weight:700">🏆 Player Rankings</button>
+    </div>
   </div>
 
   ${(() => {
@@ -28509,6 +28754,7 @@ function renderAdminPanel() {
     <button class="admin-tab ${adminTab==='recyclebin'?'active':''}" onclick="adminTab='recyclebin';render()">🗑️ Recycle Bin${Array.from(new Set([...Object.keys(deletedMatches), ...Object.keys(deletedDream11Matches)])).length>0 ? ` (${Array.from(new Set([...Object.keys(deletedMatches), ...Object.keys(deletedDream11Matches)])).length})` : ''}</button>
     <button class="admin-tab ${adminTab==='cleanup'?'active':''}" onclick="adminTab='cleanup';render()">🧹 Cleanup</button>
     <button class="admin-tab ${adminTab==='news'?'active':''}" onclick="adminTab='news';render()">📰 News</button>
+    <button class="admin-tab ${adminTab==='rankings'?'active':''}" onclick="adminTab='rankings';render()">🏆 Rankings</button>
   </div>
 
   ${adminTab==='pending' ? renderAdminPending(pendingDep, pendingWd) : ''}
@@ -28519,6 +28765,7 @@ function renderAdminPanel() {
   ${adminTab==='recyclebin' ? renderAdminRecycleBin() : ''}
   ${adminTab==='cleanup' ? renderAdminDuplicateCleanup() : ''}
   ${adminTab==='news' ? renderAdminNews() : ''}
+  ${adminTab==='rankings' ? renderAdminPlayerRankings() : ''}
   `;
 }
 
@@ -34546,7 +34793,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.46.0";
+const APP_VERSION = "4.47.1";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
