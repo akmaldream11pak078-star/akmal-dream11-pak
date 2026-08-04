@@ -3744,8 +3744,8 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
     showNotif('Connection not ready — please try again', 'error');
     return null;
   }
-  const { doc, getDoc, updateDoc } = window._fbFns;
-  if (!doc || !getDoc || !updateDoc) {
+  const { doc, runTransaction } = window._fbFns;
+  if (!doc || !runTransaction) {
     showNotif('Firebase not ready — please refresh the page', 'error');
     return null;
   }
@@ -3755,106 +3755,94 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
   const teamsField = participantsField + 'Teams';
 
   try {
-    const [matchSnap, userSnap] = await Promise.all([getDoc(matchRef), getDoc(userRef)]);
-    if (!matchSnap.exists()) { showNotif('Could not find match or user data — please refresh', 'error'); return null; }
-    if (!userSnap.exists()) { showNotif('Could not find match or user data — please refresh', 'error'); return null; }
-
-    const matchData = matchSnap.data();
-    const userData = userSnap.data();
-
-    const participants = matchData[participantsField] || (participantsAreObjectMap ? {} : []);
-    const alreadyJoined = participantsAreObjectMap
-      ? !!participants[currentUser.email]
-      : participants.includes(currentUser.email);
-    if (alreadyJoined) { showNotif(alreadyJoinedMsg, 'error'); return null; }
-
-    // Slot-capped contests (e.g. Slot 20): re-check the cap against the
-    // freshly-read Firestore data, not just the local pre-check in the
-    // caller — two people tapping Join at the exact same moment when 19
-    // are already in could otherwise both pass the local check and both
-    // end up joining a "20-max" contest, letting it overshoot to 21.
-    if (maxParticipants != null) {
-      const currentCount = participantsAreObjectMap ? Object.keys(participants).length : participants.length;
-      if (currentCount >= maxParticipants) {
-        showNotif(fullMsg || `This contest is full (${maxParticipants}/${maxParticipants} joined).`, 'error');
-        return null;
+    // Real Firestore transaction: the balance deduction and the contest
+    // participant write either BOTH commit or NEITHER does. This closes
+    // the "money cut, never actually joined" gap that the old two-separate-
+    // writes-plus-manual-rollback approach could hit whenever the app was
+    // interrupted (tab closed, navigated away, network dropped) between
+    // the two writes — a scenario with no error to catch, so the old
+    // try/catch rollback never ran. A transaction has no such window.
+    const outcome = await runTransaction(window._fbDb, async (tx) => {
+      const [matchSnap, userSnap] = await Promise.all([tx.get(matchRef), tx.get(userRef)]);
+      if (!matchSnap.exists() || !userSnap.exists()) {
+        return { error: 'Could not find match or user data — please refresh' };
       }
-    }
 
-    if ((userData.balance || 0) < entryFeeAmount) { showNotif(`Insufficient balance — Rs ${entryFeeAmount} required`, 'error'); return null; }
+      const matchData = matchSnap.data();
+      const userData = userSnap.data();
 
-    const newBalance = (userData.balance || 0) - entryFeeAmount;
-    const newTransactions = userData.transactions || [];
-    newTransactions.unshift({
-      id: uid(), type: txType, amount: entryFeeAmount,
-      matchId: matchId || null, date: getDateTime(), status: 'confirmed'
+      const participants = matchData[participantsField] || (participantsAreObjectMap ? {} : []);
+      const alreadyJoined = participantsAreObjectMap
+        ? !!participants[currentUser.email]
+        : participants.includes(currentUser.email);
+      if (alreadyJoined) return { error: alreadyJoinedMsg };
+
+      // Slot-capped contests (e.g. Slot 20): re-check the cap against the
+      // freshly-read Firestore data inside the transaction, not just the
+      // local pre-check in the caller — two people tapping Join at the
+      // exact same moment when 19 are already in could otherwise both
+      // pass the local check; the transaction guarantees only one of them
+      // wins the last slot (Firestore retries the loser against fresh data).
+      if (maxParticipants != null) {
+        const currentCount = participantsAreObjectMap ? Object.keys(participants).length : participants.length;
+        if (currentCount >= maxParticipants) {
+          return { error: fullMsg || `This contest is full (${maxParticipants}/${maxParticipants} joined).` };
+        }
+      }
+
+      if ((userData.balance || 0) < entryFeeAmount) {
+        return { error: `Insufficient balance — Rs ${entryFeeAmount} required` };
+      }
+
+      const newBalance = (userData.balance || 0) - entryFeeAmount;
+      const newTransactions = userData.transactions || [];
+      newTransactions.unshift({
+        id: uid(), type: txType, amount: entryFeeAmount,
+        matchId: matchId || null, date: getDateTime(), status: 'confirmed'
+      });
+
+      const updatedMatchData = { ...matchData };
+      if (participantsAreObjectMap) {
+        updatedMatchData[participantsField] = { ...participants, [currentUser.email]: true };
+      } else {
+        updatedMatchData[participantsField] = [...participants, currentUser.email];
+      }
+      updatedMatchData[poolField] = (matchData[poolField] || 0) + entryFeeAmount;
+      if (Array.isArray(updatedMatchData.participants) && !updatedMatchData.participants.includes(currentUser.email)) {
+        updatedMatchData.participants = [...updatedMatchData.participants, currentUser.email];
+      }
+      if (teamId) {
+        updatedMatchData[teamsField] = { ...(matchData[teamsField] || {}), [currentUser.email]: teamId };
+      }
+
+      // Stamp updatedAt so other users' incremental background refresh
+      // (which only asks Firestore for docs newer than their last-seen
+      // watermark) actually picks up this join.
+      const matchUpdate = {
+        [participantsField]: updatedMatchData[participantsField],
+        [poolField]: updatedMatchData[poolField],
+        updatedAt: Date.now()
+      };
+      // Only include `participants` if it's actually an array — Dream11
+      // match docs often don't have this legacy field at all, and sending
+      // `undefined` to Firestore throws a client-side "invalid-argument"
+      // error that aborts the whole join before it even reaches the rules.
+      if (Array.isArray(updatedMatchData.participants)) {
+        matchUpdate.participants = updatedMatchData.participants;
+      }
+      if (teamId) matchUpdate[teamsField] = updatedMatchData[teamsField];
+
+      tx.update(userRef, { balance: newBalance, transactions: newTransactions });
+      tx.update(matchRef, matchUpdate);
+
+      return { balance: newBalance, transactions: newTransactions, matchData: updatedMatchData };
     });
 
-    const updatedMatchData = { ...matchData };
-    if (participantsAreObjectMap) {
-      updatedMatchData[participantsField] = { ...participants, [currentUser.email]: true };
-    } else {
-      updatedMatchData[participantsField] = [...participants, currentUser.email];
-    }
-    updatedMatchData[poolField] = (matchData[poolField] || 0) + entryFeeAmount;
-    if (Array.isArray(updatedMatchData.participants) && !updatedMatchData.participants.includes(currentUser.email)) {
-      updatedMatchData.participants = [...updatedMatchData.participants, currentUser.email];
-    }
-    if (teamId) {
-      updatedMatchData[teamsField] = { ...(matchData[teamsField] || {}), [currentUser.email]: teamId };
-    }
-
-    // Stamp updatedAt so other users' incremental background refresh
-    // (which only asks Firestore for docs newer than their last-seen
-    // watermark) actually picks up this join. Without this, a contest
-    // join would silently never be considered "new" by that check, and
-    // other users wouldn't see the updated participant count/pool until
-    // a full manual reload happened to touch this doc for some other
-    // reason.
-    const matchUpdate = {
-      [participantsField]: updatedMatchData[participantsField],
-      [poolField]: updatedMatchData[poolField],
-      updatedAt: Date.now()
-    };
-    // Only include `participants` if it's actually an array — Dream11
-    // match docs often don't have this legacy field at all, and sending
-    // `undefined` to Firestore throws a client-side "invalid-argument"
-    // error that aborts the whole join before it even reaches the rules.
-    if (Array.isArray(updatedMatchData.participants)) {
-      matchUpdate.participants = updatedMatchData.participants;
-    }
-    if (teamId) matchUpdate[teamsField] = updatedMatchData[teamsField];
-
-    // Two separate plain writes (not a transaction) — same as the free
-    // contest join. Update the user doc first (money movement), then the
-    // match doc. If the second write fails, roll back the first
-    // immediately (refund balance + remove the just-added transaction)
-    // instead of leaving the user charged with no recorded contest entry
-    // — that partial-failure state is exactly what silently happened
-    // before this rollback existed: transaction shows CONFIRMED and money
-    // is deducted, but the user never actually appears in the contest's
-    // participant list because the match-doc write never landed.
-    await updateDoc(userRef, { balance: newBalance, transactions: newTransactions });
-    try {
-      await updateDoc(matchRef, matchUpdate);
-    } catch (matchWriteErr) {
-      console.error('Match-doc write failed after balance was already deducted — rolling back:', matchWriteErr);
-      try {
-        await updateDoc(userRef, { balance: userData.balance || 0, transactions: userData.transactions || [] });
-      } catch (rollbackErr) {
-        // Rollback itself failed — this is the one case that can still
-        // leave a user charged with no entry. Surface it loudly so it can
-        // be manually corrected (e.g. via the admin Credit button) rather
-        // than silently disappearing like before.
-        console.error('CRITICAL: rollback after failed match-doc write also failed. User may be charged with no contest entry:', rollbackErr);
-        showNotif('Join failed partway through, and the automatic refund also failed — please contact support so we can fix your balance manually.', 'error');
-        return null;
-      }
-      showNotif('Join failed — your balance was not charged (refunded automatically). Please try again.', 'error');
+    if (outcome.error) {
+      showNotif(outcome.error, 'error');
       return null;
     }
-
-    return { balance: newBalance, transactions: newTransactions, matchData: updatedMatchData };
+    return outcome;
   } catch (e) {
     console.error('Contest join failed:', e);
     showNotif(`Join failed: ${e.code || e.message || 'unknown error'}`, 'error');
@@ -4091,22 +4079,23 @@ async function joinCustomContestByCode(rawCode) {
 }
 
 // ── Atomic custom-contest join (shared by PP and Dream11 custom contests):
-// reads the contest doc + user doc inside ONE Firestore transaction,
-// verifies the user hasn't already joined, the contest isn't full, and the
-// user has enough balance — using the entry fee and player cap stored ON
-// THE CONTEST DOC ITSELF (creator-chosen, not a fixed constant) — then
-// writes both updates together. Mirrors _atomicJoinPaidContest's race-safety
-// for the Mega Contest, applied here to creator-made contests. ──
-// NOTE: simplified from a Firestore transaction to plain reads+writes —
-// same reasoning as _atomicJoinPaidContest above (transaction retries
-// were themselves triggering resource-exhausted under load).
+// reads the contest doc + user doc and writes both together inside ONE
+// Firestore transaction, verifying the user hasn't already joined, the
+// contest isn't full, and the user has enough balance — using the entry
+// fee and player cap stored ON THE CONTEST DOC ITSELF (creator-chosen, not
+// a fixed constant). Mirrors _atomicJoinPaidContest's race-safety for the
+// Mega Contest, applied here to creator-made contests. Either both writes
+// commit or neither does — no window where a fee is deducted but the join
+// never lands (the earlier plain-writes-plus-manual-rollback version had
+// exactly that gap whenever execution was interrupted between the two
+// writes rather than one of them throwing an error). ──
 async function _atomicJoinCustomContest({ contestId, contestCollection, maxPlayers, teamId = null }) {
   if (!window._fbDb || !window._fbFns) {
     showNotif('Connection not ready — please try again', 'error');
     return null;
   }
-  const { doc, getDoc, setDoc } = window._fbFns;
-  if (!doc || !getDoc || !setDoc) {
+  const { doc, runTransaction } = window._fbFns;
+  if (!doc || !runTransaction) {
     showNotif('Firebase not ready — please refresh the page', 'error');
     return null;
   }
@@ -4115,56 +4104,52 @@ async function _atomicJoinCustomContest({ contestId, contestCollection, maxPlaye
   const userRef = doc(window._fbDb, 'pp_users', safeKey);
 
   try {
-    const [contestSnap, userSnap] = await Promise.all([getDoc(contestRef), getDoc(userRef)]);
-    if (!contestSnap.exists()) { showNotif('Could not find contest or user data — please refresh', 'error'); return null; }
-    if (!userSnap.exists()) { showNotif('Could not find contest or user data — please refresh', 'error'); return null; }
+    const outcome = await runTransaction(window._fbDb, async (tx) => {
+      const [contestSnap, userSnap] = await Promise.all([tx.get(contestRef), tx.get(userRef)]);
+      if (!contestSnap.exists() || !userSnap.exists()) {
+        return { error: 'Could not find contest or user data — please refresh' };
+      }
 
-    const contestData = contestSnap.data();
-    const userData = userSnap.data();
+      const contestData = contestSnap.data();
+      const userData = userSnap.data();
 
-    if (contestData.status !== 'open') { showNotif('This contest has already finished', 'error'); return null; }
-    const participants = contestData.participants || [];
-    if (participants.includes(currentUser.email)) { showNotif('You already joined this contest!', 'error'); return null; }
-    if (participants.length >= maxPlayers) { showNotif(`This contest is full (max ${maxPlayers} players)`, 'error'); return null; }
+      if (contestData.status !== 'open') return { error: 'This contest has already finished' };
+      const participants = contestData.participants || [];
+      if (participants.includes(currentUser.email)) return { error: 'You already joined this contest!' };
+      if (participants.length >= maxPlayers) return { error: `This contest is full (max ${maxPlayers} players)` };
 
-    const entryFee = contestData.entryFee;
-    if ((userData.balance || 0) < entryFee) { showNotif('Insufficient balance to join this contest', 'error'); return null; }
+      const entryFee = contestData.entryFee;
+      if ((userData.balance || 0) < entryFee) return { error: 'Insufficient balance to join this contest' };
 
-    const newBalance = (userData.balance || 0) - entryFee;
-    const newTransactions = userData.transactions || [];
-    newTransactions.unshift({
-      id: uid(), type: 'custom_entry', amount: entryFee,
-      matchId: contestData.matchId || null, contestCode: contestData.code || null,
-      date: getDateTime(), status: 'confirmed'
+      const newBalance = (userData.balance || 0) - entryFee;
+      const newTransactions = userData.transactions || [];
+      newTransactions.unshift({
+        id: uid(), type: 'custom_entry', amount: entryFee,
+        matchId: contestData.matchId || null, contestCode: contestData.code || null,
+        date: getDateTime(), status: 'confirmed'
+      });
+
+      const updatedContestData = {
+        ...contestData,
+        participants: [...participants, currentUser.email],
+        pool: (contestData.pool || 0) + entryFee,
+        updatedAt: Date.now()
+      };
+      if (teamId) {
+        updatedContestData.participantTeams = { ...(contestData.participantTeams || {}), [currentUser.email]: teamId };
+      }
+
+      tx.update(userRef, { balance: newBalance, transactions: newTransactions });
+      tx.update(contestRef, updatedContestData);
+
+      return { balance: newBalance, transactions: newTransactions, contestData: updatedContestData };
     });
 
-    const updatedContestData = {
-      ...contestData,
-      participants: [...participants, currentUser.email],
-      pool: (contestData.pool || 0) + entryFee,
-      updatedAt: Date.now()
-    };
-    if (teamId) {
-      updatedContestData.participantTeams = { ...(contestData.participantTeams || {}), [currentUser.email]: teamId };
-    }
-
-    await setDoc(userRef, { ...userData, balance: newBalance, transactions: newTransactions });
-    try {
-      await setDoc(contestRef, updatedContestData);
-    } catch (contestWriteErr) {
-      console.error('Contest-doc write failed after balance was already deducted — rolling back:', contestWriteErr);
-      try {
-        await setDoc(userRef, userData);
-      } catch (rollbackErr) {
-        console.error('CRITICAL: rollback after failed contest-doc write also failed. User may be charged with no contest entry:', rollbackErr);
-        showNotif('Join failed partway through, and the automatic refund also failed — please contact support so we can fix your balance manually.', 'error');
-        return null;
-      }
-      showNotif('Join failed — your balance was not charged (refunded automatically). Please try again.', 'error');
+    if (outcome.error) {
+      showNotif(outcome.error, 'error');
       return null;
     }
-
-    return { balance: newBalance, transactions: newTransactions, contestData: updatedContestData };
+    return outcome;
   } catch (e) {
     console.error('Custom contest join failed:', e);
     showNotif(`Join failed: ${e.code || e.message || 'unknown error'}`, 'error');
@@ -4690,23 +4675,48 @@ async function joinH2HContest(matchId) {
     };
 
     let openContest = Object.values(h2hContests).find(c => c.matchId === matchId && c.status === 'open' && !c.player2);
+    let isNewSlot = false;
 
     if (!openContest) {
       openContest = newH2HContest(matchId);
       openContest.player1 = playerData;
-      h2hContests[openContest.id] = openContest;
+      isNewSlot = true;
     } else {
       openContest.player2 = playerData;
       openContest.status = 'full';
-      h2hContests[openContest.id] = openContest;
-
-      const nextContest = newH2HContest(matchId);
-      h2hContests[nextContest.id] = nextContest;
-      await _saveH2HToFirestore(nextContest.id, nextContest);
-      showNotif(`H2H Contest joined! Rs ${H2H_ENTRY_FEE} deducted. New H2H slot auto-created for others. 🥊`);
     }
 
-    await _saveH2HToFirestore(openContest.id, openContest);
+    // Step 2's write (below) is a plain setDoc, separate from Step 1's
+    // transaction — if it fails or gets interrupted (app closed, network
+    // drop) after Step 1 already deducted the fee, the user would be
+    // charged with no actual contest entry, same bug class as the Mini
+    // Mega join fix. Refund immediately if this step doesn't complete.
+    try {
+      h2hContests[openContest.id] = openContest;
+      await _saveH2HToFirestore(openContest.id, openContest);
+      if (!isNewSlot) {
+        const nextContest = newH2HContest(matchId);
+        h2hContests[nextContest.id] = nextContest;
+        await _saveH2HToFirestore(nextContest.id, nextContest);
+        showNotif(`H2H Contest joined! Rs ${H2H_ENTRY_FEE} deducted. New H2H slot auto-created for others. 🥊`);
+      }
+    } catch (writeErr) {
+      console.error('H2H contest-doc write failed after fee was already deducted — refunding:', writeErr);
+      delete h2hContests[openContest.id];
+      try {
+        await _adminWalletRefund(currentUser.email, H2H_ENTRY_FEE, matchId, 'H2H join failed partway through — automatic refund', 'h2h_refund');
+        u.balance = users[currentUser.email].balance;
+        u.transactions = users[currentUser.email].transactions;
+        currentUser.balance = u.balance;
+        currentUser.transactions = u.transactions;
+        showNotif('Join failed — your balance was refunded automatically. Please try again.', 'error');
+      } catch (refundErr) {
+        console.error('CRITICAL: refund after failed H2H write also failed:', refundErr);
+        showNotif('Join failed partway through, and the automatic refund also failed — please contact support so we can fix your balance manually.', 'error');
+      }
+      return;
+    }
+
     // Note: the lock doc itself (created atomically in Step 1, with
     // contestId: null) is intentionally left as-is — it's a duplicate-join
     // guard only, nothing reads its contestId field, and the lock collection's
@@ -5863,42 +5873,49 @@ function _renderInner() {
     ${d11EspnImportPanelOpen ? renderD11EspnImportPanelModal() : ''}
     ${d11CllImportPanelOpen ? renderD11CllImportPanelModal() : ''}
     ${d11CllLinkPickerMatchId ? renderD11CllLinkPickerModal() : ''}
-    ${_d11CllDebugData ? renderD11CllDebugModal() : ''}
+    ${_d11CllDebugData && isAdmin() ? renderD11CllDebugModal() : ''}
     ${d11Cb2ImportPanelOpen ? renderD11Cb2ImportPanelModal() : ''}
     ${d11Cb2LinkPickerMatchId ? renderD11Cb2LinkPickerModal() : ''}
-    ${_d11Cb2DebugData ? renderD11Cb2DebugModal() : ''}
+    ${_d11Cb2DebugData && isAdmin() ? renderD11Cb2DebugModal() : ''}
     ${d11SbxImportPanelOpen ? renderD11SbxImportPanelModal() : ''}
     ${d11SbxLinkPickerMatchId ? renderD11SbxLinkPickerModal() : ''}
-    ${_d11SbxDebugData ? renderD11SbxDebugModal() : ''}
+    ${_d11SbxDebugData && isAdmin() ? renderD11SbxDebugModal() : ''}
     ${d11TeamPreviewOpen ? renderD11TeamPreviewModal() : ''}
     ${d11Ll2ImportPanelOpen ? renderD11Ll2ImportPanelModal() : ''}
     ${d11Ll2LinkPickerMatchId ? renderD11Ll2LinkPickerModal() : ''}
-    ${_d11Ll2DebugData ? renderD11Ll2DebugModal() : ''}
+    ${_d11Ll2DebugData && isAdmin() ? renderD11Ll2DebugModal() : ''}
     ${d11Ll3ImportPanelOpen ? renderD11Ll3ImportPanelModal() : ''}
     ${d11Ll3LinkPickerMatchId ? renderD11Ll3LinkPickerModal() : ''}
-    ${_d11Ll3DebugData ? renderD11Ll3DebugModal() : ''}
+    ${_d11Ll3DebugData && isAdmin() ? renderD11Ll3DebugModal() : ''}
     ${d11Ll3PlayerRankingPanelOpen ? renderD11Ll3PlayerRankingModal() : ''}
     ${d11Ll4ImportPanelOpen ? renderD11Ll4ImportPanelModal() : ''}
     ${d11Ll4LinkPickerMatchId ? renderD11Ll4LinkPickerModal() : ''}
-    ${_d11Ll4DebugData ? renderD11Ll4DebugModal() : ''}
+    ${_d11Ll4DebugData && isAdmin() ? renderD11Ll4DebugModal() : ''}
     ${d11Ll4PlayerRankingPanelOpen ? renderD11Ll4PlayerRankingModal() : ''}
     ${d11Ll5ImportPanelOpen ? renderD11Ll5ImportPanelModal() : ''}
     ${d11Ll5LinkPickerMatchId ? renderD11Ll5LinkPickerModal() : ''}
-    ${_d11Ll5DebugData ? renderD11Ll5DebugModal() : ''}
+    ${_d11Ll5DebugData && isAdmin() ? renderD11Ll5DebugModal() : ''}
     ${d11Ll5PlayerRankingPanelOpen ? renderD11Ll5PlayerRankingModal() : ''}
     ${d11AllImportPanelOpen ? renderD11AllImportPanelModal() : ''}
     ${d11AllLinkPickerMatchId ? renderD11AllLinkPickerModal() : ''}
-    ${_d11AllDebugData ? renderD11AllDebugModal() : ''}
-    ${_d11SquadDebugData ? renderD11SquadDebugModal() : ''}
-    ${_d11EspnDebugData ? renderD11EspnDebugModal() : ''}
+    ${_d11AllDebugData && isAdmin() ? renderD11AllDebugModal() : ''}
+    ${_d11SquadDebugData && isAdmin() ? renderD11SquadDebugModal() : ''}
+    ${_d11EspnDebugData && isAdmin() ? renderD11EspnDebugModal() : ''}
     ${d11PlayerInfoTarget ? renderD11PlayerInfoModal() : ''}
-    ${_d11SyncDebugData ? renderD11SyncDebugModal() : ''}
-    ${_d11ScheduleDebugData ? renderD11ScheduleDebugModal() : ''}
+    ${_d11SyncDebugData && isAdmin() ? renderD11SyncDebugModal() : ''}
+    ${_d11ScheduleDebugData && isAdmin() ? renderD11ScheduleDebugModal() : ''}
     ${_receiptModalImage ? renderReceiptImageModal() : ''}
     ${d11CleanupPoolMatchId ? renderD11CleanupPoolModal() : ''}
     ${d11DupCleanupMatchId ? renderD11DupCleanupModal() : ''}
     ${d11JoinTeamPicker ? renderD11JoinTeamPickerModal() : ''}
     ${_tpinSetupMode ? renderTpinSetupModal() : ''}
+    ${_joinInFlight.size > 0 ? `
+      <div style="position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.72);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;backdrop-filter:blur(2px)">
+        <div class="spinner"></div>
+        <div style="color:#fff;font-size:14px;font-weight:700;text-align:center;padding:0 30px">Joining contest — please wait…</div>
+        <div style="color:#cbd5e1;font-size:11.5px;text-align:center;padding:0 40px">Don't close the app or go back until this finishes, so your entry and balance stay in sync.</div>
+      </div>
+    ` : ''}
   `;
 }
 
@@ -34798,7 +34815,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.47.3";
+const APP_VERSION = "4.50.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
