@@ -11814,6 +11814,55 @@ function fallbackCricbuzzImageUrl(imageId) {
   return `${CRICBUZZ_BASE}/get-image?id=${imageId}`;
 }
 
+// Cricbuzz No 2's faceimageid maps directly to a PUBLIC static CDN file on
+// static.cricbuzz.com — no RapidAPI call, no auth headers, no quota usage
+// at all (confirmed pattern: faceimageid 226289 → .../c226289/image.jpg).
+// This replaces the earlier approach of fetching the photo via Cricbuzz
+// No 1's RapidAPI /get-image endpoint (which needed a real fetch() + auth
+// headers + base64 conversion, and burned No 1's own quota for a No 2
+// squad — two unrelated providers/keys for one squad fetch). A plain
+// <img src="..."> can point straight at this URL.
+function cb2FaceImageUrl(faceImageId) {
+  if (!faceImageId) return null;
+  return `https://static.cricbuzz.com/a/img/v1/i1/c${faceImageId}/image.jpg`;
+}
+
+// A plain <img src="..."> pointed straight at a RapidAPI endpoint always
+// fails (401/403) because RapidAPI requires x-rapidapi-key/host HEADERS on
+// every request, and a browser <img> tag has no way to send custom headers.
+// This is why player photos built via fallbackCricbuzzImageUrl() silently
+// showed the letter-avatar instead — the URL was correct, but nothing could
+// ever actually load it as an <img>. This helper does a real fetch() WITH
+// the required auth headers, then converts the response into a base64 data
+// URL (which <img src> can display with no headers, since the auth already
+// happened during the fetch). Returns null on any failure so callers can
+// just leave the player without a photo instead of showing a broken image.
+// NOTE: only used for Cricbuzz No 1's imageId now — Cricbuzz No 2's
+// faceimageid uses cb2FaceImageUrl() above instead, since that's a public
+// static file needing no auth/fetch step at all.
+async function fetchCricbuzzImageAsDataUrl(imageId) {
+  if (!imageId) return null;
+  try {
+    const res = await fetch(`${CRICBUZZ_BASE}/get-image?id=${imageId}`, {
+      headers: {
+        'x-rapidapi-host': CRICBUZZ_RAPIDAPI_HOST,
+        'x-rapidapi-key': CRICBUZZ_RAPIDAPI_KEY
+      }
+    });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    if (!blob || blob.size === 0) return null;
+    return await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(blob);
+    });
+  } catch (e) {
+    return null;
+  }
+}
+
 // Set to true whenever the most recent _cricbuzzFetch call had to fall
 // back to the secondary "Unofficial Cricbuzz" API because the primary's
 // quota was exhausted. The fallback has been observed to occasionally lag
@@ -12646,14 +12695,48 @@ function d11CloseCb2ImportPanel() {
 // shape as the original Cricbuzz API, confirmed via live test call) and
 // lets the admin one-tap create + auto-link a Dream11 match. Mirrors
 // d11FetchCllImportList's filtering intent (drop junior/women's + finished).
+// Browses Cricbuzz No 2's own SCHEDULE endpoints — /schedule/v1/league and
+// /schedule/v1/International — instead of /matches/v1/upcoming. The
+// "upcoming" endpoint only ever returns today's/near-term matches with no
+// date-range control, which is why the import list used to show just one
+// day's fixtures. The schedule endpoints return a multi-day calendar
+// (confirmed via live test: several days out, e.g. Aug 05–08), in the same
+// matchScheduleMap[].scheduleAdWrapper.matchScheduleList[].matchInfo[] shape
+// that _cricbuzzFlattenSchedule (used for the No 1 provider's own
+// /schedule/v1/international + /schedule/v1/league) already parses — reused
+// here instead of duplicating that parsing logic. cb2's matchInfo entries
+// don't carry their own seriesName (only matchScheduleList does), so that's
+// backfilled below since the import-list UI relies on it. lastTime is a
+// required param but appears to act as a lower-bound/pagination anchor —
+// passing the current time returns the calendar starting near today.
+function _cb2FlattenScheduleMap(raw) {
+  const out = [];
+  (raw?.matchScheduleMap || []).forEach(entry => {
+    const saw = entry?.scheduleAdWrapper;
+    if (!saw) return; // skip ad entries, which have no scheduleAdWrapper
+    (saw.matchScheduleList || []).forEach(sml => {
+      (sml.matchInfo || []).forEach(info => {
+        if (info) out.push({ matchInfo: { ...info, seriesName: info.seriesName || sml.seriesName } });
+      });
+    });
+  });
+  return out;
+}
 async function d11FetchCb2ImportList() {
   d11Cb2ImportLoading = true;
   d11Cb2ImportError = null;
   render();
   try {
-    const raw = await _cb2Fetch('/matches/v1/upcoming', null, { feature: 'Import List', matchId: null });
-    _d11Cb2DebugData = { cb2Raw: raw };
-    const allMatches = _cricbuzzFlattenMatches(raw);
+    const lastTime = Date.now();
+    const [leagueRaw, intlRaw] = await Promise.all([
+      _cb2Fetch('/schedule/v1/league', { lastTime }, { feature: 'Import List (League)', matchId: null }).catch(() => null),
+      _cb2Fetch('/schedule/v1/International', { lastTime }, { feature: 'Import List (International)', matchId: null }).catch(() => null)
+    ]);
+    _d11Cb2DebugData = { cb2Raw: { leagueRaw, intlRaw } };
+    const allMatches = [
+      ...(leagueRaw ? _cb2FlattenScheduleMap(leagueRaw) : []),
+      ...(intlRaw ? _cb2FlattenScheduleMap(intlRaw) : [])
+    ];
     d11Cb2ImportRawMatchCount = allMatches.length;
     if (allMatches.length === 0) {
       throw new Error('Cricbuzz No 2 has no matches listed right now — try again later, or create the match manually and link it instead.');
@@ -12753,7 +12836,11 @@ function renderD11Cb2ImportPanelModal() {
         const info = mt.matchInfo || mt;
         const title = `${info.team1?.teamName||'TBD'} vs ${info.team2?.teamName||'TBD'}`;
         const sub = [info.matchDesc, info.seriesName].filter(Boolean).join(' · ');
-        const status = info.status || '';
+        // Schedule endpoints (/schedule/v1/league, /schedule/v1/International)
+        // don't return a ready-made "status" string like the old
+        // /matches/v1/upcoming shape did — only a raw startDate (ms epoch,
+        // UTC) — so build an equivalent "Match starts at ..." line from it.
+        const status = info.status || (info.startDate ? `Match starts at ${new Date(parseInt(info.startDate)).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })} GMT` : '');
         return `
         <div style="background:var(--input-bg);border-radius:8px;padding:10px 12px;margin-bottom:8px">
           <div style="font-size:12.5px;font-weight:600;line-height:1.4;margin-bottom:2px">${title}</div>
@@ -13040,11 +13127,12 @@ async function d11UnlinkCllMatch(matchId) {
 async function d11UnlinkCb2Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
-  const prevSnapshot = { cb2MatchId: m.cb2MatchId, cb2Team1Id: m.cb2Team1Id, cb2Team2Id: m.cb2Team2Id, cb2SeriesId: m.cb2SeriesId };
+  const prevSnapshot = { cb2MatchId: m.cb2MatchId, cb2Team1Id: m.cb2Team1Id, cb2Team2Id: m.cb2Team2Id, cb2SeriesId: m.cb2SeriesId, cb2AutoSync: m.cb2AutoSync };
   delete m.cb2MatchId;
   delete m.cb2Team1Id;
   delete m.cb2Team2Id;
   delete m.cb2SeriesId;
+  delete m.cb2AutoSync;
   render();
   try {
     await _saveMatchToFirestore(matchId, m);
@@ -13054,6 +13142,32 @@ async function d11UnlinkCb2Match(matchId) {
     Object.assign(m, prevSnapshot);
     console.error('Cricbuzz No 2 unlink save failed:', e);
     showNotif('❌ Unlink did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
+}
+
+// ── Cricbuzz No 2 — Automatic toggle (same mechanism as Cricket Live Line
+// 3 / 5 and Advance Live Line's "🤖 Automatic" buttons). Arms the per-match
+// m.cb2AutoSync flag, which d11AutoCheckCb2PlayingXI and
+// d11AutoSyncCb2PostDeadline (below) check before firing anything — so
+// toggling this OFF immediately stops all automatic Cricbuzz No 2 API
+// usage for this match, same as the other providers.
+async function d11ToggleCb2AutoSync(matchId) {
+  const m = matches[matchId];
+  if (!m) return;
+  const prevAutoSync = m.cb2AutoSync;
+  m.cb2AutoSync = !m.cb2AutoSync;
+  render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif(m.cb2AutoSync
+      ? '🤖 Automatic armed — deadline se pehle 25/20/15/10min pe Playing XI, deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now, sab khud-b-khud chalega'
+      : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
+    render();
+  } catch(e) {
+    m.cb2AutoSync = prevAutoSync;
+    console.error('Cricbuzz No 2 auto-sync toggle save failed:', e);
+    showNotif('❌ Toggle did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
     render();
   }
 }
@@ -15279,16 +15393,14 @@ async function d11FetchSquadFromCb2(matchId) {
           const name = (p.name || '').trim();
           if (!name || existingNamesLower.has(name.toLowerCase())) return;
           const role = _d11MapCricbuzzRole(p.role, p.keeper);
-          // NOTE: Cricbuzz No 2's squad response includes a faceimageid,
-          // and RapidAPI's own "Player Info" endpoint suggested building a
-          // photo URL from it via i.cricketcb.com — but that domain was
-          // confirmed dead (DNS_PROBE_FINISHED_NXDOMAIN) via a direct
-          // browser test, not just hotlink-blocked. So no photo is set
-          // here; players fall back to the normal letter-avatar, same as
-          // any other manually-added player. Revisit if/when a working
-          // image source is confirmed for this API (e.g. its "Photos"
-          // endpoint under Player, not yet tested).
+          // Cricbuzz No 2's squad response gives a faceimageid (not
+          // imageId — that field is usually 0/absent on this endpoint).
+          // Unlike Cricbuzz No 1's RapidAPI /get-image (needs auth headers,
+          // so requires a real fetch()), faceimageid maps straight to a
+          // PUBLIC static file on static.cricbuzz.com — no RapidAPI call,
+          // no quota, works directly as an <img src>. See cb2FaceImageUrl().
           const player = newDream11Player(name, role, side);
+          if (p.faceimageid) player.photo = cb2FaceImageUrl(p.faceimageid);
           d11m.players.push(player);
           d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
           existingNamesLower.add(name.toLowerCase());
@@ -15309,6 +15421,10 @@ async function d11FetchSquadFromCb2(matchId) {
       return;
     }
 
+    // No separate photo-fetch step needed — cb2FaceImageUrl() already set
+    // player.photo directly above (public static CDN URL, no auth/fetch
+    // required), unlike the old No 1 imageId path which needed a real
+    // fetch() with RapidAPI headers.
     await _saveDream11MatchToFirestore(matchId, d11m);
     showNotif(`✅ Added ${addedCount} players from Cricbuzz No 2 squad!`);
     render();
@@ -15508,6 +15624,96 @@ async function d11SyncLiveMatchCb2(matchId, showToast) {
   } catch (e) {
     console.error('Cricbuzz No 2 live sync failed:', e);
     if (showToast) showNotif('Could not sync from Cricbuzz No 2 — ' + (e.message||'unknown error'), 'error');
+  }
+}
+
+// ── Cricbuzz No 2 — Automatic PRE-deadline Playing XI (catch-up) ────────
+// Same mechanism as d11AutoCheckLl3PlayingXI / d11AutoCheckLl5PlayingXI.
+// Only runs for matches where admin has the per-match "🤖 Automatic" toggle
+// on (m.cb2AutoSync). Tracked in d11m.autoCb2PreDeadlineXI = { w25, w20, w15, w10 }.
+const CB2_PRE_DEADLINE_XI_WINDOWS_MIN = [
+  { key: 'w25', mins: 25 },
+  { key: 'w20', mins: 20 },
+  { key: 'w15', mins: 15 },
+  { key: 'w10', mins: 10 },
+];
+
+async function d11AutoCheckCb2PlayingXI() {
+  const now = Date.now();
+  for (const m of Object.values(matches)) {
+    if (!m.cb2MatchId || !m.cb2AutoSync) continue; // not linked to Cricbuzz No 2, or admin hasn't armed it
+    const d11m = dream11Matches[m.id];
+    if (!d11m) continue;
+    if (d11m.scored || d11m.locked) continue;
+    if ((d11m.players || []).some(p => p.isPlayingXI)) continue; // already confirmed — stop calling
+    if (!m.deadline) continue;
+    const deadlineMs = new Date(m.deadline).getTime();
+    if (isNaN(deadlineMs)) continue;
+    const minsToDeadline = (deadlineMs - now) / 60000;
+    if (minsToDeadline <= 0 || minsToDeadline > 25) continue;
+
+    const done = d11m.autoCb2PreDeadlineXI || {};
+    let windowHit = null;
+    for (const w of CB2_PRE_DEADLINE_XI_WINDOWS_MIN) {
+      if (!done[w.key] && minsToDeadline <= w.mins) windowHit = w.key;
+    }
+    if (!windowHit) continue;
+
+    const newDone = { ...done };
+    CB2_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsToDeadline <= w.mins) newDone[w.key] = true; });
+    d11m.autoCb2PreDeadlineXI = newDone;
+    await _saveDream11MatchToFirestore(m.id, d11m);
+    try {
+      await d11CheckPlayingXIAnnouncedCb2(m.id, /*silent=*/true);
+    } catch (e) {
+      console.warn('Auto Cricbuzz No 2 pre-deadline Playing XI check failed for', m.id, e.message);
+    }
+  }
+}
+
+// ── Cricbuzz No 2 — Automatic POST-deadline sync (7 fixed windows) ──────
+// Same mechanism as d11AutoSyncLl3PostDeadline / d11AutoSyncLl5PostDeadline.
+// Fires Sync Now only, at 20/40/60/90/150/240/300 minutes after the
+// deadline, tracked in d11m.autoCb2PostDeadline = { w20, w40, w60, w90, w150, w240, w300 }.
+const CB2_AUTO_SYNC_WINDOWS_MIN = [
+  { key: 'w20', mins: 20 },
+  { key: 'w40', mins: 40 },
+  { key: 'w60', mins: 60 },
+  { key: 'w90', mins: 90 },
+  { key: 'w150', mins: 150 },
+  { key: 'w240', mins: 240 },
+  { key: 'w300', mins: 300 },
+];
+
+async function d11AutoSyncCb2PostDeadline() {
+  const now = Date.now();
+  for (const m of Object.values(matches)) {
+    if (!m.cb2MatchId || !m.cb2AutoSync) continue; // not linked to Cricbuzz No 2, or admin hasn't armed it
+    const d11m = dream11Matches[m.id];
+    if (!d11m) continue;
+    if (d11m.scored) continue; // already finalized — nothing left to sync
+    if (!m.deadline) continue;
+    const deadlineMs = new Date(m.deadline).getTime();
+    if (isNaN(deadlineMs)) continue;
+    const minsSinceDeadline = (now - deadlineMs) / 60000;
+    if (minsSinceDeadline <= 0) continue; // deadline hasn't passed yet — this is a POST-deadline scheduler only
+
+    const done = d11m.autoCb2PostDeadline || {};
+    let windowHit = null;
+    for (const w of CB2_AUTO_SYNC_WINDOWS_MIN) {
+      if (!done[w.key] && minsSinceDeadline >= w.mins) windowHit = w.key; // keep overwriting — last match wins = latest due window
+    }
+    if (!windowHit) continue;
+
+    const newDone = { ...done };
+    CB2_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsSinceDeadline >= w.mins) newDone[w.key] = true; });
+    d11m.autoCb2PostDeadline = newDone;
+    await _saveDream11MatchToFirestore(m.id, d11m);
+    try {
+      await d11SyncLiveMatchCb2(m.id, /*showToast=*/false);
+    } catch (e) {
+      console.warn('Auto Cricbuzz No 2 post-deadline sync failed for', m.id, e.message);
+    }
   }
 }
 
@@ -19062,8 +19268,10 @@ function _d11RenderCb2SyncRow(m) {
   }
   const lastSync = _d11Cb2LastSyncedAt[m.id];
   const lastSyncStr = lastSync ? new Date(lastSync).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : 'not yet';
+  const autoOn = !!m.cb2AutoSync;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(147,51,234,0.08);border:1px solid rgba(147,51,234,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#c084fc;flex:1;min-width:140px">🏏 Linked to Cricbuzz No 2 · Last synced: ${lastSyncStr}</span>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleCb2AutoSync('${m.id}')" title="Deadline se pehle 25/20/15/10min pe Playing XI, aur deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchCb2('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchCb2('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromCb2('${m.id}')">📥 Fetch Squad</button>
@@ -34703,6 +34911,8 @@ async function initApp() {
     if (typeof d11AutoSyncAllPostDeadline === 'function') d11AutoSyncAllPostDeadline().catch(function(){});
     if (typeof d11AutoCheckLl3PlayingXI === 'function') d11AutoCheckLl3PlayingXI().catch(function(){});
     if (typeof d11AutoSyncLl3PostDeadline === 'function') d11AutoSyncLl3PostDeadline().catch(function(){});
+    if (typeof d11AutoCheckCb2PlayingXI === 'function') d11AutoCheckCb2PlayingXI().catch(function(){});
+    if (typeof d11AutoSyncCb2PostDeadline === 'function') d11AutoSyncCb2PostDeadline().catch(function(){});
   }).catch(err => {
     console.error('[initApp] background Firestore sync failed:', err);
     window._homeDataSyncDone = true; // sync failed, but stop showing a loading skeleton forever — fall back to whatever we have
@@ -34771,6 +34981,8 @@ if ('serviceWorker' in navigator) {
     if (typeof d11AutoSyncAllPostDeadline === 'function') d11AutoSyncAllPostDeadline().catch(function(){});
     if (typeof d11AutoCheckLl3PlayingXI === 'function') d11AutoCheckLl3PlayingXI().catch(function(){});
     if (typeof d11AutoSyncLl3PostDeadline === 'function') d11AutoSyncLl3PostDeadline().catch(function(){});
+    if (typeof d11AutoCheckCb2PlayingXI === 'function') d11AutoCheckCb2PlayingXI().catch(function(){});
+    if (typeof d11AutoSyncCb2PostDeadline === 'function') d11AutoSyncCb2PostDeadline().catch(function(){});
     if(!currentUser||!window._fbAuthCurrentUser||!window._fbAuthCurrentUser())return;
     // Also skip if the tab is visible but idle (nobody's touched it in 15+
     // min — see D11_IDLE_DETACH_MS) — no point running Firestore writes for
@@ -34881,7 +35093,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.47.3";
+const APP_VERSION = "4.48.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
