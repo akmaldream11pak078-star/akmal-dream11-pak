@@ -2541,11 +2541,63 @@ async function _saveCustomContestToFirestore(ccId, data) {
 async function _loadAllCustomContestsFromFirestore(forceRefresh, isAppOpen) {
   return _liveLoadCollection('pp_custom_contests', () => customContests, (v) => { customContests = v; }, 'pp_custom_contests_cache', { rerenderOnUpdate: true }, forceRefresh, isAppOpen);
 }
+// BUGFIX (root cause of "admin ki id se Sync Now se score update hota hai,
+// normal user ki id khole to nahi hota"): this used to call setDoc(), which
+// Firestore's security rules treat as a full "write" — and pp_dream11_matches
+// only grants unrestricted `write` to isAdmin(). Non-admin signed-in users
+// only have `update` permission, and only for an explicit allowlist of
+// fields (players, updatedAt, lastLiveUpdateAt, autoAll*PostDeadline, etc.)
+// — see firestore.rules. Auto-sync ("Automatic: ON") runs in EVERY user's
+// browser tab, not just the admin's, so whenever a normal user's tab was
+// the one to fire the sync, setDoc() was silently rejected by the rules
+// (permission-denied, swallowed by the try/catch below with only a console
+// warning) — balance/points simply never updated for anyone unless the
+// admin's own tab happened to run the sync. Switching to updateDoc() makes
+// this match the `update` rule instead of the `write` rule, so it succeeds
+// for any signed-in user exactly like the manual "Sync Now" button already
+// does via _updateDream11MatchScoringFields. Falls back to setDoc only if
+// the document doesn't exist yet (updateDoc requires an existing doc),
+// which only ever happens for a brand-new match — realistically admin-only.
+// Fields the non-admin `update` rule on pp_dream11_matches allows
+// (see firestore.rules onlyFieldsChanged([...]) for this collection).
+// Anything outside this list (participants, pools, teams, etc.) must go
+// through a different write path (the paid-contest-join transaction,
+// admin tools, etc.) — sending it here would trip the rule's allowlist
+// check and get the whole update rejected again.
+const D11_NONADMIN_UPDATE_FIELDS = new Set([
+  'players', 'updatedAt', 'lastLiveUpdateAt', 'scored',
+  'colPasteText1', 'colPasteText2', 'pointsCalculatedAt',
+  'autoAllPreDeadlineXI', 'autoAllPostDeadline',
+  'autoLl3PreDeadlineXI', 'autoLl3PostDeadline',
+  'autoLl5PreDeadlineXI', 'autoLl5PostDeadline'
+]);
 async function _saveDream11MatchToFirestore(matchId, data) {
   if (!window._fbDb || !window._fbFns) return;
-  const { doc, setDoc } = window._fbFns;
-  return setDoc(doc(window._fbDb, 'pp_dream11_matches', matchId), _stampUpdatedAt(data))
-    .catch(e => { console.error('Dream11 match save error:', e); throw e; });
+  const { doc, updateDoc, setDoc } = window._fbFns;
+  const ref = doc(window._fbDb, 'pp_dream11_matches', matchId);
+  const stamped = _stampUpdatedAt(data);
+
+  // Admin (and sub-admin, via its own broader rule) can write any field —
+  // don't filter, since 100+ admin-panel call sites (contest cancel,
+  // refund, prize distribution, participant edits, etc.) legitimately
+  // touch fields far outside the non-admin scoring allowlist below.
+  const needsFiltering = typeof isAdmin === 'function' && !isAdmin() && !(typeof isSubAdminXI === 'function' && isSubAdminXI());
+  const payload = needsFiltering
+    ? Object.fromEntries(Object.entries(stamped).filter(([k]) => D11_NONADMIN_UPDATE_FIELDS.has(k)))
+    : stamped;
+
+  try {
+    return await updateDoc(ref, payload);
+  } catch (e) {
+    if (e && (e.code === 'not-found' || e.code === 'failed-precondition')) {
+      // Doc genuinely doesn't exist yet — fall back to create-via-setDoc
+      // with the FULL data (setDoc on a new doc is admin-only anyway, so
+      // this path only realistically succeeds when an admin is signed in).
+      return setDoc(ref, stamped).catch(e2 => { console.error('Dream11 match save error (setDoc fallback):', e2); throw e2; });
+    }
+    console.error('Dream11 match save error:', e.code || e.message, e);
+    throw e;
+  }
 }
 
 async function _updateDream11MatchScoringFields(matchId, fields) {
@@ -3722,30 +3774,41 @@ async function joinMegaContest(matchId) {
   }
 }
 
-// ── Atomic paid-contest join: reads match + user docs inside ONE Firestore
-// transaction, verifies the user hasn't already joined and has enough
-// balance, then writes both updates together. If two requests race, only
-// the first to commit succeeds — the second sees the updated participants
-// list on retry and fails cleanly with "already joined", instead of both
-// silently succeeding and double-charging the user. ──
-// ── Paid-contest join: simplified from a Firestore transaction to plain
-// reads + writes (mirrors _atomicJoinFreeContest below), after real-world
-// use showed runTransaction's automatic retry-on-conflict behavior could
-// itself trigger "resource-exhausted" under load — retries repeat BOTH
-// reads and writes each time, so a handful of near-simultaneous joins
-// could multiply into many times that in actual operations, whereas a
-// plain get+update always costs exactly one read + one write per call.
-// This trades away perfect atomicity (a very unlucky double-tap could in
-// theory still slip through) for reliability; the calling join functions
-// already disable their button and use the _joinInFlight guard the
-// instant they're tapped, which covers the realistic double-tap case.
+// ── Atomic paid-contest join: uses a real Firestore runTransaction so the
+// balance deduction (user doc) and the participant-list write (match doc)
+// commit together, as one all-or-nothing operation. ──
+// HISTORY: this used to be two separate plain get+update calls with a
+// manual "rollback" afterward (deduct balance, try to write the match doc,
+// and if that failed, try to refund). That left a real gap: if the
+// connection dropped or the tab closed between the two writes, the user
+// ended up charged with no contest entry — a "CONFIRMED" wallet
+// transaction but no name in the participants list (reported as
+// "orphaned contest entries", previously fixed by hand via the admin
+// refund tool). A plain get+update can never fully close that gap,
+// because the two writes are genuinely independent network calls — there
+// is always a window where one has landed and the other hasn't, and if
+// the app dies in that window, no rollback code ever gets to run.
+// A real runTransaction closes that window: Firestore guarantees both
+// writes commit together server-side, or neither does. There is no
+// "balance deducted but not joined" state reachable anymore — if the
+// match-doc write can't happen (network drop, permission error, tab
+// closed), the balance write never happens either, atomically, with no
+// separate rollback step and no way for a rollback itself to fail.
+// The earlier concern about runTransaction's automatic retry-on-conflict
+// multiplying reads/writes under load is addressed by not fighting real
+// contention: a genuine conflict (someone else's write landing between
+// our read and commit) simply surfaces as a normal "please try again"
+// error on this attempt rather than being silently retried in a loop.
+// Realistic contention here is a single user's own double-tap, which the
+// _joinInFlight guard in the calling functions already prevents before
+// this is ever invoked twice for the same tap.
 async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection, participantsField, poolField, txType, alreadyJoinedMsg, participantsAreObjectMap = false, teamId = null, maxParticipants = null, fullMsg = null }) {
   if (!window._fbDb || !window._fbFns) {
     showNotif('Connection not ready — please try again', 'error');
     return null;
   }
-  const { doc, getDoc, updateDoc } = window._fbFns;
-  if (!doc || !getDoc || !updateDoc) {
+  const { doc, runTransaction } = window._fbFns;
+  if (!doc || !runTransaction) {
     showNotif('Firebase not ready — please refresh the page', 'error');
     return null;
   }
@@ -3754,107 +3817,101 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
   const userRef = doc(window._fbDb, 'pp_users', safeKey);
   const teamsField = participantsField + 'Teams';
 
+  let outcome = null; // { balance, transactions, matchData } on success
+  let notifMsg = null;
+
   try {
-    const [matchSnap, userSnap] = await Promise.all([getDoc(matchRef), getDoc(userRef)]);
-    if (!matchSnap.exists()) { showNotif('Could not find match or user data — please refresh', 'error'); return null; }
-    if (!userSnap.exists()) { showNotif('Could not find match or user data — please refresh', 'error'); return null; }
+    await runTransaction(window._fbDb, async (tx) => {
+      // Reads must happen before writes inside a Firestore transaction.
+      const matchSnap = await tx.get(matchRef);
+      const userSnap = await tx.get(userRef);
 
-    const matchData = matchSnap.data();
-    const userData = userSnap.data();
-
-    const participants = matchData[participantsField] || (participantsAreObjectMap ? {} : []);
-    const alreadyJoined = participantsAreObjectMap
-      ? !!participants[currentUser.email]
-      : participants.includes(currentUser.email);
-    if (alreadyJoined) { showNotif(alreadyJoinedMsg, 'error'); return null; }
-
-    // Slot-capped contests (e.g. Slot 20): re-check the cap against the
-    // freshly-read Firestore data, not just the local pre-check in the
-    // caller — two people tapping Join at the exact same moment when 19
-    // are already in could otherwise both pass the local check and both
-    // end up joining a "20-max" contest, letting it overshoot to 21.
-    if (maxParticipants != null) {
-      const currentCount = participantsAreObjectMap ? Object.keys(participants).length : participants.length;
-      if (currentCount >= maxParticipants) {
-        showNotif(fullMsg || `This contest is full (${maxParticipants}/${maxParticipants} joined).`, 'error');
-        return null;
+      if (!matchSnap.exists() || !userSnap.exists()) {
+        notifMsg = 'Could not find match or user data — please refresh';
+        return; // no writes issued — transaction commits as a no-op
       }
-    }
 
-    if ((userData.balance || 0) < entryFeeAmount) { showNotif(`Insufficient balance — Rs ${entryFeeAmount} required`, 'error'); return null; }
+      const matchData = matchSnap.data();
+      const userData = userSnap.data();
 
-    const newBalance = (userData.balance || 0) - entryFeeAmount;
-    const newTransactions = userData.transactions || [];
-    newTransactions.unshift({
-      id: uid(), type: txType, amount: entryFeeAmount,
-      matchId: matchId || null, date: getDateTime(), status: 'confirmed'
+      const participants = matchData[participantsField] || (participantsAreObjectMap ? {} : []);
+      const alreadyJoined = participantsAreObjectMap
+        ? !!participants[currentUser.email]
+        : participants.includes(currentUser.email);
+      if (alreadyJoined) { notifMsg = alreadyJoinedMsg; return; }
+
+      // Slot-capped contests (e.g. Slot 20): re-check the cap against data
+      // read inside THIS transaction attempt. If two people tap Join at
+      // the exact same moment when 19 are already in, Firestore's
+      // transaction conflict detection guarantees only one of them can
+      // ever commit with a count below the cap — the other's tx.get()
+      // picks up the just-committed write on retry and this check catches
+      // it, instead of both overshooting the cap to 21.
+      if (maxParticipants != null) {
+        const currentCount = participantsAreObjectMap ? Object.keys(participants).length : participants.length;
+        if (currentCount >= maxParticipants) {
+          notifMsg = fullMsg || `This contest is full (${maxParticipants}/${maxParticipants} joined).`;
+          return;
+        }
+      }
+
+      if ((userData.balance || 0) < entryFeeAmount) {
+        notifMsg = `Insufficient balance — Rs ${entryFeeAmount} required`;
+        return;
+      }
+
+      const newBalance = (userData.balance || 0) - entryFeeAmount;
+      const newTransactions = userData.transactions || [];
+      newTransactions.unshift({
+        id: uid(), type: txType, amount: entryFeeAmount,
+        matchId: matchId || null, date: getDateTime(), status: 'confirmed'
+      });
+
+      const updatedMatchData = { ...matchData };
+      if (participantsAreObjectMap) {
+        updatedMatchData[participantsField] = { ...participants, [currentUser.email]: true };
+      } else {
+        updatedMatchData[participantsField] = [...participants, currentUser.email];
+      }
+      updatedMatchData[poolField] = (matchData[poolField] || 0) + entryFeeAmount;
+      if (Array.isArray(updatedMatchData.participants) && !updatedMatchData.participants.includes(currentUser.email)) {
+        updatedMatchData.participants = [...updatedMatchData.participants, currentUser.email];
+      }
+      if (teamId) {
+        updatedMatchData[teamsField] = { ...(matchData[teamsField] || {}), [currentUser.email]: teamId };
+      }
+
+      // Stamp updatedAt so other users' incremental background refresh
+      // (which only asks Firestore for docs newer than their last-seen
+      // watermark) actually picks up this join.
+      const matchUpdate = {
+        [participantsField]: updatedMatchData[participantsField],
+        [poolField]: updatedMatchData[poolField],
+        updatedAt: Date.now()
+      };
+      // Only include `participants` if it's actually an array — Dream11
+      // match docs often don't have this legacy field at all, and sending
+      // `undefined` to Firestore throws a client-side "invalid-argument"
+      // error that aborts the whole transaction before it even reaches
+      // the rules.
+      if (Array.isArray(updatedMatchData.participants)) {
+        matchUpdate.participants = updatedMatchData.participants;
+      }
+      if (teamId) matchUpdate[teamsField] = updatedMatchData[teamsField];
+
+      // Both writes issued inside the same transaction — Firestore commits
+      // them together server-side or not at all. There is no separate
+      // rollback step (and no way for a rollback to itself fail) because
+      // there is no partial-commit state to roll back from.
+      tx.update(userRef, { balance: newBalance, transactions: newTransactions });
+      tx.update(matchRef, matchUpdate);
+
+      outcome = { balance: newBalance, transactions: newTransactions, matchData: updatedMatchData };
     });
 
-    const updatedMatchData = { ...matchData };
-    if (participantsAreObjectMap) {
-      updatedMatchData[participantsField] = { ...participants, [currentUser.email]: true };
-    } else {
-      updatedMatchData[participantsField] = [...participants, currentUser.email];
-    }
-    updatedMatchData[poolField] = (matchData[poolField] || 0) + entryFeeAmount;
-    if (Array.isArray(updatedMatchData.participants) && !updatedMatchData.participants.includes(currentUser.email)) {
-      updatedMatchData.participants = [...updatedMatchData.participants, currentUser.email];
-    }
-    if (teamId) {
-      updatedMatchData[teamsField] = { ...(matchData[teamsField] || {}), [currentUser.email]: teamId };
-    }
-
-    // Stamp updatedAt so other users' incremental background refresh
-    // (which only asks Firestore for docs newer than their last-seen
-    // watermark) actually picks up this join. Without this, a contest
-    // join would silently never be considered "new" by that check, and
-    // other users wouldn't see the updated participant count/pool until
-    // a full manual reload happened to touch this doc for some other
-    // reason.
-    const matchUpdate = {
-      [participantsField]: updatedMatchData[participantsField],
-      [poolField]: updatedMatchData[poolField],
-      updatedAt: Date.now()
-    };
-    // Only include `participants` if it's actually an array — Dream11
-    // match docs often don't have this legacy field at all, and sending
-    // `undefined` to Firestore throws a client-side "invalid-argument"
-    // error that aborts the whole join before it even reaches the rules.
-    if (Array.isArray(updatedMatchData.participants)) {
-      matchUpdate.participants = updatedMatchData.participants;
-    }
-    if (teamId) matchUpdate[teamsField] = updatedMatchData[teamsField];
-
-    // Two separate plain writes (not a transaction) — same as the free
-    // contest join. Update the user doc first (money movement), then the
-    // match doc. If the second write fails, roll back the first
-    // immediately (refund balance + remove the just-added transaction)
-    // instead of leaving the user charged with no recorded contest entry
-    // — that partial-failure state is exactly what silently happened
-    // before this rollback existed: transaction shows CONFIRMED and money
-    // is deducted, but the user never actually appears in the contest's
-    // participant list because the match-doc write never landed.
-    await updateDoc(userRef, { balance: newBalance, transactions: newTransactions });
-    try {
-      await updateDoc(matchRef, matchUpdate);
-    } catch (matchWriteErr) {
-      console.error('Match-doc write failed after balance was already deducted — rolling back:', matchWriteErr);
-      try {
-        await updateDoc(userRef, { balance: userData.balance || 0, transactions: userData.transactions || [] });
-      } catch (rollbackErr) {
-        // Rollback itself failed — this is the one case that can still
-        // leave a user charged with no entry. Surface it loudly so it can
-        // be manually corrected (e.g. via the admin Credit button) rather
-        // than silently disappearing like before.
-        console.error('CRITICAL: rollback after failed match-doc write also failed. User may be charged with no contest entry:', rollbackErr);
-        showNotif('Join failed partway through, and the automatic refund also failed — please contact support so we can fix your balance manually.', 'error');
-        return null;
-      }
-      showNotif('Join failed — your balance was not charged (refunded automatically). Please try again.', 'error');
-      return null;
-    }
-
-    return { balance: newBalance, transactions: newTransactions, matchData: updatedMatchData };
+    if (notifMsg) { showNotif(notifMsg, 'error'); return null; }
+    if (!outcome) { showNotif('Join failed — please try again', 'error'); return null; }
+    return outcome;
   } catch (e) {
     console.error('Contest join failed:', e);
     showNotif(`Join failed: ${e.code || e.message || 'unknown error'}`, 'error');
@@ -13700,7 +13757,9 @@ async function d11SyncLiveMatchSbx(matchId, showToast) {
       if (resultText) {
         showNotif(`🏁 Result detected (${resultText}) — tap Sync Now once more to confirm and finalize the match.`);
       } else if (battersApplied === 0 && bowlersApplied === 0) {
-        showNotif('⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).', 'error');
+        showNotif((typeof isAdmin === 'function' && (isAdmin() || (typeof isSubAdminXI === 'function' && isSubAdminXI())))
+          ? '⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).'
+          : '⚠️ Synced, but 0 players updated — please try again shortly.', 'error');
       } else {
         showNotif(`✅ Live data synced — ${battersApplied} batting + ${bowlersApplied} bowling + ${fieldersApplied} fielding rows updated`);
       }
@@ -14139,7 +14198,7 @@ async function d11ToggleAllAutoSync(matchId) {
   try {
     await _saveMatchToFirestore(matchId, m);
     showNotif(m.allAutoSync
-      ? '🤖 Automatic armed — deadline se pehle 25/20/15/10min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
+      ? '🤖 Automatic armed — deadline se pehle 25/20/15/10min pe Playing XI, deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now, sab khud-b-khud chalega'
       : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
     render();
   } catch(e) {
@@ -14481,7 +14540,9 @@ async function d11SyncLiveMatchAll(matchId, showToast) {
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (battersApplied === 0 && bowlersApplied === 0) {
-        showNotif('⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).', 'error');
+        showNotif((typeof isAdmin === 'function' && (isAdmin() || (typeof isSubAdminXI === 'function' && isSubAdminXI())))
+          ? '⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).'
+          : '⚠️ Synced, but 0 players updated — please try again shortly.', 'error');
       } else {
         showNotif(`✅ Live data synced — ${battersApplied} batting + ${bowlersApplied} bowling rows updated`);
       }
@@ -14541,14 +14602,16 @@ async function d11AutoCheckAllPlayingXI() {
 
 // ── Advance Live Line — Automatic POST-deadline sync (5 fixed windows) ───
 // Same mechanism as d11AutoSyncLl5PostDeadline. Fires Sync Now only, at
-// 30/60/90/120/240 minutes after the deadline, tracked in
-// d11m.autoAllPostDeadline = { w30, w60, w90, w120, w240 }.
+// 20/40/60/90/150/240/300 minutes after the deadline, tracked in
+// d11m.autoAllPostDeadline = { w20, w40, w60, w90, w150, w240, w300 }.
 const ALL_AUTO_SYNC_WINDOWS_MIN = [
-  { key: 'w30', mins: 30 },
+  { key: 'w20', mins: 20 },
+  { key: 'w40', mins: 40 },
   { key: 'w60', mins: 60 },
   { key: 'w90', mins: 90 },
-  { key: 'w120', mins: 120 },
+  { key: 'w150', mins: 150 },
   { key: 'w240', mins: 240 },
+  { key: 'w300', mins: 300 },
 ];
 
 async function d11AutoSyncAllPostDeadline() {
@@ -14599,7 +14662,7 @@ function _d11RenderAllSyncRow(m) {
   const autoOn = !!m.allAutoSync;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#a78bfa;flex:1;min-width:140px">🚀 Linked to Advance Live Line · Last synced: ${lastSyncStr}</span>
-    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleAllAutoSync('${m.id}')" title="Deadline se pehle 25/20/15/10min pe Playing XI, aur deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleAllAutoSync('${m.id}')" title="Deadline se pehle 25/20/15/10min pe Playing XI, aur deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchAll('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchAll('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromAll('${m.id}')">📥 Fetch Squad</button>
@@ -15725,7 +15788,9 @@ async function d11SyncLiveMatchCll(matchId, showToast) {
       if (resultText) {
         showNotif(`🏁 Result detected (${resultText}) — tap Sync Now once more to confirm and finalize the match.`);
       } else if (battersApplied === 0 && bowlersApplied === 0) {
-        showNotif('⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).', 'error');
+        showNotif((typeof isAdmin === 'function' && (isAdmin() || (typeof isSubAdminXI === 'function' && isSubAdminXI())))
+          ? '⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).'
+          : '⚠️ Synced, but 0 players updated — please try again shortly.', 'error');
       } else {
         showNotif(`✅ Live data synced — ${battersApplied} batting + ${bowlersApplied} bowling + ${fieldersApplied} fielding rows updated`);
       }
@@ -16026,7 +16091,9 @@ async function d11SyncLiveMatchLl2(matchId, showToast) {
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (battersApplied === 0 && bowlersApplied === 0) {
-        showNotif('⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).', 'error');
+        showNotif((typeof isAdmin === 'function' && (isAdmin() || (typeof isSubAdminXI === 'function' && isSubAdminXI())))
+          ? '⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).'
+          : '⚠️ Synced, but 0 players updated — please try again shortly.', 'error');
       } else {
         showNotif(`✅ Live data synced — ${battersApplied} batting + ${bowlersApplied} bowling + ${fieldersApplied} fielding rows updated`);
       }
@@ -16457,7 +16524,7 @@ async function d11ToggleLl3AutoSync(matchId) {
   try {
     await _saveMatchToFirestore(matchId, m);
     showNotif(m.ll3AutoSync
-      ? '🤖 Automatic armed — deadline se pehle 25/20/15/10min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
+      ? '🤖 Automatic armed — deadline se pehle 25/20/15/10min pe Playing XI, deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now, sab khud-b-khud chalega'
       : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
     render();
   } catch(e) {
@@ -16846,7 +16913,9 @@ async function d11SyncLiveMatchLl3(matchId, showToast) {
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (battersApplied === 0 && bowlersApplied === 0) {
-        showNotif('⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).', 'error');
+        showNotif((typeof isAdmin === 'function' && (isAdmin() || (typeof isSubAdminXI === 'function' && isSubAdminXI())))
+          ? '⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).'
+          : '⚠️ Synced, but 0 players updated — please try again shortly.', 'error');
       } else {
         showNotif(`✅ Live data synced — ${battersApplied} batting + ${bowlersApplied} bowling + ${fieldersApplied} fielding rows updated`);
       }
@@ -16902,16 +16971,18 @@ async function d11AutoCheckLl3PlayingXI() {
   }
 }
 
-// ── Cricket Live Line 3 — Automatic POST-deadline sync (5 fixed windows) ──
+// ── Cricket Live Line 3 — Automatic POST-deadline sync (7 fixed windows) ──
 // Same mechanism as d11AutoSyncLl5PostDeadline. Fires Sync Now only, at
-// 30/60/90/120/240 minutes after the deadline, tracked in
-// d11m.autoLl3PostDeadline = { w30, w60, w90, w120, w240 }.
+// 20/40/60/90/150/240/300 minutes after the deadline, tracked in
+// d11m.autoLl3PostDeadline = { w20, w40, w60, w90, w150, w240, w300 }.
 const LL3_AUTO_SYNC_WINDOWS_MIN = [
-  { key: 'w30', mins: 30 },
+  { key: 'w20', mins: 20 },
+  { key: 'w40', mins: 40 },
   { key: 'w60', mins: 60 },
   { key: 'w90', mins: 90 },
-  { key: 'w120', mins: 120 },
+  { key: 'w150', mins: 150 },
   { key: 'w240', mins: 240 },
+  { key: 'w300', mins: 300 },
 ];
 
 async function d11AutoSyncLl3PostDeadline() {
@@ -16959,7 +17030,7 @@ function _d11RenderLl3SyncRow(m) {
   const autoOn = !!m.ll3AutoSync;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#fbbf24;flex:1;min-width:140px">⚡ Linked to Cricket Live Line 3 · Last synced: ${lastSyncStr}</span>
-    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleLl3AutoSync('${m.id}')" title="Deadline se pehle 25/20/15/10min pe Playing XI, aur deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleLl3AutoSync('${m.id}')" title="Deadline se pehle 25/20/15/10min pe Playing XI, aur deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchLl3('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchLl3('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromLl3('${m.id}')">📥 Fetch Squad</button>
@@ -17748,7 +17819,9 @@ async function d11SyncLiveMatchLl4(matchId, showToast) {
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (battersApplied === 0 && bowlersApplied === 0) {
-        showNotif('⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).', 'error');
+        showNotif((typeof isAdmin === 'function' && (isAdmin() || (typeof isSubAdminXI === 'function' && isSubAdminXI())))
+          ? '⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).'
+          : '⚠️ Synced, but 0 players updated — please try again shortly.', 'error');
       } else {
         showNotif(`✅ Live data synced — ${battersApplied} batting + ${bowlersApplied} bowling + ${fieldersApplied} fielding rows updated`);
       }
@@ -18269,7 +18342,7 @@ async function d11ToggleLl5AutoSync(matchId) {
   try {
     await _saveMatchToFirestore(matchId, m);
     showNotif(m.ll5AutoSync
-      ? '🤖 Automatic armed — deadline se pehle 25/20/15/10min pe Playing XI, deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now, sab khud-b-khud chalega'
+      ? '🤖 Automatic armed — deadline se pehle 25/20/15/10min pe Playing XI, deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now, sab khud-b-khud chalega'
       : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
     render();
   } catch(e) {
@@ -18508,12 +18581,16 @@ async function d11AutoCheckLl5PlayingXI() {
   }
 }
 
+// 20/40/60/90/150/240/300 minutes after the deadline, tracked in
+// d11m.autoLl5PostDeadline = { w20, w40, w60, w90, w150, w240, w300 }.
 const LL5_AUTO_SYNC_WINDOWS_MIN = [
-  { key: 'w30', mins: 30 },
+  { key: 'w20', mins: 20 },
+  { key: 'w40', mins: 40 },
   { key: 'w60', mins: 60 },
   { key: 'w90', mins: 90 },
-  { key: 'w120', mins: 120 },
+  { key: 'w150', mins: 150 },
   { key: 'w240', mins: 240 },
+  { key: 'w300', mins: 300 },
 ];
 
 async function d11AutoSyncLl5PostDeadline() {
@@ -18715,7 +18792,9 @@ async function d11SyncLiveMatchLl5(matchId, showToast) {
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (battersApplied === 0 && bowlersApplied === 0) {
-        showNotif('⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).', 'error');
+        showNotif((typeof isAdmin === 'function' && (isAdmin() || (typeof isSubAdminXI === 'function' && isSubAdminXI())))
+          ? '⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).'
+          : '⚠️ Synced, but 0 players updated — please try again shortly.', 'error');
       } else {
         showNotif(`✅ Live data synced — ${battersApplied} batting + ${bowlersApplied} bowling + ${fieldersApplied} fielding rows updated`);
       }
@@ -18740,7 +18819,7 @@ function _d11RenderLl5SyncRow(m) {
   const autoOn = !!m.ll5AutoSync;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(8,145,178,0.08);border:1px solid rgba(8,145,178,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#22d3ee;flex:1;min-width:140px">⚡ Linked to Cricket Live Line 5 · Last synced: ${lastSyncStr}</span>
-    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleLl5AutoSync('${m.id}')" title="Deadline se pehle 25/20/15/10min pe Playing XI, aur deadline ke baad 30min/1h/1h30/2h/4h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleLl5AutoSync('${m.id}')" title="Deadline se pehle 25/20/15/10min pe Playing XI, aur deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchLl5('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchLl5('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromLl5('${m.id}')">📥 Fetch Squad</button>
@@ -20272,7 +20351,9 @@ async function d11SyncLiveMatch(matchId, showToast) {
         // always a name-matching or shape mismatch, not "nothing happened
         // in the match yet". Flag it clearly instead of a generic success
         // toast so the admin knows to check the raw data.
-        showNotif('⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected Cricbuzz format).', 'error');
+        showNotif((typeof isAdmin === 'function' && (isAdmin() || (typeof isSubAdminXI === 'function' && isSubAdminXI())))
+          ? '⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).'
+          : '⚠️ Synced, but 0 players updated — please try again shortly.', 'error');
       } else {
         showNotif(`✅ Live data synced — ${battersApplied} batting + ${bowlersApplied} bowling + ${fieldersApplied} fielding rows updated`);
       }
@@ -20423,7 +20504,9 @@ async function d11SyncLiveMatchEspn(matchId, showToast) {
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (battersApplied === 0 && bowlersApplied === 0) {
-        showNotif('⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected ESPN Cricinfo format).', 'error');
+        showNotif((typeof isAdmin === 'function' && (isAdmin() || (typeof isSubAdminXI === 'function' && isSubAdminXI())))
+          ? '⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).'
+          : '⚠️ Synced, but 0 players updated — please try again shortly.', 'error');
       } else {
         showNotif(`✅ Live data synced — ${battersApplied} batting + ${bowlersApplied} bowling + ${fieldersApplied} fielding rows updated`);
       }
@@ -34804,25 +34887,32 @@ const CHECK_INTERVAL_MS = 60 * 1000;
 
 function _createUpdateBanner() {
   if (document.getElementById('d11-update-banner')) return;
+  const backdrop = document.createElement('div');
+  backdrop.id = 'd11-update-backdrop';
+  backdrop.style.cssText = `
+    position:fixed; inset:0; z-index:9998;
+    background:rgba(0,0,0,0.55);
+  `;
+  document.body.appendChild(backdrop);
   const banner = document.createElement('div');
   banner.id = 'd11-update-banner';
   banner.style.cssText = `
-    position:fixed; left:14px; right:14px; bottom:96px; z-index:9999;
+    position:fixed; left:14px; right:14px; top:50%; transform:translateY(-50%); z-index:9999;
     background:linear-gradient(135deg,#2563eb,#1d4ed8); color:#fff;
-    border-radius:16px; padding:14px 16px; display:flex; align-items:center;
-    justify-content:space-between; gap:12px; box-shadow:0 10px 30px rgba(37,99,235,0.5);
-    font-family:'Inter',sans-serif; animation:d11SlideUp 0.3s ease;
+    border-radius:16px; padding:20px 18px; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:14px; box-shadow:0 10px 40px rgba(0,0,0,0.45);
+    font-family:'Inter',sans-serif; animation:d11PopIn 0.25s ease;
   `;
   banner.innerHTML = `
     <style>
-      @keyframes d11SlideUp { from{opacity:0;transform:translateY(20px)} to{opacity:1;transform:translateY(0)} }
+      @keyframes d11PopIn { from{opacity:0;transform:scale(0.92)} to{opacity:1;transform:scale(1)} }
     </style>
-    <div style="font-size:13.5px; font-weight:600; line-height:1.3;">
-      🚀 New version available!<br><span style="font-size:11.5px;opacity:0.85;font-weight:400;">Update karein latest features ke liye</span>
+    <div style="font-size:15px; font-weight:600; line-height:1.4; text-align:center;">
+      🚀 New version available!<br><span style="font-size:12.5px;opacity:0.85;font-weight:400;">Update karein latest features ke liye</span>
     </div>
     <button id="d11-update-btn" style="
       background:#fff; color:#1d4ed8; border:none; border-radius:10px;
-      padding:9px 16px; font-weight:700; font-size:13px; font-family:Rajdhani,sans-serif;
+      padding:10px 28px; font-weight:700; font-size:14px; font-family:Rajdhani,sans-serif;
       white-space:nowrap; cursor:pointer;
     ">Update</button>
   `;
