@@ -1801,60 +1801,23 @@ async function adminToggleSubAdminXI(email) {
 // and is a no-op afterwards since the live listeners started here stay
 // in sync on their own.
 let _adminDataLoadStarted = false;
-let _adminDataLoadInProgress = false;
 function _ensureAdminDataLoaded() {
   if (!isAdmin() || _adminDataLoadStarted) return;
-  if (_adminDataLoadInProgress) return; // Prevent duplicate parallel loads
   _adminDataLoadStarted = true;
-  _adminDataLoadInProgress = true;
-  
-  // Show loading indicator with progress
-  showNotif('📥 Loading 13 collections in parallel...', 'success');
-  
-  const loadStartTime = Date.now();
-  let loadedCount = 0;
-  const totalCollections = 13;
-  
-  // Helper to track load progress
-  const trackLoad = (promise, name) => {
-    return promise.then(result => {
-      loadedCount++;
-      console.log(`[${loadedCount}/${totalCollections}] ✅ ${name} loaded`);
-      return result;
-    }).catch(err => {
-      console.error(`[${loadedCount}/${totalCollections}] ❌ ${name} failed:`, err);
-      return null;
-    });
-  };
-  
-  // Parallel load - sab collections parallel fetch honge (Maximum concurrency)
   Promise.all([
-    trackLoad(_loadAllDeletedMatchesFromFirestore(), 'Deleted Matches'),
-    trackLoad(_loadAllDeletedD11MatchesFromFirestore(), 'Deleted D11 Matches'),
-    trackLoad(_loadAllUsersFromFirestore(true), 'All Users'),
-    trackLoad(typeof _loadCricbuzzApiLog === 'function' ? _loadCricbuzzApiLog() : Promise.resolve(), 'Cricbuzz Logs'),
-    trackLoad(typeof _loadEspnCricinfoApiLog === 'function' ? _loadEspnCricinfoApiLog() : Promise.resolve(), 'ESPN Cricinfo Logs'),
-    trackLoad(typeof _loadCllApiLog === 'function' ? _loadCllApiLog() : Promise.resolve(), 'CLL Logs'),
-    trackLoad(typeof _loadCb2ApiLog === 'function' ? _loadCb2ApiLog() : Promise.resolve(), 'CB2 Logs'),
-    trackLoad(typeof _loadLl2ApiLog === 'function' ? _loadLl2ApiLog() : Promise.resolve(), 'LL2 Logs'),
-    trackLoad(typeof _loadLl3ApiLog === 'function' ? _loadLl3ApiLog() : Promise.resolve(), 'LL3 Logs'),
-    trackLoad(typeof _loadLl4ApiLog === 'function' ? _loadLl4ApiLog() : Promise.resolve(), 'LL4 Logs'),
-    trackLoad(typeof _loadNewsFromFirestore === 'function' ? _loadNewsFromFirestore() : Promise.resolve(), 'News'),
-    trackLoad(typeof _loadLl5ApiLog === 'function' ? _loadLl5ApiLog() : Promise.resolve(), 'LL5 Logs'),
-    trackLoad(typeof _loadSbxApiLog === 'function' ? _loadSbxApiLog() : Promise.resolve(), 'SBX Logs'),
-  ]).then(() => {
-    const loadTime = Date.now() - loadStartTime;
-    console.log(`✅ All ${totalCollections} collections loaded in ${loadTime}ms`);
-    showNotif(`⚡ Admin data ready! ${loadTime}ms`, 'success');
-    _adminDataLoadInProgress = false;
-    render();
-  }).catch((err) => {
-    const loadTime = Date.now() - loadStartTime;
-    console.error(`❌ Admin data load error after ${loadTime}ms:`, err);
-    showNotif('✅ Admin data loaded (some collections skipped)', 'success');
-    _adminDataLoadInProgress = false;
-    render(); // Render anyways with partially loaded data
-  });
+    _loadAllDeletedMatchesFromFirestore(),
+    _loadAllDeletedD11MatchesFromFirestore(),
+    typeof _loadCricbuzzApiLog === 'function' ? _loadCricbuzzApiLog() : Promise.resolve(),
+    typeof _loadEspnCricinfoApiLog === 'function' ? _loadEspnCricinfoApiLog() : Promise.resolve(),
+    typeof _loadCllApiLog === 'function' ? _loadCllApiLog() : Promise.resolve(),
+    typeof _loadCb2ApiLog === 'function' ? _loadCb2ApiLog() : Promise.resolve(),
+    typeof _loadLl2ApiLog === 'function' ? _loadLl2ApiLog() : Promise.resolve(),
+    typeof _loadLl3ApiLog === 'function' ? _loadLl3ApiLog() : Promise.resolve(),
+    typeof _loadLl4ApiLog === 'function' ? _loadLl4ApiLog() : Promise.resolve(),
+    typeof _loadNewsFromFirestore === 'function' ? _loadNewsFromFirestore() : Promise.resolve(),
+    typeof _loadLl5ApiLog === 'function' ? _loadLl5ApiLog() : Promise.resolve(),
+    typeof _loadSbxApiLog === 'function' ? _loadSbxApiLog() : Promise.resolve(),
+  ]).then(() => render()).catch(() => {});
 }
 
 async function _sha256(text) {
@@ -6057,13 +6020,6 @@ function _renderInner() {
   }
   _navPushIfChanged(tab);
 
-  // Auto-refresh upcoming matches jab user home (profile) tab khol rahe ho
-  if (tab === 'home') {
-    startAutoRefreshUpcomingMatches();
-  } else {
-    stopAutoRefreshUpcomingMatches();
-  }
-
   app.innerHTML = `
     ${renderHeader()}
     <div class="page">
@@ -7193,102 +7149,7 @@ function renderTpinSetupModal() {
   </div>`;
 }
 
-// ── ADMIN FAST CACHE ────────────────────────────────────────────────────────────
-// IndexedDB for faster admin data caching
-function _getAdminCacheDb() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open('PakDream11_AdminCache', 1);
-    req.onerror = () => reject(req.error);
-    req.onsuccess = () => resolve(req.result);
-    req.onupgradeneeded = (e) => {
-      const db = e.target.result;
-      if (!db.objectStoreNames.contains('collections')) {
-        db.createObjectStore('collections', { keyPath: 'name' });
-      }
-    };
-  });
-}
-
-async function _cacheAdminCollection(name, data) {
-  try {
-    const db = await _getAdminCacheDb();
-    const tx = db.transaction('collections', 'readwrite');
-    const os = tx.objectStore('collections');
-    os.put({ name, data, timestamp: Date.now() });
-  } catch(e) {
-    console.log('Cache write skipped:', e.message);
-  }
-}
-
-async function _getCachedAdminCollection(name, maxAgeMs = 5 * 60 * 1000) {
-  try {
-    const db = await _getAdminCacheDb();
-    const tx = db.transaction('collections', 'readonly');
-    const os = tx.objectStore('collections');
-    return new Promise((resolve) => {
-      const req = os.get(name);
-      req.onsuccess = () => {
-        const item = req.result;
-        if (item && (Date.now() - item.timestamp < maxAgeMs)) {
-          resolve(item.data);
-        } else {
-          resolve(null);
-        }
-      };
-      req.onerror = () => resolve(null);
-    });
-  } catch(e) {
-    return null;
-  }
-}
-
-// Fast admin profile loader - load admin's own data and all collections in parallel
-async function _loadAdminProfileFast() {
-  if (!isAdmin()) return;
-  
-  console.log('⚡ Fast admin profile load started');
-  const startTime = Date.now();
-  
-  // Try to load from cache first (instant paint)
-  const cachedUsers = await _getCachedAdminCollection('pp_users');
-  if (cachedUsers) {
-    Object.assign(users, cachedUsers);
-    console.log('📦 Users loaded from cache');
-  }
-  
-  // Then fetch fresh data in parallel
-  const promises = [
-    _loadAllUsersFromFirestore(true), // Admin's own data + all users
-    _loadAllDeletedMatchesFromFirestore(),
-    _loadAllDeletedD11MatchesFromFirestore(),
-    typeof _loadCricbuzzApiLog === 'function' ? _loadCricbuzzApiLog() : Promise.resolve(),
-    typeof _loadEspnCricinfoApiLog === 'function' ? _loadEspnCricinfoApiLog() : Promise.resolve(),
-    typeof _loadCllApiLog === 'function' ? _loadCllApiLog() : Promise.resolve(),
-    typeof _loadCb2ApiLog === 'function' ? _loadCb2ApiLog() : Promise.resolve(),
-    typeof _loadLl2ApiLog === 'function' ? _loadLl2ApiLog() : Promise.resolve(),
-    typeof _loadLl3ApiLog === 'function' ? _loadLl3ApiLog() : Promise.resolve(),
-    typeof _loadLl4ApiLog === 'function' ? _loadLl4ApiLog() : Promise.resolve(),
-    typeof _loadNewsFromFirestore === 'function' ? _loadNewsFromFirestore() : Promise.resolve(),
-    typeof _loadLl5ApiLog === 'function' ? _loadLl5ApiLog() : Promise.resolve(),
-    typeof _loadSbxApiLog === 'function' ? _loadSbxApiLog() : Promise.resolve(),
-  ];
-  
-  Promise.all(promises).then(() => {
-    const loadTime = Date.now() - startTime;
-    console.log(`✅ Admin profile data loaded in ${loadTime}ms`);
-    // Cache the loaded data
-    _cacheAdminCollection('pp_users', users);
-  }).catch(err => {
-    console.error('❌ Error loading admin profile data:', err);
-  });
-}
-
 function renderProfile() {
-  // Agar admin hai to fast load karo
-  if (isAdmin() && !_adminDataLoadStarted) {
-    _loadAdminProfileFast();
-  }
-  
   const u = users[currentUser.email] || currentUser;
   const lb = getGlobalLeaderboard();
   const myRank = lb.findIndex(x => x.email === currentUser.email) + 1;
@@ -35411,40 +35272,6 @@ setInterval(() => {
 </script>
 
 <script>
-// ── Auto-Refresh Upcoming Matches ──────────────────────────────────────────
-let _autoRefreshInterval = null;
-const AUTO_REFRESH_INTERVAL_MS = 30 * 1000; // 30 seconds mein refresh hoga
-
-function startAutoRefreshUpcomingMatches() {
-  // Jab user apna ID open kare, upcoming live matches ka data automatically
-  // refresh hoga — manual refresh button click nahi karna padega!
-  if (_autoRefreshInterval) clearInterval(_autoRefreshInterval);
-  
-  _autoRefreshInterval = setInterval(() => {
-    const activeView = document.querySelector('[data-view="active"]');
-    if (activeView && (activeView.id === 'd11-home' || activeView.id === 'ut-home')) {
-      // Upcoming/Live matches ko fetch karo background mein
-      if (typeof loadUpcomingLiveMatches === 'function') {
-        loadUpcomingLiveMatches();
-      }
-      if (typeof loadLiveMatches === 'function') {
-        loadLiveMatches();
-      }
-      render();
-    }
-  }, AUTO_REFRESH_INTERVAL_MS);
-  
-  console.log('✅ Auto-refresh started: Har 30 seconds mein upcoming matches fresh honge');
-}
-
-function stopAutoRefreshUpcomingMatches() {
-  if (_autoRefreshInterval) {
-    clearInterval(_autoRefreshInterval);
-    _autoRefreshInterval = null;
-    console.log('⛔ Auto-refresh stopped');
-  }
-}
-
 // ── Player DP (Display Picture) Upload ──────────────────────────────────────
 let _dpTarget = null; // { type: 'd11'|'ut', playerId }
 
@@ -35510,185 +35337,12 @@ function _applyPlayerDp(type, playerId, b64) {
 <input type="file" id="player-dp-input" accept="image/*" style="display:none" onchange="_onPlayerDpChange(this)">
 
 <!-- ══════════════════════════════════════════════════════════════════
-     AUTO SYNC MANAGER — Automatic updates ke liye
-     ══════════════════════════════════════════════════════════════════ -->
-<script>
-let _autoSyncInterval = null;
-let _autoSyncEnabled = false;
-let _autoSyncSelectedInterval = null;
-const AUTO_SYNC_INTERVALS = [
-  { label: '15 min', ms: 15 * 60 * 1000 },
-  { label: '25 min', ms: 25 * 60 * 1000 },
-  { label: '60 min', ms: 60 * 60 * 1000 },
-  { label: '100 min', ms: 100 * 60 * 1000 },
-  { label: '150 min', ms: 150 * 60 * 1000 },
-  { label: '200 min', ms: 200 * 60 * 1000 },
-  { label: '300 min', ms: 300 * 60 * 1000 },
-  { label: '350 min', ms: 350 * 60 * 1000 }
-];
-
-function _performFullSync() {
-  console.log('🔄 Full sync started at', new Date().toLocaleTimeString());
-  
-  // Sync Dream11 matches
-  if (typeof d11ActiveMatchId !== 'undefined' && dream11Matches[d11ActiveMatchId]) {
-    console.log('📊 Syncing D11 Match:', d11ActiveMatchId);
-    _syncD11Match(d11ActiveMatchId);
-  }
-  
-  // Sync UT Matches
-  if (typeof utActiveMatchId !== 'undefined' && typeof utViewTournamentId !== 'undefined') {
-    const t = utTournaments[utViewTournamentId];
-    if (t && t.matches && t.matches[utActiveMatchId]) {
-      console.log('🏏 Syncing UT Match:', utActiveMatchId);
-      _syncUTMatch(utActiveMatchId, utViewTournamentId);
-    }
-  }
-  
-  // Recalculate all scores
-  _recalculateAllScores();
-  
-  // Update UI
-  render();
-  
-  console.log('✅ Full sync completed');
-  showNotif('🔄 Sync complete: Team scores, player points & user points updated!');
-}
-
-function _syncD11Match(matchId) {
-  const m = dream11Matches[matchId];
-  if (!m) return;
-  
-  // Recalculate D11 team scores
-  (m.teams || []).forEach(team => {
-    let teamScore = 0;
-    (team.players || []).forEach(p => {
-      const baseScore = (p.runs || 0) * 1 + (p.wickets || 0) * 25 + (p.catches || 0) * 8;
-      p.score = baseScore;
-      teamScore += baseScore;
-    });
-    team.score = teamScore;
-  });
-  
-  // Update user points in D11
-  _updateD11UserPoints();
-}
-
-function _syncUTMatch(matchId, tournamentId) {
-  const t = utTournaments[tournamentId];
-  if (!t || !t.matches || !t.matches[matchId]) return;
-  
-  const m = t.matches[matchId];
-  
-  // Recalculate UT team scores
-  [m.teamA, m.teamB].forEach(team => {
-    if (!team) return;
-    let teamScore = 0;
-    (team.squad || []).forEach(p => {
-      const baseScore = (p.runs || 0) * 1 + (p.wickets || 0) * 25 + (p.catches || 0) * 8;
-      p.score = baseScore;
-      teamScore += baseScore;
-    });
-    team.score = teamScore;
-  });
-  
-  // Update user points in UT
-  _updateUTUserPoints();
-}
-
-function _recalculateAllScores() {
-  // D11 User Points
-  _updateD11UserPoints();
-  
-  // UT User Points  
-  _updateUTUserPoints();
-  
-  // Update leaderboards
-  _updateD11Leaderboard();
-  _updateUTLeaderboard();
-}
-
-function _updateD11UserPoints() {
-  (d11UserTeams || []).forEach(ut => {
-    let totalScore = 0;
-    (ut.players || []).forEach(p => {
-      const dmatch = dream11Matches[ut.matchId];
-      if (!dmatch) return;
-      const actualPlayer = (dmatch.players || []).find(x => x.id === p.id);
-      if (actualPlayer && actualPlayer.score) {
-        totalScore += actualPlayer.score;
-      }
-    });
-    ut.totalScore = totalScore;
-  });
-}
-
-function _updateUTUserPoints() {
-  Object.keys(utTournaments || {}).forEach(tid => {
-    const t = utTournaments[tid];
-    (t.userTeams || []).forEach(ut => {
-      let totalScore = 0;
-      (ut.players || []).forEach(p => {
-        const m = t.matches[ut.matchId];
-        if (!m) return;
-        const squad = (m.teamA && m.teamA.squad) || (m.teamB && m.teamB.squad) || [];
-        const actualPlayer = squad.find(x => x.name.toLowerCase() === p.name.toLowerCase());
-        if (actualPlayer && actualPlayer.score) {
-          totalScore += actualPlayer.score;
-        }
-      });
-      ut.totalScore = totalScore;
-    });
-  });
-}
-
-function _updateD11Leaderboard() {
-  if (!d11Leaderboard) d11Leaderboard = [];
-  d11Leaderboard.sort((a, b) => (b.totalScore || 0) - (a.totalScore || 0));
-}
-
-function _updateUTLeaderboard() {
-  Object.keys(utTournaments || {}).forEach(tid => {
-    const t = utTournaments[tid];
-    if (!t.leaderboard) t.leaderboard = [];
-    t.leaderboard.sort((a, b) => (b.totalScore || 0) - (a.totalScore || 0));
-  });
-}
-
-function _toggleAutoSync(intervalMs) {
-  if (_autoSyncEnabled && _autoSyncInterval) {
-    clearInterval(_autoSyncInterval);
-    _autoSyncInterval = null;
-    _autoSyncEnabled = false;
-    _autoSyncSelectedInterval = null;
-    console.log('⛔ Auto-sync disabled');
-    showNotif('❌ Auto-sync disabled');
-  } else {
-    _autoSyncEnabled = true;
-    _autoSyncSelectedInterval = intervalMs;
-    _autoSyncInterval = setInterval(_performFullSync, intervalMs);
-    const minutes = Math.floor(intervalMs / (60 * 1000));
-    console.log(`✅ Auto-sync enabled: Every ${minutes} minutes`);
-    showNotif(`✅ Auto-sync ON: Every ${minutes} min`);
-    // First sync immediately
-    _performFullSync();
-  }
-  render();
-}
-
-function _syncNowManually() {
-  console.log('🔄 Manual sync triggered by user');
-  _performFullSync();
-}
-</script>
-
-<!-- ══════════════════════════════════════════════════════════════════
      UPDATE CHECKER — jab bhi naya feature add karo, neeche APP_VERSION
      number badha dena (e.g. "1.0.0" → "1.0.1"). Users ko automatically
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.51.0";
+const APP_VERSION = "4.50.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
