@@ -2468,9 +2468,33 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
     return true;
   }
   if (window._liveCollectionUnsubs[collectionName] && forceRefresh) {
-    // Explicit manual refresh with a listener already running — the
-    // listener keeps us live-synced already, nothing more to do.
-    return true;
+    // FIX: this previously just returned true here, trusting "the listener
+    // keeps us live-synced already, nothing more to do" — but an onSnapshot
+    // listener can legitimately lag behind real Firestore state (network
+    // blips, a backgrounded tab, mobile reconnects after a poor-signal
+    // period), and there was NO path at all to force a genuine re-read once
+    // a listener had ever attached in that session. Every explicit
+    // "force refresh" call across the app (manual Refresh buttons,
+    // match-open navigation, etc.) was silently a no-op the moment the
+    // listener came up — which is exactly why two browsers on the same
+    // account could show two different scores for the same match: whichever
+    // one's listener happened to be behind just never got corrected, no
+    // matter how many times a refresh was triggered. Do a real one-time
+    // getDocs() read here so an explicit forceRefresh is never a no-op.
+    try {
+      const { collection, getDocs } = window._fbFns;
+      const snap = await getDocs(collection(window._fbDb, collectionName));
+      const obj = {};
+      snap.forEach(d => { obj[d.id] = d.data(); });
+      targetSetter(obj);
+      try { localStorage.setItem(cacheKey, JSON.stringify(obj)); } catch(e){}
+      if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
+      if (opts.rerenderOnUpdate && typeof render === 'function') render();
+      return true;
+    } catch (e) {
+      console.error(collectionName + ' force-refresh read error:', e);
+      return true; // listener is still attached and will keep pushing updates; don't treat this as total failure
+    }
   }
 
   if (!window._fbFns.onSnapshot) {
@@ -6134,7 +6158,7 @@ function goTab(t) {
   // Auto-refresh Dream11 data from Firestore when user opens the Dream11 tab
   // so admin publish/unpublish is visible immediately without a full page reload
   if (t === 'dream11') {
-    _loadAllDream11MatchesFromFirestore().then(() => render()).catch(() => {});
+    _loadAllDream11MatchesFromFirestore(true).then(() => render()).catch(() => {});
   }
 }
 </script>
@@ -6330,7 +6354,7 @@ function renderHome() {
                    </div>`
                 : `<div style="text-align:center;font-size:12px;color:var(--dim);padding:8px">🔒 Contest locked — joining closed</div>`
           }
-          <button class="btn-block" style="font-size:12px;padding:9px;margin-top:8px;border:none;border-radius:10px;background:linear-gradient(135deg,#f97316,#dc2626);color:#fff;font-weight:700;cursor:pointer" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">${!isCompletedCard && !dLocked ? '🎪 Join Mega / H2H / Custom Contest' : '🎪 View Contests'}</button>
+          <button class="btn-block" style="font-size:12px;padding:9px;margin-top:8px;border:none;border-radius:10px;background:linear-gradient(135deg,#f97316,#dc2626);color:#fff;font-weight:700;cursor:pointer" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore(true).then(()=>render()).catch(()=>{})">${!isCompletedCard && !dLocked ? '🎪 Join Mega / H2H / Custom Contest' : '🎪 View Contests'}</button>
           ${(() => {
             const badges = [];
             if ((d11m.freeParticipants||[]).includes(currentUser.email)) {
@@ -8518,6 +8542,21 @@ async function d11RefreshLiveTeamPoints(matchId) {
     colPasteText1: d11m.colPasteText1 || '',
     colPasteText2: d11m.colPasteText2 || '',
   });
+  // FIX: this used to read `dream11Teams` as-is from whatever this user's
+  // session happened to already have in memory. When a regular user's
+  // app-open auto-sync trigger fires this (see Option A above — any user
+  // can now run this, not just admin), their own pp_dream11_teams live
+  // listener might still be mid-sync at that exact moment (race with the
+  // listener catching up after app-open), so `dream11Teams` could contain
+  // only a handful of the real teams on this match — the loop below then
+  // only pushed points for THOSE teams, leaving every other team stuck at
+  // 0 pts (exactly the "only 4 of 16 teams got points" symptom reported).
+  // Force a genuine, up-to-date read right here before computing anything,
+  // so the loop always sees every real team on this match, regardless of
+  // where this session's background listener happened to be.
+  if (typeof _loadAllDream11TeamsFromFirestore === 'function') {
+    try { await _loadAllDream11TeamsFromFirestore(true); } catch (e) { console.warn('Teams force-refresh before points push failed:', e.message); }
+  }
   const teams = Object.values(dream11Teams).filter(t => t.matchId === matchId);
   // OPTION A: Firestore rules now allow any signed-in user to write
   // totalPoints/updatedAt on ANY team (not just their own), so no
@@ -9466,6 +9505,19 @@ function openDream11Leaderboard(matchId) {
   tab = 'dream11JoinContest';
   render();
   window.scrollTo(0,0);
+  // FIX: this function is called from 9 places (Home cards, contest
+  // history, etc.) and previously never forced a fresh read — it just
+  // painted whatever was already sitting in memory/localStorage. Each
+  // device/browser has its OWN independent onSnapshot listener and cache,
+  // so one browser tab could be lagging behind another for the same
+  // account (exactly the "same match, different score in two browsers"
+  // symptom reported). Force a real fetch of this match's score (pp_matches)
+  // AND points/players (pp_dream11_matches) on every open so what the user
+  // sees is always current, regardless of listener staleness.
+  Promise.all([
+    typeof _loadAllMatchesFromFirestore === 'function' ? _loadAllMatchesFromFirestore(true) : Promise.resolve(),
+    typeof _loadAllDream11MatchesFromFirestore === 'function' ? _loadAllDream11MatchesFromFirestore(true) : Promise.resolve(),
+  ]).then(() => render()).catch(() => {});
 }
 
 function openDream11ViewTeam(teamId) {
@@ -9473,6 +9525,18 @@ function openDream11ViewTeam(teamId) {
   tab = 'dream11ViewTeam';
   render();
   window.scrollTo(0,0);
+  // FIX: t.totalPoints (shown as the big "X pts" header on this screen) is
+  // a separately-stored field on pp_dream11_teams, distinct from the
+  // individual player points (which come from pp_dream11_matches and were
+  // already refreshing correctly). This session's own dream11Teams cache/
+  // listener could be lagging on THIS SPECIFIC team's totalPoints update
+  // even while everything else looked current — exactly the "0 pts" team
+  // total next to correct-looking 80/9/12/5 individual player points
+  // symptom. Force a genuine fresh read of both collections on open.
+  Promise.all([
+    typeof _loadAllDream11TeamsFromFirestore === 'function' ? _loadAllDream11TeamsFromFirestore(true) : Promise.resolve(),
+    typeof _loadAllDream11MatchesFromFirestore === 'function' ? _loadAllDream11MatchesFromFirestore(true) : Promise.resolve(),
+  ]).then(() => render()).catch(() => {});
 }
 
 // ── Completed Match Detail: shows team scores, result, and user's contest rank/points ──
@@ -22839,7 +22903,7 @@ async function d11SubmitTeam() {
     window.scrollTo(0,0);
     // Refresh dream11 match data so freeParticipants/megaParticipants counts
     // are always fresh — avoids stale cache showing "0 joined".
-    _loadAllDream11MatchesFromFirestore().then(() => render()).catch(() => {});
+    _loadAllDream11MatchesFromFirestore(true).then(() => render()).catch(() => {});
   } catch(e) {
     delete dream11Teams[d11TeamDraft.id];
     d11TeamSaveFailed = true;
@@ -25895,6 +25959,15 @@ function openD11ContestParticipants(matchId, contestType, contestRef, returnToAd
   tab = 'dream11ContestParticipants';
   render();
   window.scrollTo(0,0);
+  // FIX: this leaderboard ranks by team.totalPoints (pp_dream11_teams), a
+  // field that can lag independently of match/player data even when
+  // everything else looks fresh — see openDream11ViewTeam's comment for
+  // the full reasoning. Force a genuine fresh read on open so the ranking
+  // and points shown are never stale for any of the listed teams.
+  Promise.all([
+    typeof _loadAllDream11TeamsFromFirestore === 'function' ? _loadAllDream11TeamsFromFirestore(true) : Promise.resolve(),
+    typeof _loadAllDream11MatchesFromFirestore === 'function' ? _loadAllDream11MatchesFromFirestore(true) : Promise.resolve(),
+  ]).then(() => render()).catch(() => {});
 }
 
 // ── Shows the list of users who joined one specific contest (Mega/H2H/Free/Custom) for a match ──
@@ -27073,7 +27146,7 @@ function renderDream11Hub() {
           <button class="btn-primary btn-block" style="font-size:12px;padding:10px" onclick="openDream11Match('${m.id}')">🎮 Build My Team</button>
         ` : `<div class="empty-state" style="padding:10px;font-size:12px">Contest is locked, joining is closed now</div>`}
       </div>
-      ${!dLocked ? `<button class="btn-primary btn-block mb0" style="font-size:12px;padding:10px;margin-top:8px;background:linear-gradient(135deg,#f59e0b,#ea580c)" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">🏟️ Join Mega / H2H / Custom Contest</button>` : ''}
+      ${!dLocked ? `<button class="btn-primary btn-block mb0" style="font-size:12px;padding:10px;margin-top:8px;background:linear-gradient(135deg,#f59e0b,#ea580c)" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore(true).then(()=>render()).catch(()=>{})">🏟️ Join Mega / H2H / Custom Contest</button>` : ''}
       ${isLiveScoring ? `<button class="btn-secondary btn-block mb0" style="font-size:12px;padding:10px;margin-top:8px" onclick="openDream11Leaderboard('${m.id}')">🏅 View Live Leaderboard</button>` : ''}
       ${m.scorecardText ? `<button class="btn-primary btn-block mb0" style="background:linear-gradient(135deg,#0f766e,#0d9488);font-size:12px;padding:10px;margin-top:8px" onclick="openD11ScorecardPage('${m.id}')">📋 Full Batting & Bowling Scorecard Dekho →</button>` : (d11m.players||[]).some(p => p.stats) ? `<button class="btn-primary btn-block mb0" style="background:linear-gradient(135deg,#0f766e,#0d9488);font-size:12px;padding:10px;margin-top:8px" onclick="openD11LiveScorecard('${m.id}')">📋 Full Batting & Bowling Scorecard Dekho →</button>` : ''}
     </div></div>`;
@@ -27082,7 +27155,7 @@ function renderDream11Hub() {
   `;
   } catch(e) {
     console.error("Dream11 render error:", e);
-    return `<div class="empty-state"><div class="empty-icon">🎮</div>Dream11 load ho raha hai...<br/><button class="btn-secondary" style="margin-top:14px" onclick="_loadAllDream11MatchesFromFirestore().then(()=>render())">🔄 Dobara Try Karo</button></div>`;
+    return `<div class="empty-state"><div class="empty-icon">🎮</div>Dream11 load ho raha hai...<br/><button class="btn-secondary" style="margin-top:14px" onclick="_loadAllDream11MatchesFromFirestore(true).then(()=>render())">🔄 Dobara Try Karo</button></div>`;
   }
 }
 
@@ -27695,7 +27768,7 @@ async function d11SaveMatchScorecard(matchId) {
 
 async function d11RefreshScores() {
   showNotif('🔄 Scores reload ho rahe hain...');
-  await _loadAllMatchesFromFirestore();
+  await _loadAllMatchesFromFirestore(true);
   render();
   showNotif('✅ Scores updated!');
 }
@@ -28545,7 +28618,7 @@ function renderD11TeamPicker() {
 
   ${slots}
 
-  ${myTeams.length > 0 ? `<button class="btn-primary btn-block" style="margin-top:8px" onclick="d11ContestMatchId='${matchId}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">🎪 Join Mega / H2H / Custom Contest</button>` : ''}
+  ${myTeams.length > 0 ? `<button class="btn-primary btn-block" style="margin-top:8px" onclick="d11ContestMatchId='${matchId}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore(true).then(()=>render()).catch(()=>{})">🎪 Join Mega / H2H / Custom Contest</button>` : ''}
   `;
 }
 
@@ -35342,7 +35415,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.50.0";
+const APP_VERSION = "4.52.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
