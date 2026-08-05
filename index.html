@@ -6020,6 +6020,13 @@ function _renderInner() {
   }
   _navPushIfChanged(tab);
 
+  // Auto-refresh upcoming matches jab user home (profile) tab khol rahe ho
+  if (tab === 'home') {
+    startAutoRefreshUpcomingMatches();
+  } else {
+    stopAutoRefreshUpcomingMatches();
+  }
+
   app.innerHTML = `
     ${renderHeader()}
     <div class="page">
@@ -35272,6 +35279,40 @@ setInterval(() => {
 </script>
 
 <script>
+// ── Auto-Refresh Upcoming Matches ──────────────────────────────────────────
+let _autoRefreshInterval = null;
+const AUTO_REFRESH_INTERVAL_MS = 30 * 1000; // 30 seconds mein refresh hoga
+
+function startAutoRefreshUpcomingMatches() {
+  // Jab user apna ID open kare, upcoming live matches ka data automatically
+  // refresh hoga — manual refresh button click nahi karna padega!
+  if (_autoRefreshInterval) clearInterval(_autoRefreshInterval);
+  
+  _autoRefreshInterval = setInterval(() => {
+    const activeView = document.querySelector('[data-view="active"]');
+    if (activeView && (activeView.id === 'd11-home' || activeView.id === 'ut-home')) {
+      // Upcoming/Live matches ko fetch karo background mein
+      if (typeof loadUpcomingLiveMatches === 'function') {
+        loadUpcomingLiveMatches();
+      }
+      if (typeof loadLiveMatches === 'function') {
+        loadLiveMatches();
+      }
+      render();
+    }
+  }, AUTO_REFRESH_INTERVAL_MS);
+  
+  console.log('✅ Auto-refresh started: Har 30 seconds mein upcoming matches fresh honge');
+}
+
+function stopAutoRefreshUpcomingMatches() {
+  if (_autoRefreshInterval) {
+    clearInterval(_autoRefreshInterval);
+    _autoRefreshInterval = null;
+    console.log('⛔ Auto-refresh stopped');
+  }
+}
+
 // ── Player DP (Display Picture) Upload ──────────────────────────────────────
 let _dpTarget = null; // { type: 'd11'|'ut', playerId }
 
