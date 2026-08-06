@@ -1517,6 +1517,26 @@ let d11Ll3PlayerRankingPanelOpen = false;
 let _d11SquadDebugData = null;
 let _d11ScheduleDebugData = null; // raw /schedule/v1/international response — shape confirmed (matchScheduleMap[].scheduleAdWrapper.matchScheduleList[].matchInfo[]), kept for future debugging if Cricbuzz changes it again
 let _d11SyncDebugData = null; // { matchId, fetchedAt, raw } — last raw hscard response from d11SyncLiveMatch, for the "View Raw Sync Data" debug panel
+// Guards writes to _d11SyncDebugData to admin/sub-admin only. This modal is
+// rendered unconditionally at the top level of the app (not behind any
+// admin-only route — see the `${_d11SyncDebugData ? renderD11SyncDebugModal() : ''}`
+// line near the top of the render tree), and every provider's sync
+// function sets this data on every call regardless of who triggered the
+// sync — including a normal user's own background auto-sync (see
+// d11AutoSyncAllPostDeadline and friends, which run in every open tab).
+// Without this guard, a normal user could suddenly see this raw JSON debug
+// overlay pop up over whatever screen they were on, mid-browsing, the
+// moment their own tab's background sync happened to run — exactly the
+// bug reported: the raw debug panel appearing on a normal user's home
+// screen. Restricting the WRITE (not just hiding the modal after the
+// fact) means non-admin sessions never populate this state at all, so
+// there's no window where it could flash on screen even briefly.
+function _d11SetSyncDebugData(data) {
+  const isAdminUser = (typeof isAdmin === 'function' && isAdmin())
+    || (typeof isSubAdminXI === 'function' && isSubAdminXI());
+  if (!isAdminUser) return;
+  _d11SyncDebugData = data;
+}
 let _d11LiveSyncLastSyncedAt = {}; // { [matchId]: timestamp } — for the "Last synced" label in admin UI
 // Guards against a single bad/stale API response auto-finishing a match.
 // A "finished" signal only locks the match as completed once it has been
@@ -2090,6 +2110,26 @@ async function _saveMatchToFirestore(matchId, matchData) {
     .catch(e => { console.error('Firestore match save error:', e); throw e; });
 }
 
+// Narrow partial-field update for pp_matches — mirrors
+// _updateDream11MatchScoringFields below. Used by the automatic live-sync
+// triggers (Option A: any signed-in user's session, not just admin/
+// subAdminXI) so the write only ever touches exactly the fields the
+// Firestore rules' onlyFieldsChanged(['scoreA','scoreB','status',
+// 'resultText','updatedAt']) allow-list expects, instead of a full setDoc
+// that could accidentally touch other fields.
+async function _updateMatchScoreFields(matchId, fields) {
+  if (!window._fbDb || !window._fbFns) {
+    throw new Error('Firebase not ready');
+  }
+  const { doc, updateDoc } = window._fbFns;
+  try {
+    await updateDoc(doc(window._fbDb, 'pp_matches', matchId), { ...fields, updatedAt: Date.now() });
+  } catch(e) {
+    console.error('Match score-fields update error:', e.code || e.message, e);
+    throw e;
+  }
+}
+
 async function _deleteMatchFromFirestore(matchId) {
   if (!window._fbDb || !window._fbFns) return;
   const { doc, deleteDoc } = window._fbFns;
@@ -2341,11 +2381,12 @@ function _updateSyncWatermark(collectionName, obj) {
 // don't re-query Firestore more than once every couple of minutes.
 const AUTO_REFRESH_MIN_GAP_MS = 2 * 60 * 1000; // 2 minutes
 let _autoRefreshInFlight = {};
-async function _autoIncrementalRefresh(collectionName, targetSetter, cacheKey, opts) {
+async function _autoIncrementalRefresh(collectionName, targetSetter, cacheKey, opts, minGapMs) {
   if (!window._fbDb || !window._fbFns || !window._fbFns.query || !window._fbFns.where || !window._fbFns.getDocs) return;
   if (_autoRefreshInFlight[collectionName]) return; // already checking, don't stack duplicate queries
   const lastAuto = _getLastManualRefreshAt('auto_' + collectionName);
-  if (lastAuto && (Date.now() - lastAuto) < AUTO_REFRESH_MIN_GAP_MS) return;
+  const gap = typeof minGapMs === 'number' ? minGapMs : AUTO_REFRESH_MIN_GAP_MS;
+  if (lastAuto && (Date.now() - lastAuto) < gap) return;
   const watermark = _getLastSyncedDataTs(collectionName);
   if (!watermark) return; // no watermark yet — the normal full-fetch path (first load on this device) handles this case instead
   _autoRefreshInFlight[collectionName] = true;
@@ -2428,9 +2469,34 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
     return true;
   }
   if (window._liveCollectionUnsubs[collectionName] && forceRefresh) {
-    // Explicit manual refresh with a listener already running — the
-    // listener keeps us live-synced already, nothing more to do.
-    return true;
+    // FIX: this previously just returned true here, trusting "the listener
+    // keeps us live-synced already, nothing more to do" — but an onSnapshot
+    // listener can legitimately lag behind real Firestore state (network
+    // blips, a backgrounded tab, mobile reconnects after a poor-signal
+    // period), and there was NO path at all to force a genuine re-read once
+    // a listener had ever attached in that session. Every explicit
+    // "force refresh" call across the app (manual Refresh buttons,
+    // match-open navigation, etc.) was silently a no-op the moment the
+    // listener came up — which is exactly why two browsers on the same
+    // account could show two different scores for the same match: whichever
+    // one's listener happened to be behind just never got corrected, no
+    // matter how many times a refresh was triggered. Do a real one-time
+    // getDocs() read here so an explicit forceRefresh is never a no-op.
+    try {
+      const { collection, getDocs } = window._fbFns;
+      const snap = await getDocs(collection(window._fbDb, collectionName));
+      const obj = {};
+      snap.forEach(d => { obj[d.id] = d.data(); });
+      targetSetter(obj);
+      try { localStorage.setItem(cacheKey, JSON.stringify(obj)); } catch(e){}
+      _updateSyncWatermark(collectionName, obj);
+      if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
+      if (opts.rerenderOnUpdate && typeof render === 'function') render();
+      return true;
+    } catch (e) {
+      console.error(collectionName + ' force-refresh read error:', e);
+      return true; // listener is still attached and will keep pushing updates; don't treat this as total failure
+    }
   }
 
   if (!window._fbFns.onSnapshot) {
@@ -2493,6 +2559,13 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
         Object.keys(obj).forEach(id => { if (!seenIds.has(id)) delete obj[id]; });
         targetSetter(obj);
         try { localStorage.setItem(cacheKey, JSON.stringify(obj)); } catch(e){}
+        // FIX: without this, the watermark used by _autoIncrementalRefresh
+        // (and the 15-second fast-poll built on top of it) never got set
+        // for a fresh session — it was only ever updated inside
+        // _autoIncrementalRefresh itself, so nothing ever seeded it in the
+        // first place and every incremental check kept silently no-op'ing
+        // via its `if (!watermark) return;` guard.
+        _updateSyncWatermark(collectionName, obj);
         if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
         if (!resolved) { resolved = true; resolve(true); }
         else if (opts.rerenderOnUpdate !== false) {
@@ -2517,6 +2590,35 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
       if (!resolved) { resolved = true; resolve(false); }
     }
   });
+}
+
+// ── Fast 15-second poll for Upcoming/Live/Today's-Completed match data ──
+// Everything else in the app is cache-first + a live onSnapshot listener
+// (near-instant, but occasionally lags a few seconds behind on a slow
+// connection or right after reconnecting). For the screens that matter
+// most — live scores, player points, team totals for matches that are
+// upcoming, currently live, or completed earlier today — that's not quite
+// fast enough. This timer runs _autoIncrementalRefresh every 15 seconds for
+// exactly those 3 collections (pp_matches, pp_dream11_matches,
+// pp_dream11_teams). It's cheap: _autoIncrementalRefresh only queries
+// documents changed since the last check (a `where('updatedAt','>',
+// watermark)` query), not a full collection re-read, so running it this
+// often does not reintroduce the "every user, every open, full read" quota
+// problem — an unchanged collection costs one tiny query that returns
+// nothing.
+const D11_FAST_POLL_MS = 8 * 1000;
+const D11_FAST_POLL_MIN_GAP_MS = 6 * 1000; // slightly under the 8s tick so this trigger's own throttle never blocks itself
+const D11_FAST_POLL_COLLECTIONS = ['pp_matches', 'pp_dream11_matches', 'pp_dream11_teams'];
+let _d11FastPollTimer = null;
+function _startD11FastPoll() {
+  if (_d11FastPollTimer) return; // already running
+  _d11FastPollTimer = setInterval(() => {
+    if (document.hidden) return; // tab genuinely backgrounded — no point polling a screen no one's looking at
+    D11_FAST_POLL_COLLECTIONS.forEach(name => {
+      const spec = _liveCollectionSpecs[name];
+      if (spec) _autoIncrementalRefresh(name, spec.targetSetter, spec.cacheKey, spec.opts, D11_FAST_POLL_MIN_GAP_MS);
+    });
+  }, D11_FAST_POLL_MS);
 }
 
 async function _loadAllMatchesFromFirestore(forceRefresh, isAppOpen) {
@@ -3818,13 +3920,115 @@ async function joinMegaContest(matchId) {
 // against a freshly-read doc immediately before writing, so the window for
 // a genuine double-join race is narrow (though not zero, unlike the old
 // transaction-based version).
+// ── Atomic paid-contest join: balance-first, refund-on-failure with
+// retry-until-success. ──
+// HISTORY: this went through several approaches. A client-side Firestore
+// runTransaction is fully atomic but its automatic retry-on-conflict
+// repeats both reads AND writes on every retry — when many users join a
+// popular contest at once, that can multiply Firestore usage past the
+// daily quota. A server-side Cloud Function avoids that, but requires the
+// Firebase Blaze (pay-as-you-go) plan, which isn't available here.
+// So: two plain writes (balance deduct, then match-doc join), same as
+// before — but the failure path is now genuinely reliable instead of
+// giving up after one retry attempt. If the match-doc write fails right
+// after the balance was deducted, this immediately tries to refund. If
+// THAT also fails right away (e.g. connection dropped entirely), the
+// pending refund is written to localStorage (survives this tab closing)
+// and — best-effort — to a small Firestore doc other devices/sessions for
+// this user can also see, and a background job (see
+// _retryPendingContestRefunds, hooked into the existing 5-min
+// startBackgroundRefresh loop) keeps retrying it every tick until the
+// refund actually lands. The user is never left in a state where money
+// was taken and no contest entry AND no eventual refund exists — one of
+// the two always resolves, it just might take a few minutes if the
+// connection was bad at the exact moment of joining.
+const PENDING_REFUNDS_LS_KEY = 'pp_pending_contest_refunds';
+
+function _loadPendingRefunds() {
+  try { return JSON.parse(localStorage.getItem(PENDING_REFUNDS_LS_KEY) || '[]'); }
+  catch(e) { return []; }
+}
+function _savePendingRefunds(list) {
+  try { localStorage.setItem(PENDING_REFUNDS_LS_KEY, JSON.stringify(list)); } catch(e) {}
+}
+function _addPendingRefund(refund) {
+  const list = _loadPendingRefunds();
+  list.push({ ...refund, id: uid(), createdAt: Date.now(), attempts: 0 });
+  _savePendingRefunds(list);
+  // Best-effort mirror to Firestore too, so the refund can still be found
+  // and retried even if the user never reopens this same browser/device
+  // (e.g. they switch phones, or clear site data). If this write itself
+  // fails (same bad connection that caused the original failure), the
+  // localStorage copy on THIS device is still enough to self-heal on the
+  // next tick, so this is a nice-to-have, not the only safety net.
+  if (window._fbDb && window._fbFns) {
+    const { doc, setDoc } = window._fbFns;
+    setDoc(doc(window._fbDb, 'pp_pending_refunds', list[list.length-1].id), {
+      ...refund, createdAt: Date.now(), attempts: 0, userEmail: currentUser.email
+    }).catch(() => {}); // silent — localStorage copy is the real safety net
+  }
+}
+function _removePendingRefund(id) {
+  _savePendingRefunds(_loadPendingRefunds().filter(r => r.id !== id));
+  if (window._fbDb && window._fbFns) {
+    const { doc, deleteDoc } = window._fbFns;
+    deleteDoc(doc(window._fbDb, 'pp_pending_refunds', id)).catch(() => {});
+  }
+}
+
+// Attempts one refund (balance += amount, remove the failed-join
+// transaction record if still present). Returns true on success.
+async function _attemptRefund(amount, txId) {
+  if (!window._fbDb || !window._fbFns) return false;
+  const { doc, getDoc, updateDoc } = window._fbFns;
+  try {
+    const safeKey = currentUser.email.replace(/\./g, '_');
+    const userRef = doc(window._fbDb, 'pp_users', safeKey);
+    const userSnap = await getDoc(userRef);
+    if (!userSnap.exists()) return false;
+    const userData = userSnap.data();
+    const restoredBalance = (userData.balance || 0) + amount;
+    // Remove the specific failed-join transaction record (by id) rather
+    // than blindly restoring a stale full-array snapshot, which could
+    // silently undo other transactions that happened in between.
+    const restoredTransactions = (userData.transactions || []).filter(t => t.id !== txId);
+    await updateDoc(userRef, { balance: restoredBalance, transactions: restoredTransactions });
+    if (currentUser && currentUser.email === (users[currentUser.email]||{}).email) {
+      currentUser.balance = restoredBalance;
+      currentUser.transactions = restoredTransactions;
+    }
+    return true;
+  } catch (e) {
+    console.warn('Refund attempt failed, will retry later:', e.message);
+    return false;
+  }
+}
+
+// Called every 5 min by the existing background loop (and once on app
+// load) — retries any refund that couldn't be completed immediately when
+// it was first needed. Keeps trying forever (each tick) until it succeeds;
+// there is no attempt cap, because giving up would recreate exactly the
+// "charged with no entry, no refund" bug this whole mechanism exists to
+// prevent.
+async function _retryPendingContestRefunds() {
+  const pending = _loadPendingRefunds();
+  if (pending.length === 0) return;
+  for (const refund of pending) {
+    const ok = await _attemptRefund(refund.amount, refund.txId).catch(() => false);
+    if (ok) {
+      _removePendingRefund(refund.id);
+      showNotif(`Rs ${refund.amount} refunded — a contest join earlier didn't go through.`, 'info');
+    }
+  }
+}
+
 async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection, participantsField, poolField, txType, alreadyJoinedMsg, participantsAreObjectMap = false, teamId = null, maxParticipants = null, fullMsg = null }) {
   if (!window._fbDb || !window._fbFns) {
     showNotif('Connection not ready — please try again', 'error');
     return null;
   }
-  const { doc, getDoc, setDoc } = window._fbFns;
-  if (!doc || !getDoc || !setDoc) {
+  const { doc, getDoc, updateDoc } = window._fbFns;
+  if (!doc || !getDoc || !updateDoc) {
     showNotif('Firebase not ready — please refresh the page', 'error');
     return null;
   }
@@ -3853,7 +4057,8 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
     // just now. Without a transaction this can't guarantee zero overshoot
     // if two people tap Join in the same instant, but that window is brief
     // and the consequence (occasionally 1 extra participant in a capped
-    // contest) is far less costly than the quota exhaustion this replaces.
+    // contest) is far less costly than the quota exhaustion a
+    // transaction-based approach risks under real load.
     if (maxParticipants != null) {
       const currentCount = participantsAreObjectMap ? Object.keys(participants).length : participants.length;
       if (currentCount >= maxParticipants) {
@@ -3868,9 +4073,10 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
     }
 
     const newBalance = (userData.balance || 0) - entryFeeAmount;
+    const txId = uid();
     const newTransactions = userData.transactions || [];
     newTransactions.unshift({
-      id: uid(), type: txType, amount: entryFeeAmount,
+      id: txId, type: txType, amount: entryFeeAmount,
       matchId: matchId || null, date: getDateTime(), status: 'confirmed'
     });
 
@@ -3905,23 +4111,24 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
     }
     if (teamId) matchUpdate[teamsField] = updatedMatchData[teamsField];
 
-    // Balance write happens first (mirrors _atomicJoinCustomContest) so a
-    // failure on the match-doc write can be rolled back by restoring the
-    // user's pre-deduction data, instead of ever silently keeping money
-    // deducted with no contest entry to show for it.
-    await setDoc(userRef, { ...userData, balance: newBalance, transactions: newTransactions });
+    // Balance deducted first. If the match-doc write below fails, we MUST
+    // end up in one of two states — refunded, or joined — never neither.
+    await updateDoc(userRef, { balance: newBalance, transactions: newTransactions });
     try {
-      await setDoc(matchRef, { ...matchData, ...matchUpdate });
+      await updateDoc(matchRef, matchUpdate);
     } catch (matchWriteErr) {
-      console.error('Match-doc write failed after balance was already deducted — rolling back:', matchWriteErr);
-      try {
-        await setDoc(userRef, userData);
-      } catch (rollbackErr) {
-        console.error('CRITICAL: rollback after failed match-doc write also failed. User may be charged with no contest entry:', rollbackErr);
-        showNotif('Join failed partway through, and the automatic refund also failed — please contact support so we can fix your balance manually.', 'error');
-        return null;
+      console.error('Match-doc write failed after balance was already deducted — attempting refund:', matchWriteErr);
+      const refunded = await _attemptRefund(entryFeeAmount, txId);
+      if (refunded) {
+        showNotif('Join failed — your balance was refunded automatically. Please try again.', 'error');
+      } else {
+        // Immediate refund attempt also failed (same bad connection,
+        // most likely). Persist it so it keeps retrying in the
+        // background — see _retryPendingContestRefunds — instead of
+        // silently leaving the user charged with nothing to show for it.
+        _addPendingRefund({ amount: entryFeeAmount, txId });
+        showNotif('Join failed. Your refund is being processed automatically and will complete shortly — no action needed.', 'error');
       }
-      showNotif('Join failed — your balance was not charged (refunded automatically). Please try again.', 'error');
       return null;
     }
 
@@ -5839,6 +6046,17 @@ function tpinForgotFlow() {
 }
 
 function render() {
+  // FIX: every render() does a full app.innerHTML replace (this app has no
+  // virtual-DOM diffing), which — for a BACKGROUND update like the 8-second
+  // fast-poll or a live Firestore listener push — was resetting scroll
+  // position back to the top of the screen every single time, which reads
+  // to the user as a jarring blank/flash "on-off" flicker, especially
+  // noticeable on a long scrolled-down list. Explicit navigations already
+  // call window.scrollTo(0,0) themselves right after render() when they
+  // actually want to reset scroll — so it's safe to always restore
+  // whatever the scroll position was immediately before this render() call
+  // and let those navigation call sites override it a moment later.
+  const _scrollYBefore = window.scrollY;
   try {
     _renderInner();
   } catch (e) {
@@ -5852,7 +6070,9 @@ function render() {
           <button style="padding:12px 20px;border-radius:10px;border:none;background:#16a34a;color:#fff;font-weight:700;font-size:13px" onclick="tab='home';render()">← Go Back Home</button>
         </div>`;
     }
+    return;
   }
+  if (_scrollYBefore > 0) window.scrollTo(0, _scrollYBefore);
 }
 function _renderInner() {
   const app = document.getElementById('app');
@@ -5989,7 +6209,7 @@ function goTab(t) {
   // Auto-refresh Dream11 data from Firestore when user opens the Dream11 tab
   // so admin publish/unpublish is visible immediately without a full page reload
   if (t === 'dream11') {
-    _loadAllDream11MatchesFromFirestore().then(() => render()).catch(() => {});
+    _loadAllDream11MatchesFromFirestore(true).then(() => render()).catch(() => {});
   }
 }
 </script>
@@ -6185,7 +6405,7 @@ function renderHome() {
                    </div>`
                 : `<div style="text-align:center;font-size:12px;color:var(--dim);padding:8px">🔒 Contest locked — joining closed</div>`
           }
-          <button class="btn-block" style="font-size:12px;padding:9px;margin-top:8px;border:none;border-radius:10px;background:linear-gradient(135deg,#f97316,#dc2626);color:#fff;font-weight:700;cursor:pointer" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">${!isCompletedCard && !dLocked ? '🎪 Join Mega / H2H / Custom Contest' : '🎪 View Contests'}</button>
+          <button class="btn-block" style="font-size:12px;padding:9px;margin-top:8px;border:none;border-radius:10px;background:linear-gradient(135deg,#f97316,#dc2626);color:#fff;font-weight:700;cursor:pointer" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore(true).then(()=>render()).catch(()=>{})">${!isCompletedCard && !dLocked ? '🎪 Join Mega / H2H / Custom Contest' : '🎪 View Contests'}</button>
           ${(() => {
             const badges = [];
             if ((d11m.freeParticipants||[]).includes(currentUser.email)) {
@@ -8360,21 +8580,47 @@ async function d11RefreshLiveTeamPoints(matchId) {
   const d11m = dream11Matches[matchId];
   if (!d11m) return;
   d11m.lastLiveUpdateAt = getDateTime();
-  if (typeof isAdmin === 'function' && isAdmin()) {
-    await _saveDream11MatchToFirestore(matchId, d11m);
-  } else {
-    await _updateDream11MatchScoringFields(matchId, {
-      players: d11m.players,
-      scored: !!d11m.scored,
-      lastLiveUpdateAt: d11m.lastLiveUpdateAt,
-      colPasteText1: d11m.colPasteText1 || '',
-      colPasteText2: d11m.colPasteText2 || '',
-    });
+  // OPTION A: Firestore rules now allow ANY signed-in user to write
+  // players/scored/colPasteText1/2/lastLiveUpdateAt on pp_dream11_matches
+  // (not just admin/subAdminXI) — so this narrow update always works for
+  // anyone, no branching needed. Still using the narrow updateDoc path
+  // (not a full setDoc) so the write only ever touches exactly these
+  // fields, matching the rules' onlyFieldsChanged() allow-list precisely.
+  await _updateDream11MatchScoringFields(matchId, {
+    players: d11m.players,
+    scored: !!d11m.scored,
+    lastLiveUpdateAt: d11m.lastLiveUpdateAt,
+    colPasteText1: d11m.colPasteText1 || '',
+    colPasteText2: d11m.colPasteText2 || '',
+  });
+  // FIX: this used to read `dream11Teams` as-is from whatever this user's
+  // session happened to already have in memory. When a regular user's
+  // app-open auto-sync trigger fires this (see Option A above — any user
+  // can now run this, not just admin), their own pp_dream11_teams live
+  // listener might still be mid-sync at that exact moment (race with the
+  // listener catching up after app-open), so `dream11Teams` could contain
+  // only a handful of the real teams on this match — the loop below then
+  // only pushed points for THOSE teams, leaving every other team stuck at
+  // 0 pts (exactly the "only 4 of 16 teams got points" symptom reported).
+  // Force a genuine, up-to-date read right here before computing anything,
+  // so the loop always sees every real team on this match, regardless of
+  // where this session's background listener happened to be.
+  if (typeof _loadAllDream11TeamsFromFirestore === 'function') {
+    try { await _loadAllDream11TeamsFromFirestore(true); } catch (e) { console.warn('Teams force-refresh before points push failed:', e.message); }
   }
   const teams = Object.values(dream11Teams).filter(t => t.matchId === matchId);
+  // OPTION A: Firestore rules now allow any signed-in user to write
+  // totalPoints/updatedAt on ANY team (not just their own), so no
+  // per-team ownership check is needed here anymore. Still wrapped in
+  // try/catch per-team so one failed write (e.g. a transient network
+  // error) doesn't abort the whole loop and skip every team after it.
   for (const team of teams) {
     team.totalPoints = calcDream11TeamPoints(team, d11m);
-    await _updateDream11TeamPointsOnly(team.id, team.totalPoints);
+    try {
+      await _updateDream11TeamPointsOnly(team.id, team.totalPoints);
+    } catch (e) {
+      console.warn('Team points write skipped/failed for', team.id, ':', e.code || e.message);
+    }
   }
   // Also refresh any User-Tournament teams built against this same admin
   // match (t.matches[matchId].isAdminMatch === true). UT owners don't run
@@ -9310,6 +9556,19 @@ function openDream11Leaderboard(matchId) {
   tab = 'dream11JoinContest';
   render();
   window.scrollTo(0,0);
+  // FIX: this function is called from 9 places (Home cards, contest
+  // history, etc.) and previously never forced a fresh read — it just
+  // painted whatever was already sitting in memory/localStorage. Each
+  // device/browser has its OWN independent onSnapshot listener and cache,
+  // so one browser tab could be lagging behind another for the same
+  // account (exactly the "same match, different score in two browsers"
+  // symptom reported). Force a real fetch of this match's score (pp_matches)
+  // AND points/players (pp_dream11_matches) on every open so what the user
+  // sees is always current, regardless of listener staleness.
+  Promise.all([
+    typeof _loadAllMatchesFromFirestore === 'function' ? _loadAllMatchesFromFirestore(true) : Promise.resolve(),
+    typeof _loadAllDream11MatchesFromFirestore === 'function' ? _loadAllDream11MatchesFromFirestore(true) : Promise.resolve(),
+  ]).then(() => render()).catch(() => {});
 }
 
 function openDream11ViewTeam(teamId) {
@@ -9317,6 +9576,18 @@ function openDream11ViewTeam(teamId) {
   tab = 'dream11ViewTeam';
   render();
   window.scrollTo(0,0);
+  // FIX: t.totalPoints (shown as the big "X pts" header on this screen) is
+  // a separately-stored field on pp_dream11_teams, distinct from the
+  // individual player points (which come from pp_dream11_matches and were
+  // already refreshing correctly). This session's own dream11Teams cache/
+  // listener could be lagging on THIS SPECIFIC team's totalPoints update
+  // even while everything else looked current — exactly the "0 pts" team
+  // total next to correct-looking 80/9/12/5 individual player points
+  // symptom. Force a genuine fresh read of both collections on open.
+  Promise.all([
+    typeof _loadAllDream11TeamsFromFirestore === 'function' ? _loadAllDream11TeamsFromFirestore(true) : Promise.resolve(),
+    typeof _loadAllDream11MatchesFromFirestore === 'function' ? _loadAllDream11MatchesFromFirestore(true) : Promise.resolve(),
+  ]).then(() => render()).catch(() => {});
 }
 
 // ── Completed Match Detail: shows team scores, result, and user's contest rank/points ──
@@ -13175,7 +13446,7 @@ async function d11ToggleCb2AutoSync(matchId) {
   try {
     await _saveMatchToFirestore(matchId, m);
     showNotif(m.cb2AutoSync
-      ? '🤖 Automatic armed — deadline se pehle 25/20/15/10min pe Playing XI, deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now, sab khud-b-khud chalega'
+      ? '🤖 Automatic armed — deadline se pehle 25/22/18/15/11/7min pe Playing XI, deadline ke baad 20/40/80/130/180/250/320min pe Sync Now, sab khud-b-khud chalega'
       : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
     render();
   } catch(e) {
@@ -13790,11 +14061,26 @@ async function d11SyncLiveMatchSbx(matchId, showToast) {
   if (!m || !d11m || !m.sbxMatchId) return;
   try {
     const raw = await _sbxFetch(`live-score/match/${m.sbxMatchId}/scorecard`, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
-    _d11SyncDebugData = { matchId, fetchedAt: Date.now(), raw, source: 'Sportbex' };
+    _d11SetSyncDebugData({ matchId, fetchedAt: Date.now(), raw, source: 'Sportbex' });
 
-    const entry = Array.isArray(raw?.data) ? raw.data[0] : raw?.data;
-    const result = entry?.result || {};
-    const innings = Array.isArray(result.innings) ? result.innings : [];
+    // BUGFIX: the actual response shape (confirmed via the raw debug
+    // panel) is completely different from what this used to assume:
+    //   raw.data.scorecard = { "1": {...}, "2": {...} }   ← OBJECT, numbered
+    //   keys, not raw.data[0].result.innings (an array that never existed
+    //   in the real response — raw.data isn't even an array here, and
+    //   raw.data.result doesn't exist at all).
+    // Because of that mismatch, `innings` was always `[]`, this function
+    // always returned early at "No scorecard data yet", and — on the rare
+    // path where showToast was true and it got past that — every single
+    // field lookup (teamInfo.runs, b.playerName, b.ballsFaced, etc.) was
+    // reading fields that don't exist in this provider's response at all,
+    // so 0 players were ever actually updated, regardless of how many
+    // times Sync Now was pressed.
+    const scorecardObj = raw?.data?.scorecard || {};
+    const innings = Object.keys(scorecardObj)
+      .sort((a, b) => Number(a) - Number(b)) // "1","2","3","4" — keep innings order
+      .map(k => scorecardObj[k]);
+    const resultText = (raw?.data?.result || '').trim();
     if (innings.length === 0) {
       if (showToast) showNotif('No scorecard data yet on Sportbex — try again once the match has started.', 'error');
       return;
@@ -13802,33 +14088,44 @@ async function d11SyncLiveMatchSbx(matchId, showToast) {
 
     let battersApplied = 0, bowlersApplied = 0;
     const fieldingRowsAll = [];
+    m._allInningsSeenA = 0; m._allInningsSeenB = 0; // reset Test innings counter for this sync call
 
-    innings.forEach(inn => {
-      const teamInfo = inn.teamInfo || {};
-      const teamNameL = (teamInfo.teamName || teamInfo.shortName || '').toLowerCase();
-      if (teamInfo.runs !== undefined) {
-        const scoreStr = `${teamInfo.runs}/${teamInfo.wickets ?? 0} (${teamInfo.overs ?? 0})`;
-        if (_d11TeamNameMatches(teamNameL, m.teamA)) m.scoreA = scoreStr;
-        else if (_d11TeamNameMatches(teamNameL, m.teamB)) m.scoreB = scoreStr;
+    innings.forEach((inn, idx) => {
+      const team = inn.team || {};
+      const teamNameL = (team.name || team.short_name || '').toLowerCase();
+      if (team.score !== undefined) {
+        const scoreStr = `${team.score}/${team.wicket ?? 0} (${team.over ?? 0} Ov)`;
+        _d11AssignInningsScore(m, teamNameL, scoreStr);
       }
+      const inningsTag = (m.format || '').toLowerCase() === 'test' ? String(idx + 1) : null;
 
-      (inn.batting || []).forEach(b => {
+      (inn.batsman || []).forEach(b => {
         const mapped = {
-          name: b.playerName,
-          runs: b.runs, balls: b.ballsFaced,
-          outdec: b.isOut ? (b.outSummary || 'out') : 'not out',
+          name: b.name,
+          runs: b.run, balls: b.ball,
+          // out_by is empty string "" for not-out batters in this
+          // provider's shape (confirmed in the debug sample: "not out"),
+          // and contains the dismissal text otherwise.
+          outdec: b.out_by,
           fours: b.fours, sixes: b.sixes,
         };
-        if (_d11ApplyLiveBattingRow(d11m, mapped)) battersApplied++;
+        if (_d11ApplyLiveBattingRow(d11m, mapped, inningsTag)) battersApplied++;
         _d11ExtractLiveFieldingCredit(mapped, fieldingRowsAll);
       });
-      (inn.bowling || []).forEach(bl => {
+      // Bowling card field name wasn't visible in the captured debug sample
+      // (it was cut off after the batsman array) — try the most likely
+      // Latiya-Infotech-style key names in order, same defensive pattern
+      // already used for the Cricbuzz Auto-Import provider above, so this
+      // keeps working even if the true key turns out to be one of the
+      // less-likely alternatives.
+      const bowlingCard = inn.bowler || inn.bowling || inn.bowlers || [];
+      bowlingCard.forEach(bl => {
         const mapped = {
-          name: bl.playerName,
-          overs: bl.overs, wickets: bl.wickets, maidens: bl.maidens,
-          runs: bl.runsConceded,
+          name: bl.name,
+          overs: bl.over ?? bl.overs, wickets: bl.wicket ?? bl.wickets, maidens: bl.maiden ?? bl.maidens,
+          runs: bl.run ?? bl.runs,
         };
-        if (_d11ApplyLiveBowlingRow(d11m, mapped)) bowlersApplied++;
+        if (_d11ApplyLiveBowlingRow(d11m, mapped, inningsTag)) bowlersApplied++;
       });
     });
 
@@ -13866,7 +14163,6 @@ async function d11SyncLiveMatchSbx(matchId, showToast) {
     await d11RefreshLiveTeamPoints(matchId);
 
     let isFinished = false;
-    const resultText = (result.resultLine?.message || '').trim();
     if (innings.length >= 2 && resultText) {
       const pendingKey = matchId + '_sbx';
       if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = resultText; }
@@ -14326,7 +14622,7 @@ async function d11ToggleAllAutoSync(matchId) {
   try {
     await _saveMatchToFirestore(matchId, m);
     showNotif(m.allAutoSync
-      ? '🤖 Automatic armed — deadline se pehle 25/20/15/10min pe Playing XI, deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now, sab khud-b-khud chalega'
+      ? '🤖 Automatic armed — deadline se pehle 25/22/18/15/11/7min pe Playing XI, deadline ke baad 20/40/80/130/180/250/320min pe Sync Now, sab khud-b-khud chalega'
       : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
     render();
   } catch(e) {
@@ -14553,7 +14849,9 @@ async function d11CheckPlayingXIAnnouncedAll(matchId, silent) {
       else if (!inLatestXI && p.isPlayingXI && !_d11PlayerHasActivity(p)) { p.isPlayingXI = false; unconfirmedCount++; }
     });
     if (confirmedCount > 0 || unconfirmedCount > 0) {
-      await _saveDream11MatchToFirestore(matchId, d11m);
+      // FIX: 'players' is regular-user-legal per the rules — narrow update
+      // works for any user, not just admin/subAdminXI.
+      await _updateDream11MatchScoringFields(matchId, { players: d11m.players });
       d11ApplyBackupReplacements(matchId);
       notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
       render();
@@ -14576,7 +14874,7 @@ async function d11SyncLiveMatchAll(matchId, showToast) {
     // inning's own runs/wickets/overs for the team score line, same idea
     // as other providers' scorecard endpoints.
     const raw = await _allFetch(`matches/${m.allMatchId}/wagons`, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
-    _d11SyncDebugData = { matchId, fetchedAt: Date.now(), raw, source: 'Advance Live Line' };
+    _d11SetSyncDebugData({ matchId, fetchedAt: Date.now(), raw, source: 'Advance Live Line' });
 
     const innings = Array.isArray(raw?.response?.innings) ? raw.response.innings : [];
     if (innings.length === 0) {
@@ -14642,8 +14940,21 @@ async function d11SyncLiveMatchAll(matchId, showToast) {
 
     _d11AllLastSyncedAt[matchId] = Date.now();
     d11ApplyBackupReplacements(matchId);
-    await _saveMatchToFirestore(matchId, liveM);
-    await _saveDream11MatchToFirestore(matchId, liveD11m);
+    // OPTION A: Firestore rules now allow any signed-in user to write
+    // pp_matches.scoreA/scoreB/status/resultText and
+    // pp_dream11_matches.scored/colPasteText1/2 (not just admin/subAdminXI)
+    // — so automatic sync can fully complete (score header + finalize) even
+    // when no privileged session is online. Using narrow updateDoc calls
+    // (not a full setDoc) so the write only ever touches exactly the fields
+    // the rules' onlyFieldsChanged() allow-list expects.
+    await _updateDream11MatchScoringFields(matchId, {
+      players: liveD11m.players,
+      lastLiveUpdateAt: getDateTime(),
+    });
+    await _updateMatchScoreFields(matchId, {
+      scoreA: liveM.scoreA,
+      scoreB: liveM.scoreB,
+    });
     await d11RefreshLiveTeamPoints(matchId);
 
     // Advance Live Line's own match-list endpoint carries the authoritative
@@ -14663,8 +14974,8 @@ async function d11SyncLiveMatchAll(matchId, showToast) {
       liveM.status = 'completed';
       liveD11m.scored = true;
       _d11MarkTeamsScoredForMatch(matchId);
-      await _saveMatchToFirestore(matchId, liveM);
-      await _saveDream11MatchToFirestore(matchId, liveD11m);
+      await _updateMatchScoreFields(matchId, { status: 'completed' });
+      await _updateDream11MatchScoringFields(matchId, { scored: true });
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (battersApplied === 0 && bowlersApplied === 0) {
@@ -14688,11 +14999,94 @@ async function d11SyncLiveMatchAll(matchId, showToast) {
 // window, since no tab may be open through an entire due window). Only
 // runs for matches where admin has the per-match "🤖 Automatic" toggle on
 // (m.allAutoSync). Tracked in d11m.autoAllPreDeadlineXI = { w20, w15, w10, w5 }.
+// ── Atomic "claim this auto-sync window" helper ──────────────────────────
+// Every auto-sync scheduler (Advance Live Line, Cricbuzz No 2, LL3, LL5 —
+// both pre-deadline Playing XI and post-deadline Sync Now) needs to fire
+// each timing window EXACTLY ONCE per match, no matter how many users'
+// sessions have the app open and are independently running the same 15-
+// second/app-open scheduler check. The dedup flag lives in Firestore
+// (d11m.autoXxxPreDeadlineXI / autoXxxPostDeadline), which is correct in
+// principle — but a plain "read the flag, then write it back" (what every
+// scheduler did before) has a race: two sessions can both read `false` for
+// the same window microseconds apart, both then fire the real API call,
+// and only afterwards do their writes land (whichever lands second just
+// overwrites the same `true` value, so the DUPLICATE CALL already happened
+// by the time the flag catches up). A Firestore transaction closes that
+// gap: it re-reads the flag from the server at the moment of the write, and
+// if two sessions race, only the one that reads0-and-writes atomically first
+// actually gets `claimed: true` back — the loser sees `claimed: false` and
+// skips its own API call entirely, so the underlying provider's API only
+// ever gets hit once per window per match, regardless of how many users are
+// online.
+async function _d11ClaimAutoSyncWindow(matchId, fieldName, windowKey) {
+  if (!window._fbDb || !window._fbFns?.runTransaction) {
+    // Offline/no-Firebase fallback: can't guarantee atomicity, so just
+    // trust the in-memory flag (matches the old behavior — better than
+    // never firing at all if Firestore's transaction API is unavailable).
+    const d11m = dream11Matches[matchId];
+    const done = (d11m && d11m[fieldName]) || {};
+    return !done[windowKey];
+  }
+  const { doc, runTransaction } = window._fbFns;
+  const ref = doc(window._fbDb, 'pp_dream11_matches', matchId);
+  try {
+    return await runTransaction(window._fbDb, async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists()) return false;
+      const data = snap.data();
+      const done = data[fieldName] || {};
+      if (done[windowKey]) return false; // someone else already claimed this window — don't fire again
+      tx.update(ref, { [fieldName]: { ...done, [windowKey]: true }, updatedAt: Date.now() });
+      return true; // we won the race — safe to fire the real API call
+    });
+  } catch (e) {
+    console.warn('Window claim transaction failed for', matchId, fieldName, windowKey, ':', e.message);
+    return false; // on any doubt, don't fire — a missed window is far less costly than a duplicate API call
+  }
+}
+
+// Variant of _d11ClaimAutoSyncWindow for the "catch-up to latest due
+// window" schedulers (post-deadline sync): marks EVERY currently-overdue
+// window as done in the same atomic transaction (not just the one being
+// claimed), so if the app was closed for hours and several windows are
+// simultaneously overdue, only the freshest one actually fires — the
+// earlier stale ones are marked done without a redundant extra API call,
+// exactly like the original single-session logic intended, just now race-
+// safe across multiple simultaneous sessions.
+async function _d11ClaimAutoSyncWindowCatchUp(matchId, fieldName, windowKey, allWindows, isOverdue) {
+  if (!window._fbDb || !window._fbFns?.runTransaction) {
+    const d11m = dream11Matches[matchId];
+    const done = (d11m && d11m[fieldName]) || {};
+    return !done[windowKey];
+  }
+  const { doc, runTransaction } = window._fbFns;
+  const ref = doc(window._fbDb, 'pp_dream11_matches', matchId);
+  try {
+    return await runTransaction(window._fbDb, async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists()) return false;
+      const data = snap.data();
+      const done = data[fieldName] || {};
+      if (done[windowKey]) return false; // someone else already claimed this exact window
+      const newDone = { ...done };
+      allWindows.forEach(w => { if (!newDone[w.key] && isOverdue(w)) newDone[w.key] = true; });
+      tx.update(ref, { [fieldName]: newDone, updatedAt: Date.now() });
+      return true;
+    });
+  } catch (e) {
+    console.warn('Window catch-up claim transaction failed for', matchId, fieldName, windowKey, ':', e.message);
+    return false;
+  }
+}
+
+
 const ALL_PRE_DEADLINE_XI_WINDOWS_MIN = [
   { key: 'w25', mins: 25 },
-  { key: 'w20', mins: 20 },
+  { key: 'w22', mins: 22 },
+  { key: 'w18', mins: 18 },
   { key: 'w15', mins: 15 },
-  { key: 'w10', mins: 10 },
+  { key: 'w11', mins: 11 },
+  { key: 'w7', mins: 7 },
 ];
 
 async function d11AutoCheckAllPlayingXI() {
@@ -14716,10 +15110,14 @@ async function d11AutoCheckAllPlayingXI() {
     }
     if (!windowHit) continue;
 
-    const newDone = { ...done };
-    ALL_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsToDeadline <= w.mins) newDone[w.key] = true; });
-    d11m.autoAllPreDeadlineXI = newDone;
-    await _saveDream11MatchToFirestore(m.id, d11m);
+    // ATOMIC CLAIM: a plain read-then-write here would let two users'
+    // sessions both see this window as unclaimed and both fire the real
+    // API call — see _d11ClaimAutoSyncWindowCatchUp's own comment.
+    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoAllPreDeadlineXI', windowHit, ALL_PRE_DEADLINE_XI_WINDOWS_MIN, w => minsToDeadline <= w.mins);
+    if (!claimed) continue;
+    const newDoneAllXi = { ...done };
+    ALL_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDoneAllXi[w.key] && minsToDeadline <= w.mins) newDoneAllXi[w.key] = true; });
+    d11m.autoAllPreDeadlineXI = newDoneAllXi;
     try {
       await d11CheckPlayingXIAnnouncedAll(m.id, /*silent=*/true);
     } catch (e) {
@@ -14730,16 +15128,16 @@ async function d11AutoCheckAllPlayingXI() {
 
 // ── Advance Live Line — Automatic POST-deadline sync (5 fixed windows) ───
 // Same mechanism as d11AutoSyncLl5PostDeadline. Fires Sync Now only, at
-// 20/40/60/90/150/240/300 minutes after the deadline, tracked in
-// d11m.autoAllPostDeadline = { w20, w40, w60, w90, w150, w240, w300 }.
+// 20/40/80/130/180/250/320 minutes after the deadline, tracked in
+// d11m.autoAllPostDeadline = { w20, w40, w80, w130, w180, w250, w320 }.
 const ALL_AUTO_SYNC_WINDOWS_MIN = [
   { key: 'w20', mins: 20 },
   { key: 'w40', mins: 40 },
-  { key: 'w60', mins: 60 },
-  { key: 'w90', mins: 90 },
-  { key: 'w150', mins: 150 },
-  { key: 'w240', mins: 240 },
-  { key: 'w300', mins: 300 },
+  { key: 'w80', mins: 80 },
+  { key: 'w130', mins: 130 },
+  { key: 'w180', mins: 180 },
+  { key: 'w250', mins: 250 },
+  { key: 'w320', mins: 320 },
 ];
 
 async function d11AutoSyncAllPostDeadline() {
@@ -14762,10 +15160,12 @@ async function d11AutoSyncAllPostDeadline() {
     }
     if (!windowHit) continue;
 
-    const newDone = { ...done };
-    ALL_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsSinceDeadline >= w.mins) newDone[w.key] = true; });
-    d11m.autoAllPostDeadline = newDone;
-    await _saveDream11MatchToFirestore(m.id, d11m);
+    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
+    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoAllPostDeadline', windowHit, ALL_AUTO_SYNC_WINDOWS_MIN, w => minsSinceDeadline >= w.mins);
+    if (!claimed) continue;
+    const newDoneAll = { ...done };
+    ALL_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDoneAll[w.key] && minsSinceDeadline >= w.mins) newDoneAll[w.key] = true; });
+    d11m.autoAllPostDeadline = newDoneAll;
     try {
       // Sync Now only — NOT Playing XI. Post-deadline the XI is already
       // locked in from the pre-deadline checks; all that's needed now is
@@ -14790,7 +15190,7 @@ function _d11RenderAllSyncRow(m) {
   const autoOn = !!m.allAutoSync;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#a78bfa;flex:1;min-width:140px">🚀 Linked to Advance Live Line · Last synced: ${lastSyncStr}</span>
-    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleAllAutoSync('${m.id}')" title="Deadline se pehle 25/20/15/10min pe Playing XI, aur deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleAllAutoSync('${m.id}')" title="Deadline se pehle 25/22/18/15/11/7min pe Playing XI, aur deadline ke baad 20/40/80/130/180/250/320min pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchAll('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchAll('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromAll('${m.id}')">📥 Fetch Squad</button>
@@ -15337,56 +15737,112 @@ async function d11FetchSquadFromCb2(matchId) {
   }
   showNotif('📥 Fetching squad from Cricbuzz No 2…');
   try {
-    let team1 = {}, team2 = {}, raw = null, usedCllFallback = false;
+    let team1 = {}, team2 = {}, raw = null, usedSeriesSquadFallback = false;
     try {
       raw = await _cb2Fetch(`/mcenter/v1/${m.cb2MatchId}/teams`, null, { feature: 'Fetch Squad', matchId });
       _d11Cb2DebugData = { cb2Raw: raw, cb2MatchId: m.cb2MatchId };
       team1 = raw?.team1 || {};
       team2 = raw?.team2 || {};
-      if (!Array.isArray(team1.players) && !Array.isArray(team2.players)) {
+      // FIX: previously only checked `!Array.isArray(...)`, which is FALSE
+      // for an empty array (`[]` IS an array) — so a match whose squad
+      // literally hadn't been published yet on Cricbuzz No 2 (team1.players:
+      // [], team2.players: []) silently passed this check and proceeded to
+      // add 0 players, instead of triggering the fallback below. Also check
+      // for empty arrays, not just non-arrays.
+      const t1Players = Array.isArray(team1.players) ? team1.players : null;
+      const t2Players = Array.isArray(team2.players) ? team2.players : null;
+      const t1HasAny = t1Players && t1Players.some(g => (g.players||[]).length > 0 || (g.player||[]).length > 0);
+      const t2HasAny = t2Players && t2Players.some(g => (g.players||[]).length > 0 || (g.player||[]).length > 0);
+      if (!t1Players && !t2Players) {
         throw new Error('Match squad not published yet on Cricbuzz No 2');
       }
-    } catch (cb2SquadErr) {
-      // Cricbuzz No 2 has no confirmed series-squad endpoint of its own yet,
-      // so instead of guessing an untested schema, fall back to Cricket Live
-      // Line's series-squad fetch if this same match is ALSO linked there —
-      // that path is already confirmed working (see
-      // _d11CllFetchSeriesSquadFallback). This only helps matches linked to
-      // both providers; if not linked to CLL, the original cb2 error shows.
-      if (!m.cllMatchId) throw cb2SquadErr;
-      const cllFallback = await _d11CllFetchSeriesSquadFallback(matchId, m);
-      if (!cllFallback) throw cb2SquadErr;
-      usedCllFallback = true;
-      d11SyncTeamFlag(m.teamA, cllFallback.teamA.flag);
-      d11SyncTeamFlag(m.teamB, cllFallback.teamB.flag);
-      const existingNamesLowerCll = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
-      let addedCll = 0;
-      const addCllSide = (teamObj, side) => {
-        (teamObj.player || []).forEach(p => {
-          const name = (p.name || '').trim();
-          if (!name || existingNamesLowerCll.has(name.toLowerCase())) return;
-          const roleText = p.play_role || '';
-          const isKeeper = /keeper/i.test(roleText);
-          const role = _d11MapCricbuzzRole(roleText, isKeeper);
-          const photo = (p.image || '').trim() || null;
-          const player = newDream11Player(name, role, side, { photo });
-          d11m.players.push(player);
-          d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
-          existingNamesLowerCll.add(name.toLowerCase());
-          addedCll++;
-        });
-      };
-      addCllSide(cllFallback.teamA, 'A');
-      addCllSide(cllFallback.teamB, 'B');
-      if (addedCll === 0) {
-        showNotif('No new players to add — squad already matches what\'s in your pool.');
-        render();
-        return;
+      if (!t1HasAny && !t2HasAny) {
+        // Both teams' player arrays exist but are empty (squad groups
+        // present with no actual players inside, or player arrays are
+        // literally []) — the match-level squad endpoint has nothing
+        // usable yet. Try the SERIES-level squad instead: /series/v1/
+        // {seriesId}/squads lists each team's squadId for this series,
+        // then /series/v1/{seriesId}/squads/{squadId} returns that team's
+        // actual player list — this is often published earlier than the
+        // match-specific squad.
+        throw new Error('__CB2_EMPTY_SQUAD__');
       }
-      await _saveDream11MatchToFirestore(matchId, d11m);
-      showNotif(`✅ Added ${addedCll} players via Cricket Live Line series squad (Cricbuzz No 2 squad wasn't published yet)!`);
-      render();
-      return;
+    } catch (cb2SquadErr) {
+      const isEmptySquad = cb2SquadErr.message === '__CB2_EMPTY_SQUAD__';
+      // Try the series-level squad list first (new fallback) if we have a
+      // seriesId for this match, then fall back further to Cricket Live
+      // Line's series-squad fetch if that's also linked.
+      if (m.cb2SeriesId) {
+        try {
+          showNotif('📥 Match squad empty on Cricbuzz No 2 — trying Series Squads List instead…');
+          const seriesSquadsRaw = await _cb2Fetch(`/series/v1/${m.cb2SeriesId}/squads`, null, { feature: 'Fetch Squad (series fallback)', matchId });
+          // Standard Cricbuzz schema: { squads: [ { squadId, squadType,
+          // teamId, teamName, ... }, ... ] } — one entry per team (and
+          // sometimes extra entries like "Match Officials"/support staff,
+          // which we skip by matching on teamId against this match's two
+          // teams).
+          const squadList = seriesSquadsRaw?.squads || seriesSquadsRaw?.squadList || [];
+          const wantedTeamIds = [team1?.team?.teamid, team2?.team?.teamid].filter(Boolean).map(String);
+          const relevantSquads = squadList.filter(s => !wantedTeamIds.length || wantedTeamIds.includes(String(s.teamId || s.teamid)));
+          const squadsToUse = relevantSquads.length ? relevantSquads : squadList; // if team-id matching found nothing, just try everything returned
+          if (!squadsToUse.length) throw new Error('No squads listed for this series on Cricbuzz No 2 yet');
+
+          const existingNamesLowerSeries = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+          let addedSeries = 0;
+          for (const squadEntry of squadsToUse) {
+            const squadId = squadEntry.squadId || squadEntry.squadid;
+            if (!squadId) continue;
+            const teamIdForSide = String(squadEntry.teamId || squadEntry.teamid || '');
+            const side = teamIdForSide && String(team2?.team?.teamid) === teamIdForSide ? 'B' : 'A'; // default to A unless it clearly matches team2
+            let squadDetail;
+            try {
+              squadDetail = await _cb2Fetch(`/series/v1/${m.cb2SeriesId}/squads/${squadId}`, null, { feature: 'Fetch Squad (series fallback detail)', matchId });
+            } catch (e) {
+              console.warn('Series squad detail fetch failed for squadId', squadId, e.message);
+              continue;
+            }
+            (squadDetail?.player || []).forEach(p => {
+              if (p.isHeader) return; // "BATTERS"/"ALL ROUNDERS"/etc section labels, not real players
+              const name = (p.name || '').trim();
+              if (!name || existingNamesLowerSeries.has(name.toLowerCase())) return;
+              const isKeeper = /wk|keeper/i.test(p.role || '');
+              const role = _d11MapCricbuzzRole(p.role, isKeeper);
+              const photo = p.imageId ? cb2FaceImageUrl(p.imageId) : null;
+              const player = newDream11Player(name, role, side, { photo });
+              d11m.players.push(player);
+              d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
+              existingNamesLowerSeries.add(name.toLowerCase());
+              addedSeries++;
+            });
+          }
+          if (addedSeries === 0) {
+            showNotif('No new players found via Series Squads List either — squad may genuinely not be announced yet.', 'error');
+            render();
+            return;
+          }
+          await _saveDream11MatchToFirestore(matchId, d11m);
+          showNotif(`✅ Added ${addedSeries} players via Series Squads List (match-level squad wasn't published yet)!`);
+          render();
+          return;
+        } catch (seriesFallbackErr) {
+          console.warn('Series Squads List fallback failed:', seriesFallbackErr.message);
+          // fall through to the final error below — Cricbuzz No 2's own
+          // fallback chain is exhausted at this point.
+        }
+      }
+      // FIX: this used to fall back to Cricket Live Line's series-squad
+      // fetch (_d11CllFetchSeriesSquadFallback) if the match was ALSO
+      // linked to CLL — but that mixes providers: Cricbuzz No 2's "Fetch
+      // Squad" button would silently pull data from a completely different
+      // API (Cricket Live Line), which isn't what "provider-specific" is
+      // supposed to mean. Each provider's fetch should only ever use its
+      // OWN API. Cricbuzz No 2 already has two fallback tiers of its own
+      // (match-level squad, then series-level squad) — if both come back
+      // empty, that's a genuine "not published yet" state for THIS
+      // provider, and the admin should switch providers manually (e.g. use
+      // Cricket Live Line's own "Fetch Squad" button) rather than this one
+      // silently reaching across into another provider's data.
+      throw (isEmptySquad ? new Error('Squad not published yet on Cricbuzz No 2 (tried both match-level and series-level squads) — try again closer to match time, or fetch from a different linked provider instead.') : cb2SquadErr);
     }
 
     const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
@@ -15506,7 +15962,7 @@ async function d11SyncLiveMatchCb2(matchId, showToast) {
   if (!m || !d11m || !m.cb2MatchId) return;
   try {
     const raw = await _cb2Fetch(`/mcenter/v1/${m.cb2MatchId}/scard`, null, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
-    _d11SyncDebugData = { matchId, fetchedAt: Date.now(), raw, source: 'Cricbuzz No 2' };
+    _d11SetSyncDebugData({ matchId, fetchedAt: Date.now(), raw, source: 'Cricbuzz No 2' });
 
     const innings = raw?.scorecard || [];
     if (innings.length === 0) {
@@ -15644,12 +16100,14 @@ async function d11SyncLiveMatchCb2(matchId, showToast) {
 // ── Cricbuzz No 2 — Automatic PRE-deadline Playing XI (catch-up) ────────
 // Same mechanism as d11AutoCheckLl3PlayingXI / d11AutoCheckLl5PlayingXI.
 // Only runs for matches where admin has the per-match "🤖 Automatic" toggle
-// on (m.cb2AutoSync). Tracked in d11m.autoCb2PreDeadlineXI = { w25, w20, w15, w10 }.
+// on (m.cb2AutoSync). Tracked in d11m.autoCb2PreDeadlineXI = { w25, w22, w18, w15, w11, w7 }.
 const CB2_PRE_DEADLINE_XI_WINDOWS_MIN = [
   { key: 'w25', mins: 25 },
-  { key: 'w20', mins: 20 },
+  { key: 'w22', mins: 22 },
+  { key: 'w18', mins: 18 },
   { key: 'w15', mins: 15 },
-  { key: 'w10', mins: 10 },
+  { key: 'w11', mins: 11 },
+  { key: 'w7', mins: 7 },
 ];
 
 async function d11AutoCheckCb2PlayingXI() {
@@ -15673,10 +16131,12 @@ async function d11AutoCheckCb2PlayingXI() {
     }
     if (!windowHit) continue;
 
-    const newDone = { ...done };
-    CB2_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsToDeadline <= w.mins) newDone[w.key] = true; });
-    d11m.autoCb2PreDeadlineXI = newDone;
-    await _saveDream11MatchToFirestore(m.id, d11m);
+    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
+    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoCb2PreDeadlineXI', windowHit, CB2_PRE_DEADLINE_XI_WINDOWS_MIN, w => minsToDeadline <= w.mins);
+    if (!claimed) continue;
+    const newDoneCb2Xi = { ...done };
+    CB2_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDoneCb2Xi[w.key] && minsToDeadline <= w.mins) newDoneCb2Xi[w.key] = true; });
+    d11m.autoCb2PreDeadlineXI = newDoneCb2Xi;
     try {
       await d11CheckPlayingXIAnnouncedCb2(m.id, /*silent=*/true);
     } catch (e) {
@@ -15687,16 +16147,16 @@ async function d11AutoCheckCb2PlayingXI() {
 
 // ── Cricbuzz No 2 — Automatic POST-deadline sync (7 fixed windows) ──────
 // Same mechanism as d11AutoSyncLl3PostDeadline / d11AutoSyncLl5PostDeadline.
-// Fires Sync Now only, at 20/40/60/90/150/240/300 minutes after the
-// deadline, tracked in d11m.autoCb2PostDeadline = { w20, w40, w60, w90, w150, w240, w300 }.
+// Fires Sync Now only, at 20/40/80/130/180/250/320 minutes after the
+// deadline, tracked in d11m.autoCb2PostDeadline = { w20, w40, w80, w130, w180, w250, w320 }.
 const CB2_AUTO_SYNC_WINDOWS_MIN = [
   { key: 'w20', mins: 20 },
   { key: 'w40', mins: 40 },
-  { key: 'w60', mins: 60 },
-  { key: 'w90', mins: 90 },
-  { key: 'w150', mins: 150 },
-  { key: 'w240', mins: 240 },
-  { key: 'w300', mins: 300 },
+  { key: 'w80', mins: 80 },
+  { key: 'w130', mins: 130 },
+  { key: 'w180', mins: 180 },
+  { key: 'w250', mins: 250 },
+  { key: 'w320', mins: 320 },
 ];
 
 async function d11AutoSyncCb2PostDeadline() {
@@ -15719,10 +16179,12 @@ async function d11AutoSyncCb2PostDeadline() {
     }
     if (!windowHit) continue;
 
-    const newDone = { ...done };
-    CB2_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsSinceDeadline >= w.mins) newDone[w.key] = true; });
-    d11m.autoCb2PostDeadline = newDone;
-    await _saveDream11MatchToFirestore(m.id, d11m);
+    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
+    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoCb2PostDeadline', windowHit, CB2_AUTO_SYNC_WINDOWS_MIN, w => minsSinceDeadline >= w.mins);
+    if (!claimed) continue;
+    const newDoneCb2 = { ...done };
+    CB2_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDoneCb2[w.key] && minsSinceDeadline >= w.mins) newDoneCb2[w.key] = true; });
+    d11m.autoCb2PostDeadline = newDoneCb2;
     try {
       await d11SyncLiveMatchCb2(m.id, /*showToast=*/false);
     } catch (e) {
@@ -15905,7 +16367,7 @@ async function d11SyncLiveMatchCll(matchId, showToast) {
   if (!m || !d11m || !m.cllMatchId) return;
   try {
     const raw = await _cllFetch(`match/${m.cllMatchId}/scorecard`, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
-    _d11SyncDebugData = { matchId, fetchedAt: Date.now(), raw, source: 'Cricket Live Line' };
+    _d11SetSyncDebugData({ matchId, fetchedAt: Date.now(), raw, source: 'Cricket Live Line' });
 
     const data = raw?.data || {};
     const scorecard = data.scorecard || {};
@@ -16210,7 +16672,7 @@ async function d11SyncLiveMatchLl2(matchId, showToast) {
   if (!m || !d11m || !m.ll2MatchId) return;
   try {
     const raw = await _ll2Fetch(`match/${m.ll2MatchId}/scorecard`, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
-    _d11SyncDebugData = { matchId, fetchedAt: Date.now(), raw, source: 'Cricket Live Line 2' };
+    _d11SetSyncDebugData({ matchId, fetchedAt: Date.now(), raw, source: 'Cricket Live Line 2' });
 
     const data = raw?.data || {};
     const scorecard = data.scorecard || {};
@@ -16744,7 +17206,7 @@ async function d11ToggleLl3AutoSync(matchId) {
   try {
     await _saveMatchToFirestore(matchId, m);
     showNotif(m.ll3AutoSync
-      ? '🤖 Automatic armed — deadline se pehle 25/20/15/10min pe Playing XI, deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now, sab khud-b-khud chalega'
+      ? '🤖 Automatic armed — deadline se pehle 25/22/18/15/11/7min pe Playing XI, deadline ke baad 20/40/80/130/180/250/320min pe Sync Now, sab khud-b-khud chalega'
       : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
     render();
   } catch(e) {
@@ -17010,7 +17472,8 @@ async function d11CheckPlayingXIAnnouncedLl3(matchId, silent) {
       else if (!inLatestXI && p.isPlayingXI && !_d11PlayerHasActivity(p)) { p.isPlayingXI = false; unconfirmedCount++; }
     });
     if (confirmedCount > 0 || unconfirmedCount > 0) {
-      await _saveDream11MatchToFirestore(matchId, d11m);
+      // FIX: 'players' is regular-user-legal per the rules.
+      await _updateDream11MatchScoringFields(matchId, { players: d11m.players });
       d11ApplyBackupReplacements(matchId);
       notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
       render();
@@ -17029,7 +17492,7 @@ async function d11SyncLiveMatchLl3(matchId, showToast) {
   if (!m || !d11m || !m.ll3MatchId) return;
   try {
     const raw = await _ll3Fetch(`match/${m.ll3MatchId}/scorecard`, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
-    _d11SyncDebugData = { matchId, fetchedAt: Date.now(), raw, source: 'Cricket Live Line 3' };
+    _d11SetSyncDebugData({ matchId, fetchedAt: Date.now(), raw, source: 'Cricket Live Line 3' });
 
     const data = raw?.data || {};
     const scorecard = data.scorecard || {};
@@ -17100,8 +17563,17 @@ async function d11SyncLiveMatchLl3(matchId, showToast) {
 
     _d11Ll3LastSyncedAt[matchId] = Date.now();
     d11ApplyBackupReplacements(matchId);
-    await _saveMatchToFirestore(matchId, m);
-    await _saveDream11MatchToFirestore(matchId, d11m);
+    // OPTION A: Firestore rules now allow any signed-in user to write these
+    // fields — see the comment on d11SyncLiveMatchAll's own version of this
+    // for the full reasoning. Narrow updateDoc calls, not full setDoc.
+    await _updateDream11MatchScoringFields(matchId, {
+      players: d11m.players,
+      lastLiveUpdateAt: getDateTime(),
+    });
+    await _updateMatchScoreFields(matchId, {
+      scoreA: m.scoreA,
+      scoreB: m.scoreB,
+    });
     await d11RefreshLiveTeamPoints(matchId);
 
     // This provider's scorecard response includes its own authoritative
@@ -17128,8 +17600,8 @@ async function d11SyncLiveMatchLl3(matchId, showToast) {
       m.status = 'completed';
       if (d11m) d11m.scored = true;
       _d11MarkTeamsScoredForMatch(matchId);
-      await _saveMatchToFirestore(matchId, m);
-      await _saveDream11MatchToFirestore(matchId, d11m);
+      await _updateMatchScoreFields(matchId, { status: 'completed', resultText: resultText });
+      await _updateDream11MatchScoringFields(matchId, { scored: true });
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (battersApplied === 0 && bowlersApplied === 0) {
@@ -17153,9 +17625,11 @@ async function d11SyncLiveMatchLl3(matchId, showToast) {
 // Tracked in d11m.autoLl3PreDeadlineXI = { w20, w15, w10, w5 }.
 const LL3_PRE_DEADLINE_XI_WINDOWS_MIN = [
   { key: 'w25', mins: 25 },
-  { key: 'w20', mins: 20 },
+  { key: 'w22', mins: 22 },
+  { key: 'w18', mins: 18 },
   { key: 'w15', mins: 15 },
-  { key: 'w10', mins: 10 },
+  { key: 'w11', mins: 11 },
+  { key: 'w7', mins: 7 },
 ];
 
 async function d11AutoCheckLl3PlayingXI() {
@@ -17179,10 +17653,12 @@ async function d11AutoCheckLl3PlayingXI() {
     }
     if (!windowHit) continue;
 
-    const newDone = { ...done };
-    LL3_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsToDeadline <= w.mins) newDone[w.key] = true; });
-    d11m.autoLl3PreDeadlineXI = newDone;
-    await _saveDream11MatchToFirestore(m.id, d11m);
+    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
+    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoLl3PreDeadlineXI', windowHit, LL3_PRE_DEADLINE_XI_WINDOWS_MIN, w => minsToDeadline <= w.mins);
+    if (!claimed) continue;
+    const newDoneLl3Xi = { ...done };
+    LL3_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDoneLl3Xi[w.key] && minsToDeadline <= w.mins) newDoneLl3Xi[w.key] = true; });
+    d11m.autoLl3PreDeadlineXI = newDoneLl3Xi;
     try {
       await d11CheckPlayingXIAnnouncedLl3(m.id, /*silent=*/true);
     } catch (e) {
@@ -17193,16 +17669,16 @@ async function d11AutoCheckLl3PlayingXI() {
 
 // ── Cricket Live Line 3 — Automatic POST-deadline sync (7 fixed windows) ──
 // Same mechanism as d11AutoSyncLl5PostDeadline. Fires Sync Now only, at
-// 20/40/60/90/150/240/300 minutes after the deadline, tracked in
-// d11m.autoLl3PostDeadline = { w20, w40, w60, w90, w150, w240, w300 }.
+// 20/40/80/130/180/250/320 minutes after the deadline, tracked in
+// d11m.autoLl3PostDeadline = { w20, w40, w80, w130, w180, w250, w320 }.
 const LL3_AUTO_SYNC_WINDOWS_MIN = [
   { key: 'w20', mins: 20 },
   { key: 'w40', mins: 40 },
-  { key: 'w60', mins: 60 },
-  { key: 'w90', mins: 90 },
-  { key: 'w150', mins: 150 },
-  { key: 'w240', mins: 240 },
-  { key: 'w300', mins: 300 },
+  { key: 'w80', mins: 80 },
+  { key: 'w130', mins: 130 },
+  { key: 'w180', mins: 180 },
+  { key: 'w250', mins: 250 },
+  { key: 'w320', mins: 320 },
 ];
 
 async function d11AutoSyncLl3PostDeadline() {
@@ -17225,10 +17701,12 @@ async function d11AutoSyncLl3PostDeadline() {
     }
     if (!windowHit) continue;
 
-    const newDone = { ...done };
-    LL3_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsSinceDeadline >= w.mins) newDone[w.key] = true; });
-    d11m.autoLl3PostDeadline = newDone;
-    await _saveDream11MatchToFirestore(m.id, d11m);
+    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
+    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoLl3PostDeadline', windowHit, LL3_AUTO_SYNC_WINDOWS_MIN, w => minsSinceDeadline >= w.mins);
+    if (!claimed) continue;
+    const newDoneLl3 = { ...done };
+    LL3_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDoneLl3[w.key] && minsSinceDeadline >= w.mins) newDoneLl3[w.key] = true; });
+    d11m.autoLl3PostDeadline = newDoneLl3;
     try {
       await d11SyncLiveMatchLl3(m.id, /*showToast=*/false);
     } catch (e) {
@@ -17250,7 +17728,7 @@ function _d11RenderLl3SyncRow(m) {
   const autoOn = !!m.ll3AutoSync;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#fbbf24;flex:1;min-width:140px">⚡ Linked to Cricket Live Line 3 · Last synced: ${lastSyncStr}</span>
-    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleLl3AutoSync('${m.id}')" title="Deadline se pehle 25/20/15/10min pe Playing XI, aur deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleLl3AutoSync('${m.id}')" title="Deadline se pehle 25/22/18/15/11/7min pe Playing XI, aur deadline ke baad 20/40/80/130/180/250/320min pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchLl3('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchLl3('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromLl3('${m.id}')">📥 Fetch Squad</button>
@@ -17938,7 +18416,7 @@ async function d11SyncLiveMatchLl4(matchId, showToast) {
   if (!m || !d11m || !m.ll4MatchId) return;
   try {
     const raw = await _ll4Fetch(`match/${m.ll4MatchId}/scorecard`, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
-    _d11SyncDebugData = { matchId, fetchedAt: Date.now(), raw, source: 'Cricket Live Line 4' };
+    _d11SetSyncDebugData({ matchId, fetchedAt: Date.now(), raw, source: 'Cricket Live Line 4' });
 
     const data = raw?.data || {};
     const scorecard = data.scorecard || {};
@@ -18562,7 +19040,7 @@ async function d11ToggleLl5AutoSync(matchId) {
   try {
     await _saveMatchToFirestore(matchId, m);
     showNotif(m.ll5AutoSync
-      ? '🤖 Automatic armed — deadline se pehle 25/20/15/10min pe Playing XI, deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now, sab khud-b-khud chalega'
+      ? '🤖 Automatic armed — deadline se pehle 25/22/18/15/11/7min pe Playing XI, deadline ke baad 20/40/80/130/180/250/320min pe Sync Now, sab khud-b-khud chalega'
       : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
     render();
   } catch(e) {
@@ -18750,9 +19228,11 @@ async function d11FetchSquadFromLl5(matchId) {
 // instead of replaying stale earlier windows.
 const LL5_PRE_DEADLINE_XI_WINDOWS_MIN = [
   { key: 'w25', mins: 25 },
-  { key: 'w20', mins: 20 },
+  { key: 'w22', mins: 22 },
+  { key: 'w18', mins: 18 },
   { key: 'w15', mins: 15 },
-  { key: 'w10', mins: 10 },
+  { key: 'w11', mins: 11 },
+  { key: 'w7', mins: 7 },
 ];
 
 async function d11AutoCheckLl5PlayingXI() {
@@ -18789,10 +19269,12 @@ async function d11AutoCheckLl5PlayingXI() {
     }
     if (!windowHit) continue;
 
-    const newDone = { ...done };
-    LL5_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsToDeadline <= w.mins) newDone[w.key] = true; });
-    d11m.autoLl5PreDeadlineXI = newDone;
-    await _saveDream11MatchToFirestore(m.id, d11m);
+    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
+    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoLl5PreDeadlineXI', windowHit, LL5_PRE_DEADLINE_XI_WINDOWS_MIN, w => minsToDeadline <= w.mins);
+    if (!claimed) continue;
+    const newDoneLl5Xi = { ...done };
+    LL5_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDoneLl5Xi[w.key] && minsToDeadline <= w.mins) newDoneLl5Xi[w.key] = true; });
+    d11m.autoLl5PreDeadlineXI = newDoneLl5Xi;
     try {
       await d11CheckPlayingXIAnnouncedLl5(m.id, /*silent=*/true);
     } catch (e) {
@@ -18801,16 +19283,16 @@ async function d11AutoCheckLl5PlayingXI() {
   }
 }
 
-// 20/40/60/90/150/240/300 minutes after the deadline, tracked in
-// d11m.autoLl5PostDeadline = { w20, w40, w60, w90, w150, w240, w300 }.
+// 20/40/80/130/180/250/320 minutes after the deadline, tracked in
+// d11m.autoLl5PostDeadline = { w20, w40, w80, w130, w180, w250, w320 }.
 const LL5_AUTO_SYNC_WINDOWS_MIN = [
   { key: 'w20', mins: 20 },
   { key: 'w40', mins: 40 },
-  { key: 'w60', mins: 60 },
-  { key: 'w90', mins: 90 },
-  { key: 'w150', mins: 150 },
-  { key: 'w240', mins: 240 },
-  { key: 'w300', mins: 300 },
+  { key: 'w80', mins: 80 },
+  { key: 'w130', mins: 130 },
+  { key: 'w180', mins: 180 },
+  { key: 'w250', mins: 250 },
+  { key: 'w320', mins: 320 },
 ];
 
 async function d11AutoSyncLl5PostDeadline() {
@@ -18842,14 +19324,15 @@ async function d11AutoSyncLl5PostDeadline() {
     if (!windowHit) continue;
 
     // Mark every due window (not just the one we're about to fire) as done
-    // FIRST — before the async call — so (a) a second tab running this same
-    // loop a few seconds later doesn't double-fire, and (b) we don't leave
-    // older due windows sitting there to be caught by a later tick and
-    // fire redundantly right after this fresher sync.
+    // atomically via a Firestore transaction — see
+    // _d11ClaimAutoSyncWindowCatchUp's own comment for why a plain read-
+    // then-write here would let two simultaneous sessions both fire the
+    // same window's API call.
+    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoLl5PostDeadline', windowHit, LL5_AUTO_SYNC_WINDOWS_MIN, w => minsSinceDeadline >= w.mins);
+    if (!claimed) continue;
     const newDone = { ...done };
     LL5_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsSinceDeadline >= w.mins) newDone[w.key] = true; });
     d11m.autoLl5PostDeadline = newDone;
-    await _saveDream11MatchToFirestore(m.id, d11m);
     try {
       // Sync Now only — NOT Playing XI. Post-deadline the XI is already
       // locked in from the pre-deadline checks; all that's needed now is
@@ -18886,7 +19369,8 @@ async function d11CheckPlayingXIAnnouncedLl5(matchId, silent) {
       else if (!inLatestXI && p.isPlayingXI && !_d11PlayerHasActivity(p)) { p.isPlayingXI = false; unconfirmedCount++; }
     });
     if (confirmedCount > 0 || unconfirmedCount > 0) {
-      await _saveDream11MatchToFirestore(matchId, d11m);
+      // FIX: 'players' is regular-user-legal per the rules.
+      await _updateDream11MatchScoringFields(matchId, { players: d11m.players });
       d11ApplyBackupReplacements(matchId);
       notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
       render();
@@ -18914,7 +19398,7 @@ async function d11SyncLiveMatchLl5(matchId, showToast) {
     // balls are captured properly instead of only whoever was at the crease
     // at sync time.
     const raw = await _ll5Fetch(`scorecardByMatchId/${LL5_UPCOMING_FEED_ID}`, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId }, { match_id: m.ll5MatchId });
-    _d11SyncDebugData = { matchId, fetchedAt: Date.now(), raw, source: 'Cricket Live Line 5' };
+    _d11SetSyncDebugData({ matchId, fetchedAt: Date.now(), raw, source: 'Cricket Live Line 5' });
 
     const data = raw?.data || {};
     const scorecard = data.scorecard || {};
@@ -18985,8 +19469,17 @@ async function d11SyncLiveMatchLl5(matchId, showToast) {
 
     _d11Ll5LastSyncedAt[matchId] = Date.now();
     d11ApplyBackupReplacements(matchId);
-    await _saveMatchToFirestore(matchId, m);
-    await _saveDream11MatchToFirestore(matchId, d11m);
+    // OPTION A: Firestore rules now allow any signed-in user to write these
+    // fields — see the comment on d11SyncLiveMatchAll's own version of this
+    // for the full reasoning. Narrow updateDoc calls, not full setDoc.
+    await _updateDream11MatchScoringFields(matchId, {
+      players: d11m.players,
+      lastLiveUpdateAt: getDateTime(),
+    });
+    await _updateMatchScoreFields(matchId, {
+      scoreA: m.scoreA,
+      scoreB: m.scoreB,
+    });
     await d11RefreshLiveTeamPoints(matchId);
 
     // This provider's scorecard response carries its own authoritative
@@ -19007,8 +19500,8 @@ async function d11SyncLiveMatchLl5(matchId, showToast) {
       m.status = 'completed';
       if (d11m) d11m.scored = true;
       _d11MarkTeamsScoredForMatch(matchId);
-      await _saveMatchToFirestore(matchId, m);
-      await _saveDream11MatchToFirestore(matchId, d11m);
+      await _updateMatchScoreFields(matchId, { status: 'completed', resultText: resultText });
+      await _updateDream11MatchScoringFields(matchId, { scored: true });
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (battersApplied === 0 && bowlersApplied === 0) {
@@ -19039,7 +19532,7 @@ function _d11RenderLl5SyncRow(m) {
   const autoOn = !!m.ll5AutoSync;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(8,145,178,0.08);border:1px solid rgba(8,145,178,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#22d3ee;flex:1;min-width:140px">⚡ Linked to Cricket Live Line 5 · Last synced: ${lastSyncStr}</span>
-    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleLl5AutoSync('${m.id}')" title="Deadline se pehle 25/20/15/10min pe Playing XI, aur deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleLl5AutoSync('${m.id}')" title="Deadline se pehle 25/22/18/15/11/7min pe Playing XI, aur deadline ke baad 20/40/80/130/180/250/320min pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchLl5('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchLl5('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromLl5('${m.id}')">📥 Fetch Squad</button>
@@ -19285,7 +19778,7 @@ function _d11RenderCb2SyncRow(m) {
   const autoOn = !!m.cb2AutoSync;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(147,51,234,0.08);border:1px solid rgba(147,51,234,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#c084fc;flex:1;min-width:140px">🏏 Linked to Cricbuzz No 2 · Last synced: ${lastSyncStr}</span>
-    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleCb2AutoSync('${m.id}')" title="Deadline se pehle 25/20/15/10min pe Playing XI, aur deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleCb2AutoSync('${m.id}')" title="Deadline se pehle 25/22/18/15/11/7min pe Playing XI, aur deadline ke baad 20/40/80/130/180/250/320min pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchCb2('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchCb2('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromCb2('${m.id}')">📥 Fetch Squad</button>
@@ -20453,7 +20946,7 @@ async function d11SyncLiveMatch(matchId, showToast) {
     // shape has been observed to vary slightly between match types
     // (bilateral vs league vs ICC events), so this is the fastest way to
     // spot a field-name mismatch instead of guessing blind.
-    _d11SyncDebugData = { matchId, fetchedAt: Date.now(), raw: data };
+    _d11SetSyncDebugData({ matchId, fetchedAt: Date.now(), raw: data });
 
     const header = data.matchHeader || {};
     const statusText = data.status || header.status || '';
@@ -20622,7 +21115,7 @@ async function d11SyncLiveMatchEspn(matchId, showToast) {
   if (!m || !d11m || !m.espnMatchId) return;
   try {
     const data = await _espnCricinfoFetch('get_match_scorecard', { match_id: m.espnMatchId, series_id: m.espnSeriesId || '' }, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
-    _d11SyncDebugData = { matchId, fetchedAt: Date.now(), raw: data, source: 'ESPN Cricinfo' };
+    _d11SetSyncDebugData({ matchId, fetchedAt: Date.now(), raw: data, source: 'ESPN Cricinfo' });
 
     const matchObj = data?.match || {};
     const statusText = data?.status || matchObj.status || matchObj.statusText || '';
@@ -22617,7 +23110,7 @@ async function d11SubmitTeam() {
     window.scrollTo(0,0);
     // Refresh dream11 match data so freeParticipants/megaParticipants counts
     // are always fresh — avoids stale cache showing "0 joined".
-    _loadAllDream11MatchesFromFirestore().then(() => render()).catch(() => {});
+    _loadAllDream11MatchesFromFirestore(true).then(() => render()).catch(() => {});
   } catch(e) {
     delete dream11Teams[d11TeamDraft.id];
     d11TeamSaveFailed = true;
@@ -25673,6 +26166,15 @@ function openD11ContestParticipants(matchId, contestType, contestRef, returnToAd
   tab = 'dream11ContestParticipants';
   render();
   window.scrollTo(0,0);
+  // FIX: this leaderboard ranks by team.totalPoints (pp_dream11_teams), a
+  // field that can lag independently of match/player data even when
+  // everything else looks fresh — see openDream11ViewTeam's comment for
+  // the full reasoning. Force a genuine fresh read on open so the ranking
+  // and points shown are never stale for any of the listed teams.
+  Promise.all([
+    typeof _loadAllDream11TeamsFromFirestore === 'function' ? _loadAllDream11TeamsFromFirestore(true) : Promise.resolve(),
+    typeof _loadAllDream11MatchesFromFirestore === 'function' ? _loadAllDream11MatchesFromFirestore(true) : Promise.resolve(),
+  ]).then(() => render()).catch(() => {});
 }
 
 // ── Shows the list of users who joined one specific contest (Mega/H2H/Free/Custom) for a match ──
@@ -26851,7 +27353,7 @@ function renderDream11Hub() {
           <button class="btn-primary btn-block" style="font-size:12px;padding:10px" onclick="openDream11Match('${m.id}')">🎮 Build My Team</button>
         ` : `<div class="empty-state" style="padding:10px;font-size:12px">Contest is locked, joining is closed now</div>`}
       </div>
-      ${!dLocked ? `<button class="btn-primary btn-block mb0" style="font-size:12px;padding:10px;margin-top:8px;background:linear-gradient(135deg,#f59e0b,#ea580c)" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">🏟️ Join Mega / H2H / Custom Contest</button>` : ''}
+      ${!dLocked ? `<button class="btn-primary btn-block mb0" style="font-size:12px;padding:10px;margin-top:8px;background:linear-gradient(135deg,#f59e0b,#ea580c)" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore(true).then(()=>render()).catch(()=>{})">🏟️ Join Mega / H2H / Custom Contest</button>` : ''}
       ${isLiveScoring ? `<button class="btn-secondary btn-block mb0" style="font-size:12px;padding:10px;margin-top:8px" onclick="openDream11Leaderboard('${m.id}')">🏅 View Live Leaderboard</button>` : ''}
       ${m.scorecardText ? `<button class="btn-primary btn-block mb0" style="background:linear-gradient(135deg,#0f766e,#0d9488);font-size:12px;padding:10px;margin-top:8px" onclick="openD11ScorecardPage('${m.id}')">📋 Full Batting & Bowling Scorecard Dekho →</button>` : (d11m.players||[]).some(p => p.stats) ? `<button class="btn-primary btn-block mb0" style="background:linear-gradient(135deg,#0f766e,#0d9488);font-size:12px;padding:10px;margin-top:8px" onclick="openD11LiveScorecard('${m.id}')">📋 Full Batting & Bowling Scorecard Dekho →</button>` : ''}
     </div></div>`;
@@ -26860,7 +27362,7 @@ function renderDream11Hub() {
   `;
   } catch(e) {
     console.error("Dream11 render error:", e);
-    return `<div class="empty-state"><div class="empty-icon">🎮</div>Dream11 load ho raha hai...<br/><button class="btn-secondary" style="margin-top:14px" onclick="_loadAllDream11MatchesFromFirestore().then(()=>render())">🔄 Dobara Try Karo</button></div>`;
+    return `<div class="empty-state"><div class="empty-icon">🎮</div>Dream11 load ho raha hai...<br/><button class="btn-secondary" style="margin-top:14px" onclick="_loadAllDream11MatchesFromFirestore(true).then(()=>render())">🔄 Dobara Try Karo</button></div>`;
   }
 }
 
@@ -27473,7 +27975,7 @@ async function d11SaveMatchScorecard(matchId) {
 
 async function d11RefreshScores() {
   showNotif('🔄 Scores reload ho rahe hain...');
-  await _loadAllMatchesFromFirestore();
+  await _loadAllMatchesFromFirestore(true);
   render();
   showNotif('✅ Scores updated!');
 }
@@ -28323,7 +28825,7 @@ function renderD11TeamPicker() {
 
   ${slots}
 
-  ${myTeams.length > 0 ? `<button class="btn-primary btn-block" style="margin-top:8px" onclick="d11ContestMatchId='${matchId}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore().then(()=>render()).catch(()=>{})">🎪 Join Mega / H2H / Custom Contest</button>` : ''}
+  ${myTeams.length > 0 ? `<button class="btn-primary btn-block" style="margin-top:8px" onclick="d11ContestMatchId='${matchId}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore(true).then(()=>render()).catch(()=>{})">🎪 Join Mega / H2H / Custom Contest</button>` : ''}
   `;
 }
 
@@ -34940,6 +35442,7 @@ async function initApp() {
 
 initApp();
 _installVisibilityGuard(); // was fully built but never wired up — needed so onSnapshot listeners detach when idle/hidden and reattach on return, instead of running forever or never starting
+_startD11FastPoll(); // keeps live scores/points/team-totals refreshing every ~15s for upcoming/live/today's-completed matches, for every user (admin included) — see _startD11FastPoll's own comment
 
 // ── Register service worker for offline support ──
 if ('serviceWorker' in navigator) {
@@ -34951,6 +35454,19 @@ if ('serviceWorker' in navigator) {
 }
 
 (function startBackgroundRefresh(){
+  // Dedicated fast retry loop for pending contest-join refunds — runs every
+  // 30 seconds (much faster than the main 5-min background loop below,
+  // since this is the user's own money and shouldn't sit unrefunded for
+  // minutes). Fires once almost immediately on app start too, and again
+  // right after any join failure adds a new pending refund (see
+  // _addPendingRefund), so a user doesn't have to wait even the first 30s
+  // in the common case. Only actually touches Firestore when there's at
+  // least one pending refund to retry — _retryPendingContestRefunds()
+  // itself returns immediately if the list is empty.
+  if (typeof _retryPendingContestRefunds === 'function') {
+    setTimeout(() => { _retryPendingContestRefunds().catch(function(){}); }, 1500); // small delay so Firebase auth/init has settled
+    setInterval(() => { _retryPendingContestRefunds().catch(function(){}); }, 30000);
+  }
   // NOTE: this used to poll 7 full collections via getDocs() every 3 min,
   // per open tab. With hundreds of users that alone can exceed the
   // Firestore free-tier daily read quota (50K reads/day). Those 7
@@ -35107,7 +35623,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.48.1";
+const APP_VERSION = "4.57.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
