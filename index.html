@@ -6057,20 +6057,6 @@ function render() {
   // whatever the scroll position was immediately before this render() call
   // and let those navigation call sites override it a moment later.
   const _scrollYBefore = window.scrollY;
-  // FIX: same full-DOM-replace problem also broke typing into ANY text
-  // input whose oninput handler calls render() directly (e.g. admin's user
-  // search box, transaction search box) — every single keystroke recreated
-  // the <input> element itself, which on mobile immediately dismisses the
-  // on-screen keyboard (the browser sees the old input node vanish and the
-  // "new" one, even with the same id, is never treated as the same focused
-  // element). Capture what was focused right before the replace, and if it
-  // was a text input/textarea with an id, restore focus + cursor position
-  // to the newly-recreated element with that same id afterwards.
-  const _active = document.activeElement;
-  const _activeIsTextInput = _active && (_active.tagName === 'INPUT' || _active.tagName === 'TEXTAREA') && _active.id;
-  const _activeId = _activeIsTextInput ? _active.id : null;
-  const _activeSelStart = _activeIsTextInput ? _active.selectionStart : null;
-  const _activeSelEnd = _activeIsTextInput ? _active.selectionEnd : null;
   try {
     _renderInner();
   } catch (e) {
@@ -6087,13 +6073,6 @@ function render() {
     return;
   }
   if (_scrollYBefore > 0) window.scrollTo(0, _scrollYBefore);
-  if (_activeId) {
-    const _restored = document.getElementById(_activeId);
-    if (_restored && (_restored.tagName === 'INPUT' || _restored.tagName === 'TEXTAREA')) {
-      _restored.focus();
-      try { _restored.setSelectionRange(_activeSelStart, _activeSelEnd); } catch(e) {}
-    }
-  }
 }
 function _renderInner() {
   const app = document.getElementById('app');
@@ -31592,16 +31571,16 @@ function renderMatchByMatchBreakdownCard(email) {
   const statusColor = (s) => s==='won'||s==='settled' ? '#4ade80' : s==='lost' ? '#f87171' : s==='cancelled/refunded' ? 'var(--dim)' : '#fbbf24';
   return `
   <div class="section-title">🏏 Match-by-Match Contest Breakdown</div>
-  <div class="card mb14" style="border:1px solid rgba(96,165,250,0.25);background:linear-gradient(155deg, rgba(96,165,250,0.06), rgba(255,255,255,0.02))">
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-size:11px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid rgba(96,165,250,0.2)">
+  <div class="card mb14">
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-size:11px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--card-b)">
       <div><span style="color:var(--dim)">Total Spent</span><br/><b style="color:#f87171;font-size:14px">Rs ${bd.grandTotalEntry.toFixed(2)}</b></div>
       <div><span style="color:var(--dim)">Total Won</span><br/><b style="color:#4ade80;font-size:14px">Rs ${bd.grandTotalPrize.toFixed(2)}</b></div>
       <div><span style="color:var(--dim)">Net Profit</span><br/><b style="color:${bd.grandNet>=0?'#4ade80':'#f87171'};font-size:14px">${bd.grandNet>=0?'+':''}Rs ${bd.grandNet.toFixed(2)}</b></div>
     </div>
     ${bd.matches.map(mb => `
-    <div style="background:rgba(96,165,250,0.05);border:1px solid rgba(96,165,250,0.12);border-radius:12px;padding:12px 14px;margin-bottom:10px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-        <div><div style="font-size:9px;color:var(--dim);font-weight:700;letter-spacing:0.3px">MATCH ID NO: ${formatMatchSeqNo(mb.matchSeqNo)}${mb.deadline ? ` · ${pkDateTime(mb.deadline)}` : ''}</div><div style="font-weight:700;font-size:12.5px">${mb.teamA} vs ${mb.teamB}</div></div>
+    <div style="background:var(--input-bg);border-radius:10px;padding:10px 12px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div><div style="font-size:9px;color:var(--dim);font-weight:700">MATCH ID NO: ${formatMatchSeqNo(mb.matchSeqNo)}${mb.deadline ? ` · ${pkDateTime(mb.deadline)}` : ''}</div><div style="font-weight:700;font-size:12.5px">${mb.teamA} vs ${mb.teamB}</div></div>
         <span style="font-size:9.5px;font-weight:700;color:${mb.scored?'#4ade80':'#fbbf24'};background:${mb.scored?'rgba(34,197,94,0.12)':'rgba(251,191,36,0.12)'};padding:2px 7px;border-radius:5px">${mb.scored?'SCORED':'PENDING'}</span>
       </div>
       ${mb.contests.map(c => `
@@ -31617,11 +31596,10 @@ function renderMatchByMatchBreakdownCard(email) {
           <span style="color:var(--dim);font-size:10px">›</span>
         </div>
       </div>`).join('')}
-      <div style="display:flex;justify-content:space-between;margin-top:6px;padding-top:6px;border-top:1px solid rgba(96,165,250,0.12);font-size:11px;font-weight:700;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;margin-top:6px;padding-top:6px;border-top:1px solid var(--card-b);font-size:11px;font-weight:700">
         <span style="color:var(--dim)">Match Net</span>
         <span style="color:${mb.net>=0?'#4ade80':'#f87171'}">${mb.net>=0?'+':''}Rs ${mb.net.toFixed(2)}</span>
       </div>
-      <button class="btn-secondary btn-block" style="font-size:11px;padding:8px;background:rgba(96,165,250,0.12);border-color:rgba(96,165,250,0.35);color:#93c5fd" onclick="event.stopPropagation();openDream11Leaderboard('${mb.matchId}')">📋 View All Contests For This Match</button>
     </div>
     `).join('')}
     ${bd.manualAdjustmentNet !== 0 ? `
@@ -31972,7 +31950,7 @@ function renderAdminUsers() {
   <div class="section-title">👥 All Users (${list.length})</div>
   <button class="btn-secondary btn-block mb10" style="background:rgba(248,113,113,0.08);border-color:rgba(248,113,113,0.3);color:#f87171" onclick="d11OpenOrphanTool()">🔎 Find & Fix Orphaned Contest Entries</button>
   ${adminShowOrphanTool ? renderAdminOrphanTool() : ''}
-  <input id="adminUserSearchInput" class="input" style="margin-bottom:12px" placeholder="🔍 Search by name, email, or ID..." value="${adminUserSearchText||''}" oninput="adminUserSearchText=this.value;render()" />
+  <input class="input" style="margin-bottom:12px" placeholder="🔍 Search by name, email, or ID..." value="${adminUserSearchText||''}" oninput="adminUserSearchText=this.value;render()" />
   ${filteredList.length===0 ? `<div class="empty-state">${searchQ ? 'No users match your search.' : 'No users registered yet.'}</div>` :
   filteredList.map(([email,u]) => {
     const matchSet = new Set(u.matchesJoined||[]);
@@ -32235,7 +32213,7 @@ function renderAdminTransactions() {
   <div class="section-title">📜 All Transactions (${filtered.length})</div>
 
   <div style="display:flex;gap:8px;margin-bottom:10px">
-    <input id="adminTxSearchInput" class="input" style="flex:1" placeholder="🔍 Search name, email, or ID number" value="${(adminTxSearchText||'').replace(/"/g,'&quot;')}" oninput="adminTxSearchText=this.value;render()" />
+    <input class="input" style="flex:1" placeholder="🔍 Search name, email, or ID number" value="${(adminTxSearchText||'').replace(/"/g,'&quot;')}" oninput="adminTxSearchText=this.value;render()" />
     <input class="input" type="date" style="width:150px" value="${adminTxDateFilter||''}" onchange="adminTxDateFilter=this.value;render()" />
     ${(adminTxSearchText || adminTxDateFilter) ? `<button class="btn-secondary" style="width:auto;padding:0 12px" onclick="adminTxSearchText='';adminTxDateFilter='';render()">✕</button>` : ''}
   </div>
@@ -35645,7 +35623,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.58.0";
+const APP_VERSION = "4.57.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
