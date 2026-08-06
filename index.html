@@ -1107,6 +1107,7 @@ let _tpinError = null;
 let _tpinSetupMode = null; // null | 'set' | 'change-current' | 'change-new' | 'change-confirm' | 'confirm-new' — drives the multi-step setup/change UI in Profile
 let _tpinSetupBuffer = { current:'', new1:'', new2:'' };
 let tab = 'home';
+let _showFullMatchBreakdown = false; // toggles full Match-by-Match Contest Breakdown list on the user's own Profile screen
 let authMode = 'login';
 let _legacyMigrationEmail = ''; // set on startup if a pre-Firebase-Auth session needs one-time re-login
 let forgotStep = 'name'; // 'name' (enter username+email+T-Pin) -> 'newpass' (set new password after identity confirmed)
@@ -7309,7 +7310,7 @@ function renderProfile() {
     <div class="stat-box"><div class="stat-val" style="color:#facc15">${d11Stats.winRatio}%</div><div class="stat-lbl">Win Ratio</div></div>
   </div>
 
-  ${renderMatchByMatchBreakdownCard(currentUser.email)}
+  ${renderMatchByMatchBreakdownCard(currentUser.email, _showFullMatchBreakdown ? { showCollapseButton: true } : { summaryOnly: true })}
 
   <div class="section-title">🎮 Last 5 Dream11 Match Performance</div>
   ${renderD11MatchHistoryList(d11Stats.history.slice(0,5))}
@@ -31565,53 +31566,91 @@ function userTotalContestRefunds(u) {
 // prize/net across all contest types) for a given user — shared by both the
 // Profile screen and the Transaction History screen so the two stay
 // identical and in sync rather than duplicating this markup.
-function renderMatchByMatchBreakdownCard(email) {
+function renderMatchByMatchBreakdownCard(email, opts) {
+  opts = opts || {};
   const bd = getUserAdminContestBreakdown(email);
   if (bd.matches.length === 0) return '';
   const statusColor = (s) => s==='won'||s==='settled' ? '#4ade80' : s==='lost' ? '#f87171' : s==='cancelled/refunded' ? 'var(--dim)' : '#fbbf24';
+
+  const summaryStrip = `
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:${opts.summaryOnly ? '0' : '14px'}">
+      <div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.2);border-radius:12px;padding:10px 8px;text-align:center">
+        <div style="font-size:9.5px;color:var(--dim);font-weight:700;letter-spacing:0.3px;margin-bottom:4px">TOTAL SPENT</div>
+        <div style="font-weight:800;font-size:15px;color:#f87171">Rs ${bd.grandTotalEntry.toFixed(2)}</div>
+      </div>
+      <div style="background:rgba(74,222,128,0.08);border:1px solid rgba(74,222,128,0.2);border-radius:12px;padding:10px 8px;text-align:center">
+        <div style="font-size:9.5px;color:var(--dim);font-weight:700;letter-spacing:0.3px;margin-bottom:4px">TOTAL WON</div>
+        <div style="font-weight:800;font-size:15px;color:#4ade80">Rs ${bd.grandTotalPrize.toFixed(2)}</div>
+      </div>
+      <div style="background:${bd.grandNet>=0?'rgba(74,222,128,0.08)':'rgba(248,113,113,0.08)'};border:1px solid ${bd.grandNet>=0?'rgba(74,222,128,0.2)':'rgba(248,113,113,0.2)'};border-radius:12px;padding:10px 8px;text-align:center">
+        <div style="font-size:9.5px;color:var(--dim);font-weight:700;letter-spacing:0.3px;margin-bottom:4px">NET PROFIT</div>
+        <div style="font-weight:800;font-size:15px;color:${bd.grandNet>=0?'#4ade80':'#f87171'}">${bd.grandNet>=0?'+':''}Rs ${bd.grandNet.toFixed(2)}</div>
+      </div>
+    </div>
+  `;
+
+  if (opts.summaryOnly) {
+    return `
+    <div class="section-title">🏏 Match-by-Match Contest Breakdown</div>
+    <div class="card mb14">
+      ${summaryStrip}
+      <div style="font-size:10.5px;color:var(--dim);text-align:center;margin:12px 0 10px">${bd.matches.length} match${bd.matches.length===1?'':'es'} played</div>
+      <button class="btn-primary btn-block" style="display:flex;align-items:center;justify-content:center;gap:6px" onclick="_showFullMatchBreakdown=true;render();window.scrollTo(0,0)">
+        📋 View Full Breakdown
+      </button>
+    </div>
+    `;
+  }
+
   return `
   <div class="section-title">🏏 Match-by-Match Contest Breakdown</div>
   <div class="card mb14">
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-size:11px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--card-b)">
-      <div><span style="color:var(--dim)">Total Spent</span><br/><b style="color:#f87171;font-size:14px">Rs ${bd.grandTotalEntry.toFixed(2)}</b></div>
-      <div><span style="color:var(--dim)">Total Won</span><br/><b style="color:#4ade80;font-size:14px">Rs ${bd.grandTotalPrize.toFixed(2)}</b></div>
-      <div><span style="color:var(--dim)">Net Profit</span><br/><b style="color:${bd.grandNet>=0?'#4ade80':'#f87171'};font-size:14px">${bd.grandNet>=0?'+':''}Rs ${bd.grandNet.toFixed(2)}</b></div>
-    </div>
+    ${summaryStrip}
+    <div style="display:flex;flex-direction:column;gap:10px">
     ${bd.matches.map(mb => `
-    <div style="background:var(--input-bg);border-radius:10px;padding:10px 12px;margin-bottom:8px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <div><div style="font-size:9px;color:var(--dim);font-weight:700">MATCH ID NO: ${formatMatchSeqNo(mb.matchSeqNo)}${mb.deadline ? ` · ${pkDateTime(mb.deadline)}` : ''}</div><div style="font-weight:700;font-size:12.5px">${mb.teamA} vs ${mb.teamB}</div></div>
-        <span style="font-size:9.5px;font-weight:700;color:${mb.scored?'#4ade80':'#fbbf24'};background:${mb.scored?'rgba(34,197,94,0.12)':'rgba(251,191,36,0.12)'};padding:2px 7px;border-radius:5px">${mb.scored?'SCORED':'PENDING'}</span>
+    <div style="position:relative;background:linear-gradient(135deg,var(--input-bg),rgba(255,255,255,0.02));border:1px solid var(--card-b);border-left:3px solid ${mb.scored ? (mb.net>=0?'#4ade80':'#f87171') : '#fbbf24'};border-radius:12px;padding:12px 14px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+        <div>
+          <div style="font-size:9px;color:var(--dim);font-weight:700;letter-spacing:0.3px">MATCH #${formatMatchSeqNo(mb.matchSeqNo)}${mb.deadline ? ` · ${pkDateTime(mb.deadline)}` : ''}</div>
+          <div style="font-weight:800;font-size:13.5px;margin-top:2px">${mb.teamA} <span style="color:var(--dim);font-weight:600">vs</span> ${mb.teamB}</div>
+        </div>
+        <span style="font-size:9px;font-weight:800;letter-spacing:0.3px;color:${mb.scored?'#4ade80':'#fbbf24'};background:${mb.scored?'rgba(34,197,94,0.14)':'rgba(251,191,36,0.14)'};padding:3px 8px;border-radius:20px;white-space:nowrap">${mb.scored?'✓ SCORED':'⏳ PENDING'}</span>
       </div>
+      <div style="display:flex;flex-direction:column;gap:2px">
       ${mb.contests.map(c => `
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;font-size:11px;cursor:pointer" onclick="openD11ContestParticipants('${mb.matchId}','${c.contestType}',${c.contestRef ? `'${c.contestRef}'` : 'null'})">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;font-size:11px;cursor:pointer;border-radius:8px;background:rgba(255,255,255,0.02)" onclick="openD11ContestParticipants('${mb.matchId}','${c.contestType}',${c.contestRef ? `'${c.contestRef}'` : 'null'})">
         <div style="display:flex;align-items:center;gap:6px">
           <span>${c.icon}</span>
-          <span style="text-decoration:underline;text-decoration-style:dotted;text-underline-offset:2px">${c.label}</span>
-          <span style="color:${statusColor(c.status)};font-size:9.5px;font-weight:700;text-transform:uppercase">${c.status}</span>
+          <span>${c.label}</span>
+          <span style="color:${statusColor(c.status)};font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:0.2px">${c.status}</span>
         </div>
-        <div style="display:flex;gap:10px;align-items:center">
-          ${c.entryFee>0 ? `<span style="color:#f87171">-Rs ${c.entryFee}</span>` : ''}
-          ${c.prize>0 ? `<span style="color:#4ade80;font-weight:700">${c.refunded?'↩️ Refund ':''}+Rs ${c.prize}</span>` : ''}
+        <div style="display:flex;gap:8px;align-items:center">
+          ${c.entryFee>0 ? `<span style="color:#f87171;font-weight:600">-Rs ${c.entryFee}</span>` : ''}
+          ${c.prize>0 ? `<span style="color:#4ade80;font-weight:800">${c.refunded?'↩️ ':''}+Rs ${c.prize}</span>` : ''}
           <span style="color:var(--dim);font-size:10px">›</span>
         </div>
       </div>`).join('')}
-      <div style="display:flex;justify-content:space-between;margin-top:6px;padding-top:6px;border-top:1px solid var(--card-b);font-size:11px;font-weight:700">
-        <span style="color:var(--dim)">Match Net</span>
-        <span style="color:${mb.net>=0?'#4ade80':'#f87171'}">${mb.net>=0?'+':''}Rs ${mb.net.toFixed(2)}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;padding-top:8px;border-top:1px dashed var(--card-b)">
+        <span style="color:var(--dim);font-size:10.5px;font-weight:700">MATCH NET</span>
+        <span style="font-size:13px;font-weight:800;color:${mb.net>=0?'#4ade80':'#f87171'}">${mb.net>=0?'+':''}Rs ${mb.net.toFixed(2)}</span>
       </div>
     </div>
     `).join('')}
+    </div>
     ${bd.manualAdjustmentNet !== 0 ? `
-    <div style="background:var(--input-bg);border-radius:10px;padding:10px 12px;margin-bottom:8px">
+    <div style="background:var(--input-bg);border-radius:12px;padding:10px 14px;margin-top:10px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div style="display:flex;align-items:center;gap:6px;font-size:11px">
           <span>⚙️</span>
           <span>Manual Admin Adjustments (Credit/Deduct — not tied to any match)</span>
         </div>
-        <span style="font-weight:700;font-size:11px;color:${bd.manualAdjustmentNet>=0?'#4ade80':'#f87171'}">${bd.manualAdjustmentNet>=0?'+':''}Rs ${bd.manualAdjustmentNet.toFixed(2)}</span>
+        <span style="font-weight:800;font-size:11px;color:${bd.manualAdjustmentNet>=0?'#4ade80':'#f87171'}">${bd.manualAdjustmentNet>=0?'+':''}Rs ${bd.manualAdjustmentNet.toFixed(2)}</span>
       </div>
     </div>
+    ` : ''}
+    ${opts.showCollapseButton ? `
+    <button class="btn-secondary btn-block" style="margin-top:12px" onclick="_showFullMatchBreakdown=false;render();window.scrollTo(0,0)">▲ Hide Full Breakdown</button>
     ` : ''}
   </div>
   `;
@@ -31927,6 +31966,17 @@ function renderAdminOrphanTool() {
   </div>`;
 }
 
+// Full render() replaces app.innerHTML, which destroys and recreates the
+// search <input> on every keystroke — on mobile that drops focus and
+// dismisses the keyboard after just 1 character typed. This instead
+// re-renders only the results list below the input, leaving the input
+// element itself (and its focus/cursor/keyboard) untouched.
+function _adminFilterUsersOnly() {
+  const box = document.getElementById('admin-user-results');
+  if (!box) return render(); // fallback if markup ever changes
+  box.innerHTML = _renderAdminUserCards();
+}
+
 function renderAdminUsers() {
   const list = Object.entries(users).filter(([e])=>e!==OWNER_EMAIL);
   // "Matches" should count prediction-matches joined AND Dream11 teams submitted,
@@ -31939,6 +31989,27 @@ function renderAdminUsers() {
 
   if (adminUserDetailEmail) return renderAdminUserDetail(adminUserDetailEmail);
 
+  return `
+  <div class="section-title">👥 All Users (${list.length})</div>
+  <button class="btn-secondary btn-block mb10" style="background:rgba(248,113,113,0.08);border-color:rgba(248,113,113,0.3);color:#f87171" onclick="d11OpenOrphanTool()">🔎 Find & Fix Orphaned Contest Entries</button>
+  ${adminShowOrphanTool ? renderAdminOrphanTool() : ''}
+  <input class="input" id="admin-user-search-input" style="margin-bottom:12px" placeholder="🔍 Search by name, email, or ID..." value="${adminUserSearchText||''}" oninput="adminUserSearchText=this.value;_adminFilterUsersOnly()" />
+  <div id="admin-user-results">${_renderAdminUserCards()}</div>
+  `;
+}
+
+// Renders just the filtered user-card list (no search input, no header) —
+// kept separate from renderAdminUsers() so _adminFilterUsersOnly() can
+// refresh only this part of the DOM on every keystroke without touching
+// the search <input> itself (see comment above _adminFilterUsersOnly).
+function _renderAdminUserCards() {
+  const list = Object.entries(users).filter(([e])=>e!==OWNER_EMAIL);
+  const d11MatchIdsByEmail = {};
+  Object.values(dream11Teams||{}).forEach(t => {
+    if (!t || !t.userEmail) return;
+    (d11MatchIdsByEmail[t.userEmail] = d11MatchIdsByEmail[t.userEmail] || new Set()).add(t.matchId);
+  });
+
   const searchQ = (adminUserSearchText||'').trim().toLowerCase();
   const filteredList = searchQ ? list.filter(([email,u]) =>
     (u.name||'').toLowerCase().includes(searchQ) ||
@@ -31947,10 +32018,6 @@ function renderAdminUsers() {
   ) : list;
 
   return `
-  <div class="section-title">👥 All Users (${list.length})</div>
-  <button class="btn-secondary btn-block mb10" style="background:rgba(248,113,113,0.08);border-color:rgba(248,113,113,0.3);color:#f87171" onclick="d11OpenOrphanTool()">🔎 Find & Fix Orphaned Contest Entries</button>
-  ${adminShowOrphanTool ? renderAdminOrphanTool() : ''}
-  <input class="input" style="margin-bottom:12px" placeholder="🔍 Search by name, email, or ID..." value="${adminUserSearchText||''}" oninput="adminUserSearchText=this.value;render()" />
   ${filteredList.length===0 ? `<div class="empty-state">${searchQ ? 'No users match your search.' : 'No users registered yet.'}</div>` :
   filteredList.map(([email,u]) => {
     const matchSet = new Set(u.matchesJoined||[]);
@@ -35623,7 +35690,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.57.0";
+const APP_VERSION = "4.58.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
