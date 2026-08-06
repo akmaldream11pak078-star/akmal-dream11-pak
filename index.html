@@ -2606,8 +2606,8 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
 // often does not reintroduce the "every user, every open, full read" quota
 // problem — an unchanged collection costs one tiny query that returns
 // nothing.
-const D11_FAST_POLL_MS = 8 * 1000;
-const D11_FAST_POLL_MIN_GAP_MS = 6 * 1000; // slightly under the 8s tick so this trigger's own throttle never blocks itself
+const D11_FAST_POLL_MS = 15 * 1000;
+const D11_FAST_POLL_MIN_GAP_MS = 12 * 1000; // slightly under the 15s tick so this trigger's own throttle never blocks itself
 const D11_FAST_POLL_COLLECTIONS = ['pp_matches', 'pp_dream11_matches', 'pp_dream11_teams'];
 let _d11FastPollTimer = null;
 function _startD11FastPoll() {
@@ -6046,17 +6046,6 @@ function tpinForgotFlow() {
 }
 
 function render() {
-  // FIX: every render() does a full app.innerHTML replace (this app has no
-  // virtual-DOM diffing), which — for a BACKGROUND update like the 8-second
-  // fast-poll or a live Firestore listener push — was resetting scroll
-  // position back to the top of the screen every single time, which reads
-  // to the user as a jarring blank/flash "on-off" flicker, especially
-  // noticeable on a long scrolled-down list. Explicit navigations already
-  // call window.scrollTo(0,0) themselves right after render() when they
-  // actually want to reset scroll — so it's safe to always restore
-  // whatever the scroll position was immediately before this render() call
-  // and let those navigation call sites override it a moment later.
-  const _scrollYBefore = window.scrollY;
   try {
     _renderInner();
   } catch (e) {
@@ -6070,9 +6059,7 @@ function render() {
           <button style="padding:12px 20px;border-radius:10px;border:none;background:#16a34a;color:#fff;font-weight:700;font-size:13px" onclick="tab='home';render()">← Go Back Home</button>
         </div>`;
     }
-    return;
   }
-  if (_scrollYBefore > 0) window.scrollTo(0, _scrollYBefore);
 }
 function _renderInner() {
   const app = document.getElementById('app');
@@ -13446,7 +13433,7 @@ async function d11ToggleCb2AutoSync(matchId) {
   try {
     await _saveMatchToFirestore(matchId, m);
     showNotif(m.cb2AutoSync
-      ? '🤖 Automatic armed — deadline se pehle 25/22/18/15/11/7min pe Playing XI, deadline ke baad 20/40/80/130/180/250/320min pe Sync Now, sab khud-b-khud chalega'
+      ? '🤖 Automatic armed — deadline se pehle 25/20/15/10min pe Playing XI, deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now, sab khud-b-khud chalega'
       : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
     render();
   } catch(e) {
@@ -14622,7 +14609,7 @@ async function d11ToggleAllAutoSync(matchId) {
   try {
     await _saveMatchToFirestore(matchId, m);
     showNotif(m.allAutoSync
-      ? '🤖 Automatic armed — deadline se pehle 25/22/18/15/11/7min pe Playing XI, deadline ke baad 20/40/80/130/180/250/320min pe Sync Now, sab khud-b-khud chalega'
+      ? '🤖 Automatic armed — deadline se pehle 25/20/15/10min pe Playing XI, deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now, sab khud-b-khud chalega'
       : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
     render();
   } catch(e) {
@@ -14999,94 +14986,11 @@ async function d11SyncLiveMatchAll(matchId, showToast) {
 // window, since no tab may be open through an entire due window). Only
 // runs for matches where admin has the per-match "🤖 Automatic" toggle on
 // (m.allAutoSync). Tracked in d11m.autoAllPreDeadlineXI = { w20, w15, w10, w5 }.
-// ── Atomic "claim this auto-sync window" helper ──────────────────────────
-// Every auto-sync scheduler (Advance Live Line, Cricbuzz No 2, LL3, LL5 —
-// both pre-deadline Playing XI and post-deadline Sync Now) needs to fire
-// each timing window EXACTLY ONCE per match, no matter how many users'
-// sessions have the app open and are independently running the same 15-
-// second/app-open scheduler check. The dedup flag lives in Firestore
-// (d11m.autoXxxPreDeadlineXI / autoXxxPostDeadline), which is correct in
-// principle — but a plain "read the flag, then write it back" (what every
-// scheduler did before) has a race: two sessions can both read `false` for
-// the same window microseconds apart, both then fire the real API call,
-// and only afterwards do their writes land (whichever lands second just
-// overwrites the same `true` value, so the DUPLICATE CALL already happened
-// by the time the flag catches up). A Firestore transaction closes that
-// gap: it re-reads the flag from the server at the moment of the write, and
-// if two sessions race, only the one that reads0-and-writes atomically first
-// actually gets `claimed: true` back — the loser sees `claimed: false` and
-// skips its own API call entirely, so the underlying provider's API only
-// ever gets hit once per window per match, regardless of how many users are
-// online.
-async function _d11ClaimAutoSyncWindow(matchId, fieldName, windowKey) {
-  if (!window._fbDb || !window._fbFns?.runTransaction) {
-    // Offline/no-Firebase fallback: can't guarantee atomicity, so just
-    // trust the in-memory flag (matches the old behavior — better than
-    // never firing at all if Firestore's transaction API is unavailable).
-    const d11m = dream11Matches[matchId];
-    const done = (d11m && d11m[fieldName]) || {};
-    return !done[windowKey];
-  }
-  const { doc, runTransaction } = window._fbFns;
-  const ref = doc(window._fbDb, 'pp_dream11_matches', matchId);
-  try {
-    return await runTransaction(window._fbDb, async (tx) => {
-      const snap = await tx.get(ref);
-      if (!snap.exists()) return false;
-      const data = snap.data();
-      const done = data[fieldName] || {};
-      if (done[windowKey]) return false; // someone else already claimed this window — don't fire again
-      tx.update(ref, { [fieldName]: { ...done, [windowKey]: true }, updatedAt: Date.now() });
-      return true; // we won the race — safe to fire the real API call
-    });
-  } catch (e) {
-    console.warn('Window claim transaction failed for', matchId, fieldName, windowKey, ':', e.message);
-    return false; // on any doubt, don't fire — a missed window is far less costly than a duplicate API call
-  }
-}
-
-// Variant of _d11ClaimAutoSyncWindow for the "catch-up to latest due
-// window" schedulers (post-deadline sync): marks EVERY currently-overdue
-// window as done in the same atomic transaction (not just the one being
-// claimed), so if the app was closed for hours and several windows are
-// simultaneously overdue, only the freshest one actually fires — the
-// earlier stale ones are marked done without a redundant extra API call,
-// exactly like the original single-session logic intended, just now race-
-// safe across multiple simultaneous sessions.
-async function _d11ClaimAutoSyncWindowCatchUp(matchId, fieldName, windowKey, allWindows, isOverdue) {
-  if (!window._fbDb || !window._fbFns?.runTransaction) {
-    const d11m = dream11Matches[matchId];
-    const done = (d11m && d11m[fieldName]) || {};
-    return !done[windowKey];
-  }
-  const { doc, runTransaction } = window._fbFns;
-  const ref = doc(window._fbDb, 'pp_dream11_matches', matchId);
-  try {
-    return await runTransaction(window._fbDb, async (tx) => {
-      const snap = await tx.get(ref);
-      if (!snap.exists()) return false;
-      const data = snap.data();
-      const done = data[fieldName] || {};
-      if (done[windowKey]) return false; // someone else already claimed this exact window
-      const newDone = { ...done };
-      allWindows.forEach(w => { if (!newDone[w.key] && isOverdue(w)) newDone[w.key] = true; });
-      tx.update(ref, { [fieldName]: newDone, updatedAt: Date.now() });
-      return true;
-    });
-  } catch (e) {
-    console.warn('Window catch-up claim transaction failed for', matchId, fieldName, windowKey, ':', e.message);
-    return false;
-  }
-}
-
-
 const ALL_PRE_DEADLINE_XI_WINDOWS_MIN = [
   { key: 'w25', mins: 25 },
-  { key: 'w22', mins: 22 },
-  { key: 'w18', mins: 18 },
+  { key: 'w20', mins: 20 },
   { key: 'w15', mins: 15 },
-  { key: 'w11', mins: 11 },
-  { key: 'w7', mins: 7 },
+  { key: 'w10', mins: 10 },
 ];
 
 async function d11AutoCheckAllPlayingXI() {
@@ -15110,14 +15014,11 @@ async function d11AutoCheckAllPlayingXI() {
     }
     if (!windowHit) continue;
 
-    // ATOMIC CLAIM: a plain read-then-write here would let two users'
-    // sessions both see this window as unclaimed and both fire the real
-    // API call — see _d11ClaimAutoSyncWindowCatchUp's own comment.
-    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoAllPreDeadlineXI', windowHit, ALL_PRE_DEADLINE_XI_WINDOWS_MIN, w => minsToDeadline <= w.mins);
-    if (!claimed) continue;
-    const newDoneAllXi = { ...done };
-    ALL_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDoneAllXi[w.key] && minsToDeadline <= w.mins) newDoneAllXi[w.key] = true; });
-    d11m.autoAllPreDeadlineXI = newDoneAllXi;
+    const newDone = { ...done };
+    ALL_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsToDeadline <= w.mins) newDone[w.key] = true; });
+    d11m.autoAllPreDeadlineXI = newDone;
+    // FIX: autoAllPreDeadlineXI is regular-user-legal per the rules.
+    await _updateDream11MatchScoringFields(m.id, { autoAllPreDeadlineXI: newDone });
     try {
       await d11CheckPlayingXIAnnouncedAll(m.id, /*silent=*/true);
     } catch (e) {
@@ -15128,16 +15029,16 @@ async function d11AutoCheckAllPlayingXI() {
 
 // ── Advance Live Line — Automatic POST-deadline sync (5 fixed windows) ───
 // Same mechanism as d11AutoSyncLl5PostDeadline. Fires Sync Now only, at
-// 20/40/80/130/180/250/320 minutes after the deadline, tracked in
-// d11m.autoAllPostDeadline = { w20, w40, w80, w130, w180, w250, w320 }.
+// 20/40/60/90/150/240/300 minutes after the deadline, tracked in
+// d11m.autoAllPostDeadline = { w20, w40, w60, w90, w150, w240, w300 }.
 const ALL_AUTO_SYNC_WINDOWS_MIN = [
   { key: 'w20', mins: 20 },
   { key: 'w40', mins: 40 },
-  { key: 'w80', mins: 80 },
-  { key: 'w130', mins: 130 },
-  { key: 'w180', mins: 180 },
-  { key: 'w250', mins: 250 },
-  { key: 'w320', mins: 320 },
+  { key: 'w60', mins: 60 },
+  { key: 'w90', mins: 90 },
+  { key: 'w150', mins: 150 },
+  { key: 'w240', mins: 240 },
+  { key: 'w300', mins: 300 },
 ];
 
 async function d11AutoSyncAllPostDeadline() {
@@ -15160,12 +15061,11 @@ async function d11AutoSyncAllPostDeadline() {
     }
     if (!windowHit) continue;
 
-    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
-    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoAllPostDeadline', windowHit, ALL_AUTO_SYNC_WINDOWS_MIN, w => minsSinceDeadline >= w.mins);
-    if (!claimed) continue;
-    const newDoneAll = { ...done };
-    ALL_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDoneAll[w.key] && minsSinceDeadline >= w.mins) newDoneAll[w.key] = true; });
-    d11m.autoAllPostDeadline = newDoneAll;
+    const newDone = { ...done };
+    ALL_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsSinceDeadline >= w.mins) newDone[w.key] = true; });
+    d11m.autoAllPostDeadline = newDone;
+    // FIX: autoAllPostDeadline is regular-user-legal per the rules.
+    await _updateDream11MatchScoringFields(m.id, { autoAllPostDeadline: newDone });
     try {
       // Sync Now only — NOT Playing XI. Post-deadline the XI is already
       // locked in from the pre-deadline checks; all that's needed now is
@@ -15190,7 +15090,7 @@ function _d11RenderAllSyncRow(m) {
   const autoOn = !!m.allAutoSync;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#a78bfa;flex:1;min-width:140px">🚀 Linked to Advance Live Line · Last synced: ${lastSyncStr}</span>
-    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleAllAutoSync('${m.id}')" title="Deadline se pehle 25/22/18/15/11/7min pe Playing XI, aur deadline ke baad 20/40/80/130/180/250/320min pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleAllAutoSync('${m.id}')" title="Deadline se pehle 25/20/15/10min pe Playing XI, aur deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchAll('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchAll('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromAll('${m.id}')">📥 Fetch Squad</button>
@@ -16100,14 +16000,12 @@ async function d11SyncLiveMatchCb2(matchId, showToast) {
 // ── Cricbuzz No 2 — Automatic PRE-deadline Playing XI (catch-up) ────────
 // Same mechanism as d11AutoCheckLl3PlayingXI / d11AutoCheckLl5PlayingXI.
 // Only runs for matches where admin has the per-match "🤖 Automatic" toggle
-// on (m.cb2AutoSync). Tracked in d11m.autoCb2PreDeadlineXI = { w25, w22, w18, w15, w11, w7 }.
+// on (m.cb2AutoSync). Tracked in d11m.autoCb2PreDeadlineXI = { w25, w20, w15, w10 }.
 const CB2_PRE_DEADLINE_XI_WINDOWS_MIN = [
   { key: 'w25', mins: 25 },
-  { key: 'w22', mins: 22 },
-  { key: 'w18', mins: 18 },
+  { key: 'w20', mins: 20 },
   { key: 'w15', mins: 15 },
-  { key: 'w11', mins: 11 },
-  { key: 'w7', mins: 7 },
+  { key: 'w10', mins: 10 },
 ];
 
 async function d11AutoCheckCb2PlayingXI() {
@@ -16131,12 +16029,10 @@ async function d11AutoCheckCb2PlayingXI() {
     }
     if (!windowHit) continue;
 
-    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
-    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoCb2PreDeadlineXI', windowHit, CB2_PRE_DEADLINE_XI_WINDOWS_MIN, w => minsToDeadline <= w.mins);
-    if (!claimed) continue;
-    const newDoneCb2Xi = { ...done };
-    CB2_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDoneCb2Xi[w.key] && minsToDeadline <= w.mins) newDoneCb2Xi[w.key] = true; });
-    d11m.autoCb2PreDeadlineXI = newDoneCb2Xi;
+    const newDone = { ...done };
+    CB2_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsToDeadline <= w.mins) newDone[w.key] = true; });
+    d11m.autoCb2PreDeadlineXI = newDone;
+    await _saveDream11MatchToFirestore(m.id, d11m);
     try {
       await d11CheckPlayingXIAnnouncedCb2(m.id, /*silent=*/true);
     } catch (e) {
@@ -16147,16 +16043,16 @@ async function d11AutoCheckCb2PlayingXI() {
 
 // ── Cricbuzz No 2 — Automatic POST-deadline sync (7 fixed windows) ──────
 // Same mechanism as d11AutoSyncLl3PostDeadline / d11AutoSyncLl5PostDeadline.
-// Fires Sync Now only, at 20/40/80/130/180/250/320 minutes after the
-// deadline, tracked in d11m.autoCb2PostDeadline = { w20, w40, w80, w130, w180, w250, w320 }.
+// Fires Sync Now only, at 20/40/60/90/150/240/300 minutes after the
+// deadline, tracked in d11m.autoCb2PostDeadline = { w20, w40, w60, w90, w150, w240, w300 }.
 const CB2_AUTO_SYNC_WINDOWS_MIN = [
   { key: 'w20', mins: 20 },
   { key: 'w40', mins: 40 },
-  { key: 'w80', mins: 80 },
-  { key: 'w130', mins: 130 },
-  { key: 'w180', mins: 180 },
-  { key: 'w250', mins: 250 },
-  { key: 'w320', mins: 320 },
+  { key: 'w60', mins: 60 },
+  { key: 'w90', mins: 90 },
+  { key: 'w150', mins: 150 },
+  { key: 'w240', mins: 240 },
+  { key: 'w300', mins: 300 },
 ];
 
 async function d11AutoSyncCb2PostDeadline() {
@@ -16179,12 +16075,10 @@ async function d11AutoSyncCb2PostDeadline() {
     }
     if (!windowHit) continue;
 
-    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
-    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoCb2PostDeadline', windowHit, CB2_AUTO_SYNC_WINDOWS_MIN, w => minsSinceDeadline >= w.mins);
-    if (!claimed) continue;
-    const newDoneCb2 = { ...done };
-    CB2_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDoneCb2[w.key] && minsSinceDeadline >= w.mins) newDoneCb2[w.key] = true; });
-    d11m.autoCb2PostDeadline = newDoneCb2;
+    const newDone = { ...done };
+    CB2_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsSinceDeadline >= w.mins) newDone[w.key] = true; });
+    d11m.autoCb2PostDeadline = newDone;
+    await _saveDream11MatchToFirestore(m.id, d11m);
     try {
       await d11SyncLiveMatchCb2(m.id, /*showToast=*/false);
     } catch (e) {
@@ -17206,7 +17100,7 @@ async function d11ToggleLl3AutoSync(matchId) {
   try {
     await _saveMatchToFirestore(matchId, m);
     showNotif(m.ll3AutoSync
-      ? '🤖 Automatic armed — deadline se pehle 25/22/18/15/11/7min pe Playing XI, deadline ke baad 20/40/80/130/180/250/320min pe Sync Now, sab khud-b-khud chalega'
+      ? '🤖 Automatic armed — deadline se pehle 25/20/15/10min pe Playing XI, deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now, sab khud-b-khud chalega'
       : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
     render();
   } catch(e) {
@@ -17625,11 +17519,9 @@ async function d11SyncLiveMatchLl3(matchId, showToast) {
 // Tracked in d11m.autoLl3PreDeadlineXI = { w20, w15, w10, w5 }.
 const LL3_PRE_DEADLINE_XI_WINDOWS_MIN = [
   { key: 'w25', mins: 25 },
-  { key: 'w22', mins: 22 },
-  { key: 'w18', mins: 18 },
+  { key: 'w20', mins: 20 },
   { key: 'w15', mins: 15 },
-  { key: 'w11', mins: 11 },
-  { key: 'w7', mins: 7 },
+  { key: 'w10', mins: 10 },
 ];
 
 async function d11AutoCheckLl3PlayingXI() {
@@ -17653,12 +17545,11 @@ async function d11AutoCheckLl3PlayingXI() {
     }
     if (!windowHit) continue;
 
-    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
-    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoLl3PreDeadlineXI', windowHit, LL3_PRE_DEADLINE_XI_WINDOWS_MIN, w => minsToDeadline <= w.mins);
-    if (!claimed) continue;
-    const newDoneLl3Xi = { ...done };
-    LL3_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDoneLl3Xi[w.key] && minsToDeadline <= w.mins) newDoneLl3Xi[w.key] = true; });
-    d11m.autoLl3PreDeadlineXI = newDoneLl3Xi;
+    const newDone = { ...done };
+    LL3_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsToDeadline <= w.mins) newDone[w.key] = true; });
+    d11m.autoLl3PreDeadlineXI = newDone;
+    // FIX: autoLl3PreDeadlineXI is regular-user-legal per the rules.
+    await _updateDream11MatchScoringFields(m.id, { autoLl3PreDeadlineXI: newDone });
     try {
       await d11CheckPlayingXIAnnouncedLl3(m.id, /*silent=*/true);
     } catch (e) {
@@ -17669,16 +17560,16 @@ async function d11AutoCheckLl3PlayingXI() {
 
 // ── Cricket Live Line 3 — Automatic POST-deadline sync (7 fixed windows) ──
 // Same mechanism as d11AutoSyncLl5PostDeadline. Fires Sync Now only, at
-// 20/40/80/130/180/250/320 minutes after the deadline, tracked in
-// d11m.autoLl3PostDeadline = { w20, w40, w80, w130, w180, w250, w320 }.
+// 20/40/60/90/150/240/300 minutes after the deadline, tracked in
+// d11m.autoLl3PostDeadline = { w20, w40, w60, w90, w150, w240, w300 }.
 const LL3_AUTO_SYNC_WINDOWS_MIN = [
   { key: 'w20', mins: 20 },
   { key: 'w40', mins: 40 },
-  { key: 'w80', mins: 80 },
-  { key: 'w130', mins: 130 },
-  { key: 'w180', mins: 180 },
-  { key: 'w250', mins: 250 },
-  { key: 'w320', mins: 320 },
+  { key: 'w60', mins: 60 },
+  { key: 'w90', mins: 90 },
+  { key: 'w150', mins: 150 },
+  { key: 'w240', mins: 240 },
+  { key: 'w300', mins: 300 },
 ];
 
 async function d11AutoSyncLl3PostDeadline() {
@@ -17701,12 +17592,11 @@ async function d11AutoSyncLl3PostDeadline() {
     }
     if (!windowHit) continue;
 
-    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
-    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoLl3PostDeadline', windowHit, LL3_AUTO_SYNC_WINDOWS_MIN, w => minsSinceDeadline >= w.mins);
-    if (!claimed) continue;
-    const newDoneLl3 = { ...done };
-    LL3_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDoneLl3[w.key] && minsSinceDeadline >= w.mins) newDoneLl3[w.key] = true; });
-    d11m.autoLl3PostDeadline = newDoneLl3;
+    const newDone = { ...done };
+    LL3_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsSinceDeadline >= w.mins) newDone[w.key] = true; });
+    d11m.autoLl3PostDeadline = newDone;
+    // FIX: autoLl3PostDeadline is regular-user-legal per the rules.
+    await _updateDream11MatchScoringFields(m.id, { autoLl3PostDeadline: newDone });
     try {
       await d11SyncLiveMatchLl3(m.id, /*showToast=*/false);
     } catch (e) {
@@ -17728,7 +17618,7 @@ function _d11RenderLl3SyncRow(m) {
   const autoOn = !!m.ll3AutoSync;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#fbbf24;flex:1;min-width:140px">⚡ Linked to Cricket Live Line 3 · Last synced: ${lastSyncStr}</span>
-    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleLl3AutoSync('${m.id}')" title="Deadline se pehle 25/22/18/15/11/7min pe Playing XI, aur deadline ke baad 20/40/80/130/180/250/320min pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleLl3AutoSync('${m.id}')" title="Deadline se pehle 25/20/15/10min pe Playing XI, aur deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchLl3('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchLl3('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromLl3('${m.id}')">📥 Fetch Squad</button>
@@ -19040,7 +18930,7 @@ async function d11ToggleLl5AutoSync(matchId) {
   try {
     await _saveMatchToFirestore(matchId, m);
     showNotif(m.ll5AutoSync
-      ? '🤖 Automatic armed — deadline se pehle 25/22/18/15/11/7min pe Playing XI, deadline ke baad 20/40/80/130/180/250/320min pe Sync Now, sab khud-b-khud chalega'
+      ? '🤖 Automatic armed — deadline se pehle 25/20/15/10min pe Playing XI, deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now, sab khud-b-khud chalega'
       : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
     render();
   } catch(e) {
@@ -19228,11 +19118,9 @@ async function d11FetchSquadFromLl5(matchId) {
 // instead of replaying stale earlier windows.
 const LL5_PRE_DEADLINE_XI_WINDOWS_MIN = [
   { key: 'w25', mins: 25 },
-  { key: 'w22', mins: 22 },
-  { key: 'w18', mins: 18 },
+  { key: 'w20', mins: 20 },
   { key: 'w15', mins: 15 },
-  { key: 'w11', mins: 11 },
-  { key: 'w7', mins: 7 },
+  { key: 'w10', mins: 10 },
 ];
 
 async function d11AutoCheckLl5PlayingXI() {
@@ -19269,12 +19157,11 @@ async function d11AutoCheckLl5PlayingXI() {
     }
     if (!windowHit) continue;
 
-    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
-    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoLl5PreDeadlineXI', windowHit, LL5_PRE_DEADLINE_XI_WINDOWS_MIN, w => minsToDeadline <= w.mins);
-    if (!claimed) continue;
-    const newDoneLl5Xi = { ...done };
-    LL5_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDoneLl5Xi[w.key] && minsToDeadline <= w.mins) newDoneLl5Xi[w.key] = true; });
-    d11m.autoLl5PreDeadlineXI = newDoneLl5Xi;
+    const newDone = { ...done };
+    LL5_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsToDeadline <= w.mins) newDone[w.key] = true; });
+    d11m.autoLl5PreDeadlineXI = newDone;
+    // FIX: autoLl5PreDeadlineXI is regular-user-legal per the rules.
+    await _updateDream11MatchScoringFields(m.id, { autoLl5PreDeadlineXI: newDone });
     try {
       await d11CheckPlayingXIAnnouncedLl5(m.id, /*silent=*/true);
     } catch (e) {
@@ -19283,16 +19170,16 @@ async function d11AutoCheckLl5PlayingXI() {
   }
 }
 
-// 20/40/80/130/180/250/320 minutes after the deadline, tracked in
-// d11m.autoLl5PostDeadline = { w20, w40, w80, w130, w180, w250, w320 }.
+// 20/40/60/90/150/240/300 minutes after the deadline, tracked in
+// d11m.autoLl5PostDeadline = { w20, w40, w60, w90, w150, w240, w300 }.
 const LL5_AUTO_SYNC_WINDOWS_MIN = [
   { key: 'w20', mins: 20 },
   { key: 'w40', mins: 40 },
-  { key: 'w80', mins: 80 },
-  { key: 'w130', mins: 130 },
-  { key: 'w180', mins: 180 },
-  { key: 'w250', mins: 250 },
-  { key: 'w320', mins: 320 },
+  { key: 'w60', mins: 60 },
+  { key: 'w90', mins: 90 },
+  { key: 'w150', mins: 150 },
+  { key: 'w240', mins: 240 },
+  { key: 'w300', mins: 300 },
 ];
 
 async function d11AutoSyncLl5PostDeadline() {
@@ -19324,15 +19211,15 @@ async function d11AutoSyncLl5PostDeadline() {
     if (!windowHit) continue;
 
     // Mark every due window (not just the one we're about to fire) as done
-    // atomically via a Firestore transaction — see
-    // _d11ClaimAutoSyncWindowCatchUp's own comment for why a plain read-
-    // then-write here would let two simultaneous sessions both fire the
-    // same window's API call.
-    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoLl5PostDeadline', windowHit, LL5_AUTO_SYNC_WINDOWS_MIN, w => minsSinceDeadline >= w.mins);
-    if (!claimed) continue;
+    // FIRST — before the async call — so (a) a second tab running this same
+    // loop a few seconds later doesn't double-fire, and (b) we don't leave
+    // older due windows sitting there to be caught by a later tick and
+    // fire redundantly right after this fresher sync.
     const newDone = { ...done };
     LL5_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsSinceDeadline >= w.mins) newDone[w.key] = true; });
     d11m.autoLl5PostDeadline = newDone;
+    // FIX: autoLl5PostDeadline is regular-user-legal per the rules.
+    await _updateDream11MatchScoringFields(m.id, { autoLl5PostDeadline: newDone });
     try {
       // Sync Now only — NOT Playing XI. Post-deadline the XI is already
       // locked in from the pre-deadline checks; all that's needed now is
@@ -19532,7 +19419,7 @@ function _d11RenderLl5SyncRow(m) {
   const autoOn = !!m.ll5AutoSync;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(8,145,178,0.08);border:1px solid rgba(8,145,178,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#22d3ee;flex:1;min-width:140px">⚡ Linked to Cricket Live Line 5 · Last synced: ${lastSyncStr}</span>
-    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleLl5AutoSync('${m.id}')" title="Deadline se pehle 25/22/18/15/11/7min pe Playing XI, aur deadline ke baad 20/40/80/130/180/250/320min pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleLl5AutoSync('${m.id}')" title="Deadline se pehle 25/20/15/10min pe Playing XI, aur deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchLl5('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchLl5('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromLl5('${m.id}')">📥 Fetch Squad</button>
@@ -19778,7 +19665,7 @@ function _d11RenderCb2SyncRow(m) {
   const autoOn = !!m.cb2AutoSync;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(147,51,234,0.08);border:1px solid rgba(147,51,234,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#c084fc;flex:1;min-width:140px">🏏 Linked to Cricbuzz No 2 · Last synced: ${lastSyncStr}</span>
-    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleCb2AutoSync('${m.id}')" title="Deadline se pehle 25/22/18/15/11/7min pe Playing XI, aur deadline ke baad 20/40/80/130/180/250/320min pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleCb2AutoSync('${m.id}')" title="Deadline se pehle 25/20/15/10min pe Playing XI, aur deadline ke baad 20min/40min/1h/1h30/2h30/4h/5h pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchCb2('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchCb2('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromCb2('${m.id}')">📥 Fetch Squad</button>
@@ -35623,7 +35510,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.57.0";
+const APP_VERSION = "4.55.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
