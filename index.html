@@ -2381,11 +2381,12 @@ function _updateSyncWatermark(collectionName, obj) {
 // don't re-query Firestore more than once every couple of minutes.
 const AUTO_REFRESH_MIN_GAP_MS = 2 * 60 * 1000; // 2 minutes
 let _autoRefreshInFlight = {};
-async function _autoIncrementalRefresh(collectionName, targetSetter, cacheKey, opts) {
+async function _autoIncrementalRefresh(collectionName, targetSetter, cacheKey, opts, minGapMs) {
   if (!window._fbDb || !window._fbFns || !window._fbFns.query || !window._fbFns.where || !window._fbFns.getDocs) return;
   if (_autoRefreshInFlight[collectionName]) return; // already checking, don't stack duplicate queries
   const lastAuto = _getLastManualRefreshAt('auto_' + collectionName);
-  if (lastAuto && (Date.now() - lastAuto) < AUTO_REFRESH_MIN_GAP_MS) return;
+  const gap = typeof minGapMs === 'number' ? minGapMs : AUTO_REFRESH_MIN_GAP_MS;
+  if (lastAuto && (Date.now() - lastAuto) < gap) return;
   const watermark = _getLastSyncedDataTs(collectionName);
   if (!watermark) return; // no watermark yet — the normal full-fetch path (first load on this device) handles this case instead
   _autoRefreshInFlight[collectionName] = true;
@@ -2488,6 +2489,7 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
       snap.forEach(d => { obj[d.id] = d.data(); });
       targetSetter(obj);
       try { localStorage.setItem(cacheKey, JSON.stringify(obj)); } catch(e){}
+      _updateSyncWatermark(collectionName, obj);
       if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
       if (opts.rerenderOnUpdate && typeof render === 'function') render();
       return true;
@@ -2557,6 +2559,13 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
         Object.keys(obj).forEach(id => { if (!seenIds.has(id)) delete obj[id]; });
         targetSetter(obj);
         try { localStorage.setItem(cacheKey, JSON.stringify(obj)); } catch(e){}
+        // FIX: without this, the watermark used by _autoIncrementalRefresh
+        // (and the 15-second fast-poll built on top of it) never got set
+        // for a fresh session — it was only ever updated inside
+        // _autoIncrementalRefresh itself, so nothing ever seeded it in the
+        // first place and every incremental check kept silently no-op'ing
+        // via its `if (!watermark) return;` guard.
+        _updateSyncWatermark(collectionName, obj);
         if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
         if (!resolved) { resolved = true; resolve(true); }
         else if (opts.rerenderOnUpdate !== false) {
@@ -2581,6 +2590,35 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
       if (!resolved) { resolved = true; resolve(false); }
     }
   });
+}
+
+// ── Fast 15-second poll for Upcoming/Live/Today's-Completed match data ──
+// Everything else in the app is cache-first + a live onSnapshot listener
+// (near-instant, but occasionally lags a few seconds behind on a slow
+// connection or right after reconnecting). For the screens that matter
+// most — live scores, player points, team totals for matches that are
+// upcoming, currently live, or completed earlier today — that's not quite
+// fast enough. This timer runs _autoIncrementalRefresh every 15 seconds for
+// exactly those 3 collections (pp_matches, pp_dream11_matches,
+// pp_dream11_teams). It's cheap: _autoIncrementalRefresh only queries
+// documents changed since the last check (a `where('updatedAt','>',
+// watermark)` query), not a full collection re-read, so running it this
+// often does not reintroduce the "every user, every open, full read" quota
+// problem — an unchanged collection costs one tiny query that returns
+// nothing.
+const D11_FAST_POLL_MS = 15 * 1000;
+const D11_FAST_POLL_MIN_GAP_MS = 12 * 1000; // slightly under the 15s tick so this trigger's own throttle never blocks itself
+const D11_FAST_POLL_COLLECTIONS = ['pp_matches', 'pp_dream11_matches', 'pp_dream11_teams'];
+let _d11FastPollTimer = null;
+function _startD11FastPoll() {
+  if (_d11FastPollTimer) return; // already running
+  _d11FastPollTimer = setInterval(() => {
+    if (document.hidden) return; // tab genuinely backgrounded — no point polling a screen no one's looking at
+    D11_FAST_POLL_COLLECTIONS.forEach(name => {
+      const spec = _liveCollectionSpecs[name];
+      if (spec) _autoIncrementalRefresh(name, spec.targetSetter, spec.cacheKey, spec.opts, D11_FAST_POLL_MIN_GAP_MS);
+    });
+  }, D11_FAST_POLL_MS);
 }
 
 async function _loadAllMatchesFromFirestore(forceRefresh, isAppOpen) {
@@ -15599,56 +15637,112 @@ async function d11FetchSquadFromCb2(matchId) {
   }
   showNotif('📥 Fetching squad from Cricbuzz No 2…');
   try {
-    let team1 = {}, team2 = {}, raw = null, usedCllFallback = false;
+    let team1 = {}, team2 = {}, raw = null, usedSeriesSquadFallback = false;
     try {
       raw = await _cb2Fetch(`/mcenter/v1/${m.cb2MatchId}/teams`, null, { feature: 'Fetch Squad', matchId });
       _d11Cb2DebugData = { cb2Raw: raw, cb2MatchId: m.cb2MatchId };
       team1 = raw?.team1 || {};
       team2 = raw?.team2 || {};
-      if (!Array.isArray(team1.players) && !Array.isArray(team2.players)) {
+      // FIX: previously only checked `!Array.isArray(...)`, which is FALSE
+      // for an empty array (`[]` IS an array) — so a match whose squad
+      // literally hadn't been published yet on Cricbuzz No 2 (team1.players:
+      // [], team2.players: []) silently passed this check and proceeded to
+      // add 0 players, instead of triggering the fallback below. Also check
+      // for empty arrays, not just non-arrays.
+      const t1Players = Array.isArray(team1.players) ? team1.players : null;
+      const t2Players = Array.isArray(team2.players) ? team2.players : null;
+      const t1HasAny = t1Players && t1Players.some(g => (g.players||[]).length > 0 || (g.player||[]).length > 0);
+      const t2HasAny = t2Players && t2Players.some(g => (g.players||[]).length > 0 || (g.player||[]).length > 0);
+      if (!t1Players && !t2Players) {
         throw new Error('Match squad not published yet on Cricbuzz No 2');
       }
-    } catch (cb2SquadErr) {
-      // Cricbuzz No 2 has no confirmed series-squad endpoint of its own yet,
-      // so instead of guessing an untested schema, fall back to Cricket Live
-      // Line's series-squad fetch if this same match is ALSO linked there —
-      // that path is already confirmed working (see
-      // _d11CllFetchSeriesSquadFallback). This only helps matches linked to
-      // both providers; if not linked to CLL, the original cb2 error shows.
-      if (!m.cllMatchId) throw cb2SquadErr;
-      const cllFallback = await _d11CllFetchSeriesSquadFallback(matchId, m);
-      if (!cllFallback) throw cb2SquadErr;
-      usedCllFallback = true;
-      d11SyncTeamFlag(m.teamA, cllFallback.teamA.flag);
-      d11SyncTeamFlag(m.teamB, cllFallback.teamB.flag);
-      const existingNamesLowerCll = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
-      let addedCll = 0;
-      const addCllSide = (teamObj, side) => {
-        (teamObj.player || []).forEach(p => {
-          const name = (p.name || '').trim();
-          if (!name || existingNamesLowerCll.has(name.toLowerCase())) return;
-          const roleText = p.play_role || '';
-          const isKeeper = /keeper/i.test(roleText);
-          const role = _d11MapCricbuzzRole(roleText, isKeeper);
-          const photo = (p.image || '').trim() || null;
-          const player = newDream11Player(name, role, side, { photo });
-          d11m.players.push(player);
-          d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
-          existingNamesLowerCll.add(name.toLowerCase());
-          addedCll++;
-        });
-      };
-      addCllSide(cllFallback.teamA, 'A');
-      addCllSide(cllFallback.teamB, 'B');
-      if (addedCll === 0) {
-        showNotif('No new players to add — squad already matches what\'s in your pool.');
-        render();
-        return;
+      if (!t1HasAny && !t2HasAny) {
+        // Both teams' player arrays exist but are empty (squad groups
+        // present with no actual players inside, or player arrays are
+        // literally []) — the match-level squad endpoint has nothing
+        // usable yet. Try the SERIES-level squad instead: /series/v1/
+        // {seriesId}/squads lists each team's squadId for this series,
+        // then /series/v1/{seriesId}/squads/{squadId} returns that team's
+        // actual player list — this is often published earlier than the
+        // match-specific squad.
+        throw new Error('__CB2_EMPTY_SQUAD__');
       }
-      await _saveDream11MatchToFirestore(matchId, d11m);
-      showNotif(`✅ Added ${addedCll} players via Cricket Live Line series squad (Cricbuzz No 2 squad wasn't published yet)!`);
-      render();
-      return;
+    } catch (cb2SquadErr) {
+      const isEmptySquad = cb2SquadErr.message === '__CB2_EMPTY_SQUAD__';
+      // Try the series-level squad list first (new fallback) if we have a
+      // seriesId for this match, then fall back further to Cricket Live
+      // Line's series-squad fetch if that's also linked.
+      if (m.cb2SeriesId) {
+        try {
+          showNotif('📥 Match squad empty on Cricbuzz No 2 — trying Series Squads List instead…');
+          const seriesSquadsRaw = await _cb2Fetch(`/series/v1/${m.cb2SeriesId}/squads`, null, { feature: 'Fetch Squad (series fallback)', matchId });
+          // Standard Cricbuzz schema: { squads: [ { squadId, squadType,
+          // teamId, teamName, ... }, ... ] } — one entry per team (and
+          // sometimes extra entries like "Match Officials"/support staff,
+          // which we skip by matching on teamId against this match's two
+          // teams).
+          const squadList = seriesSquadsRaw?.squads || seriesSquadsRaw?.squadList || [];
+          const wantedTeamIds = [team1?.team?.teamid, team2?.team?.teamid].filter(Boolean).map(String);
+          const relevantSquads = squadList.filter(s => !wantedTeamIds.length || wantedTeamIds.includes(String(s.teamId || s.teamid)));
+          const squadsToUse = relevantSquads.length ? relevantSquads : squadList; // if team-id matching found nothing, just try everything returned
+          if (!squadsToUse.length) throw new Error('No squads listed for this series on Cricbuzz No 2 yet');
+
+          const existingNamesLowerSeries = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+          let addedSeries = 0;
+          for (const squadEntry of squadsToUse) {
+            const squadId = squadEntry.squadId || squadEntry.squadid;
+            if (!squadId) continue;
+            const teamIdForSide = String(squadEntry.teamId || squadEntry.teamid || '');
+            const side = teamIdForSide && String(team2?.team?.teamid) === teamIdForSide ? 'B' : 'A'; // default to A unless it clearly matches team2
+            let squadDetail;
+            try {
+              squadDetail = await _cb2Fetch(`/series/v1/${m.cb2SeriesId}/squads/${squadId}`, null, { feature: 'Fetch Squad (series fallback detail)', matchId });
+            } catch (e) {
+              console.warn('Series squad detail fetch failed for squadId', squadId, e.message);
+              continue;
+            }
+            (squadDetail?.player || []).forEach(p => {
+              if (p.isHeader) return; // "BATTERS"/"ALL ROUNDERS"/etc section labels, not real players
+              const name = (p.name || '').trim();
+              if (!name || existingNamesLowerSeries.has(name.toLowerCase())) return;
+              const isKeeper = /wk|keeper/i.test(p.role || '');
+              const role = _d11MapCricbuzzRole(p.role, isKeeper);
+              const photo = p.imageId ? cb2FaceImageUrl(p.imageId) : null;
+              const player = newDream11Player(name, role, side, { photo });
+              d11m.players.push(player);
+              d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
+              existingNamesLowerSeries.add(name.toLowerCase());
+              addedSeries++;
+            });
+          }
+          if (addedSeries === 0) {
+            showNotif('No new players found via Series Squads List either — squad may genuinely not be announced yet.', 'error');
+            render();
+            return;
+          }
+          await _saveDream11MatchToFirestore(matchId, d11m);
+          showNotif(`✅ Added ${addedSeries} players via Series Squads List (match-level squad wasn't published yet)!`);
+          render();
+          return;
+        } catch (seriesFallbackErr) {
+          console.warn('Series Squads List fallback failed:', seriesFallbackErr.message);
+          // fall through to the final error below — Cricbuzz No 2's own
+          // fallback chain is exhausted at this point.
+        }
+      }
+      // FIX: this used to fall back to Cricket Live Line's series-squad
+      // fetch (_d11CllFetchSeriesSquadFallback) if the match was ALSO
+      // linked to CLL — but that mixes providers: Cricbuzz No 2's "Fetch
+      // Squad" button would silently pull data from a completely different
+      // API (Cricket Live Line), which isn't what "provider-specific" is
+      // supposed to mean. Each provider's fetch should only ever use its
+      // OWN API. Cricbuzz No 2 already has two fallback tiers of its own
+      // (match-level squad, then series-level squad) — if both come back
+      // empty, that's a genuine "not published yet" state for THIS
+      // provider, and the admin should switch providers manually (e.g. use
+      // Cricket Live Line's own "Fetch Squad" button) rather than this one
+      // silently reaching across into another provider's data.
+      throw (isEmptySquad ? new Error('Squad not published yet on Cricbuzz No 2 (tried both match-level and series-level squads) — try again closer to match time, or fetch from a different linked provider instead.') : cb2SquadErr);
     }
 
     const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
@@ -35235,6 +35329,7 @@ async function initApp() {
 
 initApp();
 _installVisibilityGuard(); // was fully built but never wired up — needed so onSnapshot listeners detach when idle/hidden and reattach on return, instead of running forever or never starting
+_startD11FastPoll(); // keeps live scores/points/team-totals refreshing every ~15s for upcoming/live/today's-completed matches, for every user (admin included) — see _startD11FastPoll's own comment
 
 // ── Register service worker for offline support ──
 if ('serviceWorker' in navigator) {
@@ -35415,7 +35510,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.52.0";
+const APP_VERSION = "4.55.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
