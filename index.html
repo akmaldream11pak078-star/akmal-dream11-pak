@@ -15144,14 +15144,11 @@ async function d11AutoCheckAllPlayingXI() {
     }
     if (!windowHit) continue;
 
-    // ATOMIC CLAIM: a plain read-then-write here would let two users'
-    // sessions both see this window as unclaimed and both fire the real
-    // API call — see _d11ClaimAutoSyncWindowCatchUp's own comment.
-    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoAllPreDeadlineXI', windowHit, ALL_PRE_DEADLINE_XI_WINDOWS_MIN, w => minsToDeadline <= w.mins);
-    if (!claimed) continue;
     const newDoneAllXi = { ...done };
     ALL_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDoneAllXi[w.key] && minsToDeadline <= w.mins) newDoneAllXi[w.key] = true; });
     d11m.autoAllPreDeadlineXI = newDoneAllXi;
+    // FIX: autoAllPreDeadlineXI is regular-user-legal per the rules.
+    await _updateDream11MatchScoringFields(m.id, { autoAllPreDeadlineXI: newDoneAllXi });
     try {
       await d11CheckPlayingXIAnnouncedAll(m.id, /*silent=*/true);
     } catch (e) {
@@ -15194,12 +15191,11 @@ async function d11AutoSyncAllPostDeadline() {
     }
     if (!windowHit) continue;
 
-    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
-    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoAllPostDeadline', windowHit, ALL_AUTO_SYNC_WINDOWS_MIN, w => minsSinceDeadline >= w.mins);
-    if (!claimed) continue;
     const newDoneAll = { ...done };
     ALL_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDoneAll[w.key] && minsSinceDeadline >= w.mins) newDoneAll[w.key] = true; });
     d11m.autoAllPostDeadline = newDoneAll;
+    // FIX: autoAllPostDeadline is regular-user-legal per the rules.
+    await _updateDream11MatchScoringFields(m.id, { autoAllPostDeadline: newDoneAll });
     try {
       // Sync Now only — NOT Playing XI. Post-deadline the XI is already
       // locked in from the pre-deadline checks; all that's needed now is
@@ -16165,12 +16161,10 @@ async function d11AutoCheckCb2PlayingXI() {
     }
     if (!windowHit) continue;
 
-    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
-    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoCb2PreDeadlineXI', windowHit, CB2_PRE_DEADLINE_XI_WINDOWS_MIN, w => minsToDeadline <= w.mins);
-    if (!claimed) continue;
     const newDoneCb2Xi = { ...done };
     CB2_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDoneCb2Xi[w.key] && minsToDeadline <= w.mins) newDoneCb2Xi[w.key] = true; });
     d11m.autoCb2PreDeadlineXI = newDoneCb2Xi;
+    await _updateDream11MatchScoringFields(m.id, { autoCb2PreDeadlineXI: newDoneCb2Xi });
     try {
       await d11CheckPlayingXIAnnouncedCb2(m.id, /*silent=*/true);
     } catch (e) {
@@ -16213,12 +16207,10 @@ async function d11AutoSyncCb2PostDeadline() {
     }
     if (!windowHit) continue;
 
-    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
-    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoCb2PostDeadline', windowHit, CB2_AUTO_SYNC_WINDOWS_MIN, w => minsSinceDeadline >= w.mins);
-    if (!claimed) continue;
     const newDoneCb2 = { ...done };
     CB2_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDoneCb2[w.key] && minsSinceDeadline >= w.mins) newDoneCb2[w.key] = true; });
     d11m.autoCb2PostDeadline = newDoneCb2;
+    await _updateDream11MatchScoringFields(m.id, { autoCb2PostDeadline: newDoneCb2 });
     try {
       await d11SyncLiveMatchCb2(m.id, /*showToast=*/false);
     } catch (e) {
@@ -17687,12 +17679,10 @@ async function d11AutoCheckLl3PlayingXI() {
     }
     if (!windowHit) continue;
 
-    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
-    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoLl3PreDeadlineXI', windowHit, LL3_PRE_DEADLINE_XI_WINDOWS_MIN, w => minsToDeadline <= w.mins);
-    if (!claimed) continue;
     const newDoneLl3Xi = { ...done };
     LL3_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDoneLl3Xi[w.key] && minsToDeadline <= w.mins) newDoneLl3Xi[w.key] = true; });
     d11m.autoLl3PreDeadlineXI = newDoneLl3Xi;
+    await _updateDream11MatchScoringFields(m.id, { autoLl3PreDeadlineXI: newDoneLl3Xi });
     try {
       await d11CheckPlayingXIAnnouncedLl3(m.id, /*silent=*/true);
     } catch (e) {
@@ -17735,12 +17725,10 @@ async function d11AutoSyncLl3PostDeadline() {
     }
     if (!windowHit) continue;
 
-    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
-    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoLl3PostDeadline', windowHit, LL3_AUTO_SYNC_WINDOWS_MIN, w => minsSinceDeadline >= w.mins);
-    if (!claimed) continue;
     const newDoneLl3 = { ...done };
     LL3_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDoneLl3[w.key] && minsSinceDeadline >= w.mins) newDoneLl3[w.key] = true; });
     d11m.autoLl3PostDeadline = newDoneLl3;
+    await _updateDream11MatchScoringFields(m.id, { autoLl3PostDeadline: newDoneLl3 });
     try {
       await d11SyncLiveMatchLl3(m.id, /*showToast=*/false);
     } catch (e) {
@@ -19303,12 +19291,10 @@ async function d11AutoCheckLl5PlayingXI() {
     }
     if (!windowHit) continue;
 
-    // ATOMIC CLAIM — see _d11ClaimAutoSyncWindowCatchUp's own comment.
-    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoLl5PreDeadlineXI', windowHit, LL5_PRE_DEADLINE_XI_WINDOWS_MIN, w => minsToDeadline <= w.mins);
-    if (!claimed) continue;
     const newDoneLl5Xi = { ...done };
     LL5_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDoneLl5Xi[w.key] && minsToDeadline <= w.mins) newDoneLl5Xi[w.key] = true; });
     d11m.autoLl5PreDeadlineXI = newDoneLl5Xi;
+    await _updateDream11MatchScoringFields(m.id, { autoLl5PreDeadlineXI: newDoneLl5Xi });
     try {
       await d11CheckPlayingXIAnnouncedLl5(m.id, /*silent=*/true);
     } catch (e) {
@@ -19370,12 +19356,11 @@ async function d11AutoSyncLl5PostDeadline() {
     // _d11ClaimAutoSyncWindowCatchUp's own comment for why a plain read-
     // then-write here would let two simultaneous sessions both fire the
     // same window's API call.
-    const claimed = await _d11ClaimAutoSyncWindowCatchUp(m.id, 'autoLl5PostDeadline', windowHit, LL5_AUTO_SYNC_WINDOWS_MIN, w => minsSinceDeadline >= w.mins);
-    if (!claimed) { console.log('[LL5 auto-sync] skip', m.id, '— lost the atomic claim race for window', windowHit, '(another session/tab already claimed it)'); continue; }
     console.log('[LL5 auto-sync] FIRING sync for', m.id, 'window', windowHit, 'mins since deadline:', minsSinceDeadline.toFixed(1));
     const newDone = { ...done };
     LL5_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsSinceDeadline >= w.mins) newDone[w.key] = true; });
     d11m.autoLl5PostDeadline = newDone;
+    await _updateDream11MatchScoringFields(m.id, { autoLl5PostDeadline: newDone });
     try {
       // Sync Now only — NOT Playing XI. Post-deadline the XI is already
       // locked in from the pre-deadline checks; all that's needed now is
