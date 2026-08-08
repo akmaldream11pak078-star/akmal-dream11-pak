@@ -33975,8 +33975,14 @@ async function _atomicJoinUtContest({ tournamentId, matchId, entryFeeAmount, tea
 
       const updatedParticipants = { ...(tournamentData.participants || {}), [currentUser.email]: true };
 
-      tx.set(userRef, { ...userData, balance: newBalance, transactions: newTransactions });
-      tx.set(tournamentRef, { ...tournamentData, participants: updatedParticipants, updatedAt: Date.now() });
+      tx.update(userRef, { balance: newBalance, transactions: newTransactions });
+      // FIX: was tx.set(tournamentRef, { ...tournamentData, participants: updatedParticipants, updatedAt: Date.now() })
+      // — a full-document set() rewrites every field (matches, ownerEmail, etc), which only
+      // passes Firestore rules for the tournament owner/admin. Any other member's join always
+      // failed here with a rules-denied error (surfaced as the generic "Join failed" message),
+      // even though they were an approved participant. tx.update() only touches the fields
+      // named below, matching the non-owner participants-only security rule.
+      tx.update(tournamentRef, { participants: updatedParticipants });
       tx.set(teamRef, _stampUpdatedAt(team));
 
       return { balance: newBalance, transactions: newTransactions, participants: updatedParticipants };
