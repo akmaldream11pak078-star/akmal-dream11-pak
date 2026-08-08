@@ -917,7 +917,7 @@ const UT_CREDIT_BUDGET = 100; // same 100-credit Dream11 budget system
 const UT_DEFAULT_CREDIT = 9.0;
 const UT_MAX_PER_SIDE = 11; // both teams' 11 players can now come from a single side if the user wants
 const UT_ROLE_LIMITS = { WK:[0,10], BAT:[0,10], AR:[0,10], BOWL:[0,10] };
-const UT_MAX_BACKUPS = 3; // same as D11_MAX_BACKUPS — free (no credit cost), auto-replace a same-role main player who isn't in the confirmed Playing XI
+const UT_MAX_BACKUPS = 4; // same as D11_MAX_BACKUPS — free (no credit cost), auto-replace a same-role main player who isn't in the confirmed Playing XI
 const UT_ROLE_LABELS = { WK:'Wicket-Keeper', BAT:'Batsman', AR:'All-Rounder', BOWL:'Bowler' };
 
 let users = {};
@@ -32726,6 +32726,8 @@ async function utConfirmAddAdminMatch(matchId) {
       name: p.name,
       role: p.role || 'BAT',
       side: p.side === 'A' ? 'A' : 'B', // bug fix: was reading p.team (doesn't exist on Dream11 players) — always fell through to 'B'. Source of truth is p.side.
+      credit: p.credit != null ? p.credit : UT_DEFAULT_CREDIT, // FIX: was missing entirely — utPlayerCredit(p) then fell back to UT_DEFAULT_CREDIT for every player, so utValidateTeam's credit-budget math never matched what the UI showed, and could silently block Submit.
+      photo: p.photo || null, // FIX: was missing entirely — every admin-match player rendered as a plain letter-circle avatar instead of their actual photo.
       points: p.points || 0,
       isPlayingXI: p.isPlayingXI || false,
       stats: p.stats || {}
