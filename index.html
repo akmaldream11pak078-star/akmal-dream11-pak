@@ -1668,6 +1668,7 @@ let d11TeamPreviewOpen = false; // shows the pitch-view preview modal before the
 // specific contest. { matchId, onConfirm(teamId) } or null when closed.
 let d11JoinTeamPicker = null;
 let d11BuildTeamRoleTab = 'ALL'; // active role-filter tab on the Create Team screen: 'ALL' | 'WK' | 'BAT' | 'AR' | 'BOWL'
+let utBuildTeamRoleTab = 'ALL'; // same, but for the UT (Create/Join Your Own Tournament) Build Team screen
 let d11ViewTeamId = null; // for viewing a submitted team detail
 let d11ContestMatchId = null; // which Dream11 match's "Join Contest" screen is showing
 let d11ParticipantsMatchId = null; // which match's contest participants list is showing
@@ -22756,6 +22757,19 @@ function d11PlayerSelectionPercents(matchId) {
   });
   return { counts, total };
 }
+// Same idea as d11PlayerSelectionPercents, but scoped to a single UT match's
+// own submitted teams (utTeams), since UT matches live inside per-tournament
+// data rather than the global Dream11 match pool.
+function utPlayerSelectionPercents(matchId) {
+  const teams = Object.values(utTeams).filter(t => t.matchId === matchId);
+  const total = teams.length;
+  const counts = {};
+  if (total === 0) return { counts, total };
+  teams.forEach(t => {
+    (t.picks||[]).forEach(pid => { counts[pid] = (counts[pid]||0) + 1; });
+  });
+  return { counts, total };
+}
 function d11TeamDraftCreditsUsed(d11m) {
   if (!d11TeamDraft) return 0;
   return d11TeamDraft.picks.reduce((sum, pid) => {
@@ -34170,10 +34184,6 @@ function renderUtDashboard() {
   </div>
 
   ${owner ? `
-  <div style="display:flex;gap:8px;margin-bottom:8px">
-    <button class="btn-primary" style="flex:1;font-size:12.5px;padding:11px;background:linear-gradient(135deg,#f97316,#ea580c)" onclick="utStartCreateMatch()">➕ New Match</button>
-    <button class="btn-secondary" style="flex:1;font-size:12.5px;padding:11px" onclick="openUtTeamsManage()">👥 Teams & Players</button>
-  </div>
   <button class="btn-secondary btn-block mb14" style="font-size:12px;padding:10px;background:rgba(168,85,247,0.1);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="utOpenAddAdminMatch('${t.id}')">📋 Admin Ka Published Match Add Karo</button>
   ${(() => {
     const pending = Object.entries(t.joinRequests||{}).filter(([,r]) => r.status === 'pending');
@@ -34255,7 +34265,7 @@ function renderUtDashboard() {
   })() : ''}
 
   <div class="section-title">🎮 Matches (${matches_.length})</div>
-  ${matches_.length === 0 ? `<div class="empty-state"><div class="empty-icon">🎮</div>${owner ? 'No matches yet — click "New Match" to get started.' : 'The owner has not created any matches yet.'}</div>` :
+  ${matches_.length === 0 ? `<div class="empty-state"><div class="empty-icon">🎮</div>${owner ? 'No matches yet — click "Admin Ka Published Match Add Karo" to get started.' : 'The owner has not added any matches yet.'}</div>` :
   matches_.map(m => utMatchCard(t, m, owner)).join('')}
 
   ${(() => {
@@ -34949,11 +34959,10 @@ function renderUtBuildTeam() {
   if (!t || !m) return `<div class="empty-state">Match not found. <button class="btn-secondary" onclick="utBackFromBuildOrBoard()" style="margin-top:10px">← Back</button></div>`;
 
   const { counts } = utTeamComposition(utTeamDraft.picks, m);
-  const sideA = m.players.filter(p => p.side === 'A');
-  const sideB = m.players.filter(p => p.side === 'B');
   const dLocked = isUtLocked(t.id, m.id);
   const deadlineStr = m.deadline ? pkDateTime(m.deadline) : '';
   const xiCount = m.players.filter(p => p.isPlayingXI).length;
+  const { counts: selCounts, total: selTotal } = utPlayerSelectionPercents(m.id);
 
   const progressPill = (role) => {
     const [min, max] = UT_ROLE_LIMITS[role];
@@ -34961,6 +34970,14 @@ function renderUtBuildTeam() {
     const cls = c > max ? 'over' : (c >= min ? 'ok' : '');
     return `<div class="d11-progress-pill ${cls}"><div class="d11-progress-num">${c}/${max}</div><div class="d11-progress-lbl">${role}</div></div>`;
   };
+
+  const roleTab = (role, label) => `<button class="d11-role-tab ${utBuildTeamRoleTab===role?'active':''}" onclick="utBuildTeamRoleTab='${role}';render()">${label}</button>`;
+
+  const sideAAll = m.players.filter(p => p.side === 'A');
+  const sideBAll = m.players.filter(p => p.side === 'B');
+  const matchesTab = (p) => utBuildTeamRoleTab === 'ALL' || p.role === utBuildTeamRoleTab;
+  const sideA = sideAAll.filter(matchesTab);
+  const sideB = sideBAll.filter(matchesTab);
 
   return `
   <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="utBackFromBuildOrBoard()">← Back</button>
@@ -34973,18 +34990,43 @@ function renderUtBuildTeam() {
     </div>
     <div style="text-align:center;font-size:11px;color:var(--dim)">Build your team — select ${UT_TEAM_SIZE} players · 💰 Entry Rs ${m.entryFee}</div>
     ${deadlineStr ? `<div class="match-deadline">${dLocked ? '🔒 Deadline passed' : `⏰ Deadline: ${deadlineStr}`}</div>` : ''}
-    ${xiCount > 0 ? `<div style="text-align:center;font-size:10.5px;color:#4ade80;margin-top:4px">🏏 Playing XI confirmed for ${xiCount} player${xiCount===1?'':'s'}</div>` : ''}
+    ${xiCount > 0 ? `<div style="text-align:center;font-size:10.5px;color:#4ade80;margin-top:4px">🏏 Playing XI confirmed for ${xiCount} player${xiCount===1?'':'s'} — look for the green tick below</div>` : `<div style="text-align:center;font-size:10.5px;color:var(--dim);margin-top:4px">Playing XI not confirmed yet — pick from the full squad for now</div>`}
   </div>
 
   <div class="d11-progress-bar">
     ${progressPill('WK')}${progressPill('BAT')}${progressPill('AR')}${progressPill('BOWL')}
   </div>
 
-  <div class="section-title">${m.teamA||'Team A'}</div>
-  ${sideA.map(p => utPickRow(p)).join('')}
+  <div class="d11-role-tabs">
+    ${roleTab('ALL', `All (${m.players.length})`)}
+    ${roleTab('WK', `WK (${sideAAll.concat(sideBAll).filter(p=>p.role==='WK').length})`)}
+    ${roleTab('BAT', `BAT (${sideAAll.concat(sideBAll).filter(p=>p.role==='BAT').length})`)}
+    ${roleTab('AR', `AR (${sideAAll.concat(sideBAll).filter(p=>p.role==='AR').length})`)}
+    ${roleTab('BOWL', `BOWL (${sideAAll.concat(sideBAll).filter(p=>p.role==='BOWL').length})`)}
+  </div>
 
-  <div class="section-title" style="margin-top:16px">${m.teamB||'Team B'}</div>
-  ${sideB.map(p => utPickRow(p)).join('')}
+  <div class="d11-dual-col">
+    <div class="d11-dual-col-half">
+      <div class="d11-dual-header">
+        ${d11GetTeamSquad(m.teamA)?.flag ? `<img src="${d11GetTeamSquad(m.teamA).flag}" />` : ''}
+        <span>${m.teamA||'Team A'}</span>
+      </div>
+      ${sideA.length === 0
+        ? `<div class="empty-state" style="padding:16px 4px;font-size:11px">No players</div>`
+        : sideA.map((p,i) => utDualPlayerCard(p, i+1, selCounts, selTotal)).join('')
+      }
+    </div>
+    <div class="d11-dual-col-half">
+      <div class="d11-dual-header">
+        ${d11GetTeamSquad(m.teamB)?.flag ? `<img src="${d11GetTeamSquad(m.teamB).flag}" />` : ''}
+        <span>${m.teamB||'Team B'}</span>
+      </div>
+      ${sideB.length === 0
+        ? `<div class="empty-state" style="padding:16px 4px;font-size:11px">No players</div>`
+        : sideB.map((p,i) => utDualPlayerCard(p, i+1, selCounts, selTotal)).join('')
+      }
+    </div>
+  </div>
 
   ${utTeamDraft.picks.length === UT_TEAM_SIZE ? `
   <div class="section-title" style="margin-top:18px">👑 Select Captain & Vice-Captain</div>
@@ -35004,7 +35046,6 @@ function renderUtBuildTeam() {
       </div>
     </div>`;
   }).join('')}
-  ` : ''}
 
   <div class="section-title" style="margin-top:18px">🔁 Backup Players (${(utTeamDraft.backups||[]).length}/${UT_MAX_BACKUPS})</div>
   <div class="empty-state" style="padding:8px 4px;font-size:11px;text-align:left">Free picks — no credit cost. If a main player isn't in the confirmed Playing XI, any one of your backups automatically takes their spot — no role/category restriction.</div>
@@ -35020,6 +35061,11 @@ function renderUtBuildTeam() {
       <button class="d11-cv-btn" onclick="utToggleBackup('${bid}')">✕</button>
     </div>`;
   }).join('')}
+  ` : `
+  <div class="empty-state" style="margin-top:14px;padding:14px;font-size:12px">
+    Select ${UT_TEAM_SIZE - utTeamDraft.picks.length} more player${(UT_TEAM_SIZE - utTeamDraft.picks.length)===1?'':'s'} to unlock Captain/Vice-Captain selection and submit your team.
+  </div>
+  `}
 
   <div class="d11-sticky-bar">
     <div>
@@ -35042,21 +35088,22 @@ function renderUtBuildTeam() {
   </div>
   `;
 }
-function utPickRow(p) {
+function utDualPlayerCard(p, rank, selCounts, selTotal) {
   const picked = utTeamDraft.picks.includes(p.id);
   const isBackup = (utTeamDraft.backups||[]).includes(p.id);
+  const selPct = selTotal > 0 ? Math.round(((selCounts[p.id]||0) / selTotal) * 100) : 0;
+  const avatar = p.photo
+    ? `<img src="${p.photo}" class="d11-dual-avatar" />`
+    : `<div class="d11-dual-avatar-fallback">${(p.name||'?').charAt(0).toUpperCase()}</div>`;
   return `
-  <div class="d11-player-row ${picked?'picked':''}">
-    <div class="d11-player-left">
-      ${p.photo ? `<img src="${p.photo}" style="width:30px;height:30px;border-radius:50%;object-fit:cover;flex-shrink:0" />` : ''}
-      <span class="d11-role-chip d11-role-${p.role}">${p.role}</span>
-      <div class="d11-player-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80;font-size:11px" title="Confirmed Playing XI">✅</span>' : ''}${isBackup ? ' <span style="color:#60a5fa;font-size:11px" title="Backup player">🔁</span>' : ''}</div>
-    </div>
-    <div style="display:flex;align-items:center;gap:8px">
-      <span style="font-size:11px;color:var(--dim);font-weight:600">${utPlayerCredit(p)} Cr</span>
-      ${!picked ? `<button class="d11-cv-btn" style="background:${isBackup?'#2563eb':'transparent'};border-color:#60a5fa;color:${isBackup?'#fff':'#60a5fa'};font-size:9px;width:auto;padding:2px 6px" title="Mark as backup" onclick="utToggleBackup('${p.id}')">${isBackup?'✕ B':'+ B'}</button>` : ''}
-      <button class="d11-pick-btn ${picked?'active':''}" onclick="utTogglePick('${p.id}')">${picked?'✕':'+'}</button>
-    </div>
+  <div class="d11-dual-player ${picked?'picked':''}">
+    <div class="d11-dual-rank">${rank}<br/><span class="d11-role-chip d11-role-${p.role}" style="margin-top:2px;display:inline-block">${p.role}</span></div>
+    <button class="d11-dual-toggle ${picked?'active':''}" onclick="event.stopPropagation();utTogglePick('${p.id}')">${picked?'✕':'+'}</button>
+    <div>${avatar}</div>
+    <div class="d11-dual-name">${p.name}${p.isPlayingXI ? ' <span style="color:#4ade80" title="Confirmed Playing XI">✅</span>' : ''}${isBackup ? ' <span style="color:#60a5fa" title="Backup player">🔁</span>' : ''}</div>
+    <div class="d11-dual-sel">${selTotal > 0 ? `${selPct}% Sel.` : '— Sel.'}</div>
+    <div class="d11-dual-pts">${utPlayerCredit(p)} Cr</div>
+    ${!picked ? `<button class="d11-dual-toggle d11-dual-backup-toggle ${isBackup?'active':''}" style="background:${isBackup?'#2563eb':'transparent'};border-color:#60a5fa;color:${isBackup?'#fff':'#60a5fa'};font-size:9px;width:auto;padding:2px 6px" title="Mark as backup" onclick="event.stopPropagation();utToggleBackup('${p.id}')">${isBackup?'✕ B':'+ B'}</button>` : ''}
   </div>`;
 }
 
