@@ -2743,7 +2743,24 @@ async function d11RefreshMatchFromFirestore(matchId) {
     const { doc, getDoc } = window._fbFns;
     const snap = await getDoc(doc(window._fbDb, 'pp_dream11_matches', matchId));
     if (snap.exists()) {
-      dream11Matches[matchId] = snap.data();
+      const data = snap.data();
+      // FIX: was `dream11Matches[matchId] = snap.data()` — replacing the
+      // object wholesale reintroduces the exact stale-reference race that
+      // _liveLoadCollection's onSnapshot merge was fixed to avoid (see its
+      // own comment above). If a live-sync function elsewhere had already
+      // captured `const d11m = dream11Matches[matchId]` and this call fires
+      // in between, that in-flight sync keeps writing to the OLD object
+      // while every other reader now sees the NEW one Firestore just
+      // returned — whichever finishes last silently wins, which is why
+      // "Sync Now" or opening Quick Score could occasionally show numbers
+      // reverting a step. Merge fields into the same object reference
+      // instead, exactly like the onSnapshot listener does.
+      if (dream11Matches[matchId] && typeof dream11Matches[matchId] === 'object') {
+        Object.keys(dream11Matches[matchId]).forEach(k => { if (!(k in data)) delete dream11Matches[matchId][k]; });
+        Object.assign(dream11Matches[matchId], data);
+      } else {
+        dream11Matches[matchId] = data;
+      }
       try { localStorage.setItem('pp_dream11_matches_cache', JSON.stringify(dream11Matches)); } catch(e){}
       return true;
     }
@@ -2862,6 +2879,16 @@ async function d11ManualRefresh(evt) {
   if (btn) { btn.disabled = true; btn.textContent = '🔄 Refreshing…'; }
   try {
     await Promise.all([
+      // FIX: was missing entirely — this button only force-refreshed
+      // pp_dream11_matches (players/points), never pp_matches (live
+      // scoreA/scoreB/status). A sync that had already landed fresh data in
+      // Firestore (confirmed via the raw JSON showing the correct score)
+      // still showed the OLD score header on this screen after tapping
+      // refresh, because the score itself lives in pp_matches and this
+      // button never re-read it — only closing and reopening the whole app
+      // (which loads both collections fresh) picked it up. Player points
+      // updated fine since those do live in pp_dream11_matches.
+      _loadAllMatchesFromFirestore(true),
       _loadAllDream11MatchesFromFirestore(true),
       d11ActiveMatchId ? _loadAllDream11TeamsFromFirestore(true) : Promise.resolve(),
       _loadAllD11H2HFromFirestore(true),_loadAllD11TrioFromFirestore(true),
@@ -23139,7 +23166,23 @@ async function d11SubmitTeam() {
 
   if (d11TeamSubmitting) return; // guard against double-tap firing this twice while a save is already in flight
   d11TeamSubmitting = true;
-  d11TeamDraft.originalPicks = [...d11TeamDraft.picks];
+  // FIX: was unconditionally `d11TeamDraft.originalPicks = [...d11TeamDraft.picks]`
+  // on EVERY submit — including every later edit before the deadline, not
+  // just the very first submission. originalPicks is supposed to be a
+  // permanent, never-changing record of "the 11 the user first locked in",
+  // which d11ApplyBackupReplacements relies on after the deadline to know
+  // who to swap out for a backup. Overwriting it on each edit meant that if
+  // a user edited their team (swapping player X for player Y) and X wasn't
+  // one of their chosen backups, the post-deadline backup logic could no
+  // longer tell X had ever been picked at all — originalPicks now said Y
+  // was "the original" — while stale reads of the team elsewhere (or a
+  // re-open before this edit's write had fully propagated) could still
+  // reflect the pre-edit picks, making it look like the user's edit had
+  // been silently reverted after the deadline passed. originalPicks is now
+  // set once, only if this is the team's first-ever submission.
+  if (!d11TeamDraft.originalPicks || d11TeamDraft.originalPicks.length === 0) {
+    d11TeamDraft.originalPicks = [...d11TeamDraft.picks];
+  }
   d11TeamDraft.totalPoints = calcDream11TeamPoints(d11TeamDraft, d11m);
   // Tag with the match's current scored status so the reads-saving filter
   // in _loadAllDream11TeamsFromFirestore can skip re-reading teams whose
@@ -35582,10 +35625,13 @@ if ('serviceWorker' in navigator) {
   // "auto-check" tasks that aren't tied to a collection listener, and
   // do a light re-render/currentUser refresh as a safety net.
   //
-  // Interval is 5 min — light re-render/currentUser refresh safety net,
-  // plus the LL5-only post-deadline sync scheduler below (which itself
-  // only actually does anything for matches admin has armed with the
-  // per-match "🤖 Automatic" toggle — see d11AutoSyncLl5PostDeadline).
+  // Interval is 30 sec (was 5 min — per explicit request, so a live match's
+  // score/points/stats reach every open session within 30 sec of a due
+  // window firing, instead of waiting up to 5 more minutes for the next
+  // tick) — light re-render/currentUser refresh safety net, plus the
+  // per-provider post-deadline sync schedulers below (each only actually
+  // does anything for matches admin has armed with the per-match
+  // "🤖 Automatic" toggle — see d11AutoSyncLl5PostDeadline).
   // This does NOT add extra Firestore reads on every tick: the loop itself
   // is just a local Date.now() comparison against each match's cached
   // deadline — a Firestore write only happens on the (rare) tick where a
@@ -35631,7 +35677,7 @@ if ('serviceWorker' in navigator) {
     // scheduler's silent API usage entirely. (Cricket Live Line 5 is the
     // one exception, per explicit request — see d11AutoSyncLl5PostDeadline
     // above, gated behind the per-match "🤖 Automatic" toggle.)
-  },5*60*1000);
+  },30*1000);
 })();
 
 // ── Live countdown ticker ──
@@ -35728,7 +35774,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.61.0";
+const APP_VERSION = "4.62.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
