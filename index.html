@@ -23518,6 +23518,169 @@ async function distributeD11MegaPrizes(matchId) {
   } catch(e){}
 }
 
+// ── Admin: pay out or undo a SINGLE contest type on a single match, instead
+// of "Payouts All" / "Undo Payouts" which touch every contest type (Mega,
+// Mini Mega, Free, H2H, Trio, Custom) on the match at once. Each button
+// lives inside that contest's own participants panel (see the Mega/Mini
+// Mega/Custom tabs below) so admin can fix one contest's payout without
+// disturbing prizes already correctly paid on the others.
+async function d11PayoutOneMega(matchId) {
+  const d11m = dream11Matches[matchId];
+  const m = matches[matchId];
+  if (!d11m) return;
+  if (!d11m.scored) return showNotif('⚠️ Pehle match ki scoring finalize/fix karo, phir payout chalao', 'error');
+  if (d11m.megaDistributed) return showNotif('Mega Contest already paid out hai — pehle "Undo" karo agar dobara chalana hai.', 'error');
+  if (!confirm(`Mega Contest ka payout chalao "${m?.teamA||'Team A'} vs ${m?.teamB||'Team B'}" ke liye?\n\nSirf Mega Contest ke winners ko amount milega — baaki contests ko ye nahi chherta.`)) return;
+  showNotif('⏳ Mega Contest payout ho raha hai...', 'info');
+  await distributeD11MegaPrizes(matchId);
+  render();
+  showNotif('✅ Mega Contest payout complete 💰');
+}
+async function d11UndoOneMegaPayout(matchId) {
+  const d11m = dream11Matches[matchId];
+  const m = matches[matchId];
+  if (!d11m) return;
+  if (!d11m.megaDistributed || d11m.megaCancelled) return showNotif('Mega Contest ka koi payout distributed nahi hai reverse karne ko.', 'error');
+  if (!confirm(`Mega Contest ka payout undo karo "${m?.teamA||'Team A'} vs ${m?.teamB||'Team B'}" ke liye?\n\nSirf Mega Contest ke winners se amount wapis li jayegi — baaki contests ko ye nahi chherta.`)) return;
+  showNotif('⏳ Mega Contest payout reverse ho raha hai...', 'info');
+  let reversedCount = 0, reversedAmount = 0;
+  for (const [email, amount] of Object.entries(d11m.megaPrizes || {})) {
+    if (amount <= 0) continue;
+    await _adminWalletDeduct(email, amount, matchId, 'D11 Mega prize reversed — result was corrected', 'd11_mega_reversal');
+    reversedCount++; reversedAmount += amount;
+  }
+  d11m.megaPrizes = {};
+  d11m.megaDistributed = false;
+  await _saveDream11MatchToFirestore(matchId, d11m);
+  try {
+    localStorage.setItem('pp_users_cache', JSON.stringify(users));
+    localStorage.setItem('pp_dream11_matches_cache', JSON.stringify(dream11Matches));
+  } catch(e){}
+  render();
+  showNotif(reversedCount === 0 ? 'Kuch reverse karne ko nahi mila.' : `✅ ${reversedCount} prize(s) reversed (Rs ${reversedAmount}) — Mega Contest pool reset.`);
+}
+async function d11PayoutOneMiniMega(matchId) {
+  const d11m = dream11Matches[matchId];
+  const m = matches[matchId];
+  if (!d11m) return;
+  if (!d11m.scored) return showNotif('⚠️ Pehle match ki scoring finalize/fix karo, phir payout chalao', 'error');
+  if (d11m.miniMegaDistributed) return showNotif('Mini Mega Contest already paid out hai — pehle "Undo" karo agar dobara chalana hai.', 'error');
+  if (!confirm(`Mini Mega Contest ka payout chalao "${m?.teamA||'Team A'} vs ${m?.teamB||'Team B'}" ke liye?\n\nSirf Mini Mega Contest ke winners ko amount milega — baaki contests ko ye nahi chherta.`)) return;
+  showNotif('⏳ Mini Mega Contest payout ho raha hai...', 'info');
+  await distributeD11MiniMegaPrizes(matchId);
+  render();
+  showNotif('✅ Mini Mega Contest payout complete 💰');
+}
+async function d11UndoOneMiniMegaPayout(matchId) {
+  const d11m = dream11Matches[matchId];
+  const m = matches[matchId];
+  if (!d11m) return;
+  if (!d11m.miniMegaDistributed || d11m.miniMegaCancelled) return showNotif('Mini Mega Contest ka koi payout distributed nahi hai reverse karne ko.', 'error');
+  if (!confirm(`Mini Mega Contest ka payout undo karo "${m?.teamA||'Team A'} vs ${m?.teamB||'Team B'}" ke liye?\n\nSirf Mini Mega Contest ke winners se amount wapis li jayegi — baaki contests ko ye nahi chherta.`)) return;
+  showNotif('⏳ Mini Mega Contest payout reverse ho raha hai...', 'info');
+  let reversedCount = 0, reversedAmount = 0;
+  for (const [email, amount] of Object.entries(d11m.miniMegaPrizes || {})) {
+    if (amount <= 0) continue;
+    await _adminWalletDeduct(email, amount, matchId, 'D11 Mini Mega prize reversed — result was corrected', 'd11_mini_mega_reversal');
+    reversedCount++; reversedAmount += amount;
+  }
+  d11m.miniMegaPrizes = {};
+  d11m.miniMegaDistributed = false;
+  await _saveDream11MatchToFirestore(matchId, d11m);
+  try {
+    localStorage.setItem('pp_users_cache', JSON.stringify(users));
+    localStorage.setItem('pp_dream11_matches_cache', JSON.stringify(dream11Matches));
+  } catch(e){}
+  render();
+  showNotif(reversedCount === 0 ? 'Kuch reverse karne ko nahi mila.' : `✅ ${reversedCount} prize(s) reversed (Rs ${reversedAmount}) — Mini Mega Contest pool reset.`);
+}
+// Custom contests are already individual documents (one per contest, cc.id)
+// so these operate on a single cc.id rather than looping every custom
+// contest on the match like finalizeD11CustomContests does.
+async function d11PayoutOneCustom(ccId) {
+  const cc = d11CustomContests[ccId];
+  if (!cc) return;
+  const matchId = cc.matchId;
+  const d11m = dream11Matches[matchId];
+  if (!d11m?.scored) return showNotif('⚠️ Pehle match ki scoring finalize/fix karo, phir payout chalao', 'error');
+  if (cc.status === 'completed') return showNotif('Ye contest already paid out hai — pehle "Undo" karo agar dobara chalana hai.', 'error');
+  if (!confirm(`"${cc.name||cc.code||'Custom Contest'}" ka payout chalao?\n\nSirf ye contest pay hoga — baaki contests ko ye nahi chherta.`)) return;
+  showNotif('⏳ Payout ho raha hai...', 'info');
+
+  const ranked = (cc.participants||[])
+    .map(email => {
+      const team = d11GetTeamForContest(matchId, email, cc.participantTeams);
+      return { email, points: team?.totalPoints || 0 };
+    })
+    .sort((a,b) => b.points - a.points);
+
+  if (ranked.length <= 1) {
+    cc.prizes = {};
+    cc.status = 'completed';
+    cc.cancelled = ranked.length === 1;
+    d11CustomContests[cc.id] = cc;
+    await _saveD11CustomContestToFirestore(cc.id, cc);
+    if (ranked.length === 1) {
+      await _adminWalletRefund(ranked[0].email, cc.entryFee, matchId, 'Custom Dream11 Contest cancelled — only 1 joiner, full refund', 'd11_custom_refund');
+    }
+  } else {
+    const distributable = Math.round(cc.pool * (1 - D11_CUSTOM_CONTEST_COMPANY_SHARE));
+    const winnerCount = getD11HalfSplitWinnerCount(ranked.length);
+    const weightTable = buildD11HalfSplitWeights(winnerCount);
+    const weightSum = weightTable.reduce((a,b) => a+b, 0);
+    const prizes = {};
+    let i = 0;
+    while (i < ranked.length && i < weightTable.length) {
+      let j = i;
+      while (j + 1 < ranked.length && ranked[j+1].points === ranked[i].points) j++;
+      const tieGroup = ranked.slice(i, j+1);
+      const tieEndIdx = Math.min(j, weightTable.length - 1);
+      const combinedWeight = weightTable.slice(i, tieEndIdx + 1).reduce((a,b) => a + b, 0);
+      const combinedPrize = Math.round(distributable * (combinedWeight / weightSum));
+      const share = Math.round(combinedPrize / tieGroup.length);
+      tieGroup.forEach(p => { if (share > 0) prizes[p.email] = share; });
+      i = j + 1;
+    }
+    cc.prizes = prizes;
+    cc.status = 'completed';
+    d11CustomContests[cc.id] = cc;
+    await _saveD11CustomContestToFirestore(cc.id, cc);
+    for (const [email, share] of Object.entries(prizes)) {
+      await _adminWalletPrize(email, share, 'd11_custom_prize', matchId, cc.code);
+    }
+  }
+  try {
+    localStorage.setItem('pp_dream11_custom_contests_cache', JSON.stringify(d11CustomContests));
+    localStorage.setItem('pp_users_cache', JSON.stringify(users));
+  } catch(e){}
+  render();
+  showNotif('✅ Payout complete 💰');
+}
+async function d11UndoOneCustomPayout(ccId) {
+  const cc = d11CustomContests[ccId];
+  if (!cc) return;
+  if (cc.status !== 'completed' || cc.cancelled) return showNotif('Ye contest paid nahi hai reverse karne ko.', 'error');
+  if (!confirm(`"${cc.name||cc.code||'Custom Contest'}" ka payout undo karo?\n\nSirf ye contest reverse hoga — baaki contests ko ye nahi chherta.`)) return;
+  showNotif('⏳ Payout reverse ho raha hai...', 'info');
+  let reversedCount = 0, reversedAmount = 0;
+  for (const [email, amount] of Object.entries(cc.prizes || {})) {
+    if (amount <= 0) continue;
+    await _adminWalletDeduct(email, amount, cc.matchId, `Custom Contest (${cc.code||cc.id}) prize reversed — result was corrected`, 'd11_custom_reversal');
+    reversedCount++; reversedAmount += amount;
+  }
+  cc.prizes = {};
+  cc.status = 'open';
+  cc.updatedAt = Date.now();
+  d11CustomContests[cc.id] = cc;
+  await _saveD11CustomContestToFirestore(cc.id, cc);
+  try {
+    localStorage.setItem('pp_dream11_custom_contests_cache', JSON.stringify(d11CustomContests));
+    localStorage.setItem('pp_users_cache', JSON.stringify(users));
+  } catch(e){}
+  render();
+  showNotif(reversedCount === 0 ? 'Kuch reverse karne ko nahi mila.' : `✅ ${reversedCount} prize(s) reversed (Rs ${reversedAmount}).`);
+}
+
 // ─── Dream11 Mini Mega Contest: same rules as Mega, cheaper Rs 10 entry ───
 async function joinD11MiniMegaContest(matchId, teamId) {
   const d11m = dream11Matches[matchId];
@@ -29887,6 +30050,10 @@ function renderAdminD11ParticipantsPanel(matchId) {
         </div>
         <div style="color:var(--dim)">Total: <b style="color:var(--text)">Rs ${pool}</b> &nbsp;·&nbsp; Distribute (${Math.round((1-D11_MEGA_COMPANY_SHARE)*100)}%): <b style="color:#4ade80">Rs ${dist}</b> &nbsp;·&nbsp; Company (${Math.round(D11_MEGA_COMPANY_SHARE*100)}%): <b style="color:#f87171">Rs ${pool-dist}</b></div>
         ${prizeRows.length>0?`<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px">${prizeRows.map(p=>`<span style="font-size:10.5px;background:rgba(251,191,36,0.12);color:#fbbf24;padding:3px 8px;border-radius:12px">Rank ${p.rank}: Rs ${p.prize}</span>`).join('')}</div>`:''}
+        ${megaList.length>0?`<div style="display:flex;gap:6px;margin-top:8px">
+          ${!d11m.megaDistributed?`<button style="flex:1;padding:6px 10px;font-size:10.5px;border:none;border-radius:8px;background:rgba(34,197,94,0.15);color:#4ade80;font-weight:700;cursor:pointer" onclick="d11PayoutOneMega('${matchId}')">💰 Payout Mega</button>`:''}
+          ${d11m.megaDistributed&&!d11m.megaCancelled?`<button style="flex:1;padding:6px 10px;font-size:10.5px;border:none;border-radius:8px;background:rgba(251,146,60,0.15);color:#fb923c;font-weight:700;cursor:pointer" onclick="d11UndoOneMegaPayout('${matchId}')">↩️ Undo Payout</button>`:''}
+        </div>`:''}
       </div>
       ${megaList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Kisi ne join nahi kiya</div>`:megaList.map((e,i)=>userRow(e,i,'251,191,36',true,'megaPrizes','mega',d11m.megaParticipantsTeams)).join('')}
     `:tab==='minimega'?`
@@ -29897,6 +30064,10 @@ function renderAdminD11ParticipantsPanel(matchId) {
         </div>
         <div style="color:var(--dim)">Total: <b style="color:var(--text)">Rs ${miniMegaPool}</b> &nbsp;·&nbsp; Distribute (${Math.round((1-D11_MINI_MEGA_COMPANY_SHARE)*100)}%): <b style="color:#4ade80">Rs ${miniMegaDist}</b> &nbsp;·&nbsp; Company (${Math.round(D11_MINI_MEGA_COMPANY_SHARE*100)}%): <b style="color:#f87171">Rs ${miniMegaPool-miniMegaDist}</b></div>
         ${miniMegaPrizeRows.length>0?`<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px">${miniMegaPrizeRows.map(p=>`<span style="font-size:10.5px;background:rgba(96,165,250,0.12);color:#60a5fa;padding:3px 8px;border-radius:12px">Rank ${p.rank}: Rs ${p.prize}</span>`).join('')}</div>`:''}
+        ${miniMegaList.length>0?`<div style="display:flex;gap:6px;margin-top:8px">
+          ${!d11m.miniMegaDistributed?`<button style="flex:1;padding:6px 10px;font-size:10.5px;border:none;border-radius:8px;background:rgba(34,197,94,0.15);color:#4ade80;font-weight:700;cursor:pointer" onclick="d11PayoutOneMiniMega('${matchId}')">💰 Payout Mini Mega</button>`:''}
+          ${d11m.miniMegaDistributed&&!d11m.miniMegaCancelled?`<button style="flex:1;padding:6px 10px;font-size:10.5px;border:none;border-radius:8px;background:rgba(251,146,60,0.15);color:#fb923c;font-weight:700;cursor:pointer" onclick="d11UndoOneMiniMegaPayout('${matchId}')">↩️ Undo Payout</button>`:''}
+        </div>`:''}
       </div>
       ${miniMegaList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Kisi ne join nahi kiya</div>`:miniMegaList.map((e,i)=>userRow(e,i,'96,165,250',true,'miniMegaPrizes','minimega',d11m.miniMegaParticipantsTeams)).join('')}
     `:tab==='free'?`
@@ -29933,6 +30104,8 @@ function renderAdminD11ParticipantsPanel(matchId) {
             <div style="font-size:11px;color:#a78bfa;font-weight:700">${c.name||'Contest #'+(i+1)} · Rs ${c.entryFee||0} entry · Pool Rs ${c.pool||0} · ${(c.status||'open').toUpperCase()}</div>
             <button style="flex-shrink:0;width:auto;padding:4px 9px;font-size:10px;border:none;border-radius:7px;background:linear-gradient(135deg,#25D366,#1ea952);color:#fff;font-weight:700;cursor:pointer" onclick="d11ShareContestResult('${matchId}','custom','${c.id}',event)">📤 Image</button>
           </div>
+          ${c.status!=='completed'?`<button style="width:auto;padding:4px 9px;font-size:10px;border:none;border-radius:7px;background:rgba(34,197,94,0.12);color:#4ade80;font-weight:700;cursor:pointer;margin-top:6px" onclick="d11PayoutOneCustom('${c.id}')">💰 Payout</button>`:''}
+          ${c.status==='completed'&&!c.cancelled?`<button style="width:auto;padding:4px 9px;font-size:10px;border:none;border-radius:7px;background:rgba(251,146,60,0.12);color:#fb923c;font-weight:700;cursor:pointer;margin-top:6px" onclick="d11UndoOneCustomPayout('${c.id}')">↩️ Undo Payout</button>`:''}
           ${ranked.map((p,ri) => {
             const prize = c.prizes?.[p.email];
             return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0">
