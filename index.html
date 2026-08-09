@@ -23681,6 +23681,94 @@ async function d11UndoOneCustomPayout(ccId) {
   showNotif(reversedCount === 0 ? 'Kuch reverse karne ko nahi mila.' : `✅ ${reversedCount} prize(s) reversed (Rs ${reversedAmount}).`);
 }
 
+// ── Admin: refund a SINGLE contest type on a single match, instead of
+// "Refund All" which empties every paid contest (Mega, Mini Mega, Custom,
+// H2H) on the match at once. Mirrors the refundList() logic inside
+// d11RunAllRefunds but scoped to one contest, so admin can void just the
+// contest that needs it without touching entries in the others.
+async function _d11RefundEmailList(emails, feeAmount, label, matchId) {
+  let count = 0;
+  for (const email of emails) {
+    const u = users[email];
+    if (!u) continue;
+    u.balance = (u.balance || 0) + feeAmount;
+    u.transactions = u.transactions || [];
+    u.transactions.unshift({
+      id: uid(), type: 'admin_refund', amount: feeAmount,
+      matchId, note: `${label} cancelled/refunded by admin`, date: getDateTime(), status: 'confirmed'
+    });
+    await _saveUserToFirestore(email, u);
+    if (currentUser.email === email) { currentUser.balance = u.balance; currentUser.transactions = u.transactions; }
+    count++;
+  }
+  return count;
+}
+async function d11RefundOneMega(matchId) {
+  const d11m = dream11Matches[matchId];
+  const m = matches[matchId];
+  if (!d11m) return;
+  const parts = d11m.megaParticipants || [];
+  if (!parts.length) return showNotif('Mega Contest mein koi participant nahi hai refund karne ko.', 'error');
+  if (!confirm(`Mega Contest refund karo "${m?.teamA||'Team A'} vs ${m?.teamB||'Team B'}" ke liye?\n\nHar participant ki entry fee wallet mein wapis mil jayegi aur Mega Contest khaali ho jayega — baaki contests ko ye nahi chherta.`)) return;
+  showNotif('⏳ Mega Contest refund ho raha hai...', 'info');
+  const count = await _d11RefundEmailList(parts, D11_MEGA_ENTRY_FEE, 'Mega Contest', matchId);
+  d11m.megaParticipants = [];
+  d11m.megaPool = 0;
+  d11m.megaPrizes = {};
+  d11m.megaDistributed = false;
+  d11m.megaCancelled = true;
+  await _saveDream11MatchToFirestore(matchId, d11m);
+  try {
+    localStorage.setItem('pp_users_cache', JSON.stringify(users));
+    localStorage.setItem('pp_dream11_matches_cache', JSON.stringify(dream11Matches));
+  } catch(e){}
+  render();
+  showNotif(`✅ Mega Contest refund complete — ${count} entries refunded 💰`);
+}
+async function d11RefundOneMiniMega(matchId) {
+  const d11m = dream11Matches[matchId];
+  const m = matches[matchId];
+  if (!d11m) return;
+  const parts = d11m.miniMegaParticipants || [];
+  if (!parts.length) return showNotif('Mini Mega Contest mein koi participant nahi hai refund karne ko.', 'error');
+  if (!confirm(`Mini Mega Contest refund karo "${m?.teamA||'Team A'} vs ${m?.teamB||'Team B'}" ke liye?\n\nHar participant ki entry fee wallet mein wapis mil jayegi aur Mini Mega Contest khaali ho jayega — baaki contests ko ye nahi chherta.`)) return;
+  showNotif('⏳ Mini Mega Contest refund ho raha hai...', 'info');
+  const count = await _d11RefundEmailList(parts, D11_MINI_MEGA_ENTRY_FEE, 'Mini Mega Contest', matchId);
+  d11m.miniMegaParticipants = [];
+  d11m.miniMegaPool = 0;
+  d11m.miniMegaPrizes = {};
+  d11m.miniMegaDistributed = false;
+  d11m.miniMegaCancelled = true;
+  await _saveDream11MatchToFirestore(matchId, d11m);
+  try {
+    localStorage.setItem('pp_users_cache', JSON.stringify(users));
+    localStorage.setItem('pp_dream11_matches_cache', JSON.stringify(dream11Matches));
+  } catch(e){}
+  render();
+  showNotif(`✅ Mini Mega Contest refund complete — ${count} entries refunded 💰`);
+}
+async function d11RefundOneCustom(ccId) {
+  const cc = d11CustomContests[ccId];
+  if (!cc) return;
+  if (!(cc.participants||[]).length) return showNotif('Is contest mein koi participant nahi hai refund karne ko.', 'error');
+  if (!confirm(`"${cc.name||cc.code||'Custom Contest'}" refund karo?\n\nHar participant ki entry fee wallet mein wapis mil jayegi aur ye contest khaali ho jayega — baaki contests ko ye nahi chherta.`)) return;
+  showNotif('⏳ Refund ho raha hai...', 'info');
+  const count = cc.entryFee > 0 ? await _d11RefundEmailList(cc.participants, cc.entryFee, `Custom Contest (${cc.code||cc.id})`, cc.matchId) : 0;
+  cc.participants = [];
+  cc.pool = 0;
+  cc.prizes = {};
+  cc.status = 'cancelled';
+  cc.updatedAt = Date.now();
+  d11CustomContests[cc.id] = cc;
+  await _saveD11CustomContestToFirestore(cc.id, cc);
+  try {
+    localStorage.setItem('pp_dream11_custom_contests_cache', JSON.stringify(d11CustomContests));
+    localStorage.setItem('pp_users_cache', JSON.stringify(users));
+  } catch(e){}
+  render();
+  showNotif(`✅ Refund complete — ${count} entries refunded 💰`);
+}
+
 // ─── Dream11 Mini Mega Contest: same rules as Mega, cheaper Rs 10 entry ───
 async function joinD11MiniMegaContest(matchId, teamId) {
   const d11m = dream11Matches[matchId];
@@ -30053,6 +30141,7 @@ function renderAdminD11ParticipantsPanel(matchId) {
         ${megaList.length>0?`<div style="display:flex;gap:6px;margin-top:8px">
           ${!d11m.megaDistributed?`<button style="flex:1;padding:6px 10px;font-size:10.5px;border:none;border-radius:8px;background:rgba(34,197,94,0.15);color:#4ade80;font-weight:700;cursor:pointer" onclick="d11PayoutOneMega('${matchId}')">💰 Payout Mega</button>`:''}
           ${d11m.megaDistributed&&!d11m.megaCancelled?`<button style="flex:1;padding:6px 10px;font-size:10.5px;border:none;border-radius:8px;background:rgba(251,146,60,0.15);color:#fb923c;font-weight:700;cursor:pointer" onclick="d11UndoOneMegaPayout('${matchId}')">↩️ Undo Payout</button>`:''}
+          <button style="flex:1;padding:6px 10px;font-size:10.5px;border:none;border-radius:8px;background:rgba(220,38,38,0.15);color:#f87171;font-weight:700;cursor:pointer" onclick="d11RefundOneMega('${matchId}')">↩️ Refund Mega</button>
         </div>`:''}
       </div>
       ${megaList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Kisi ne join nahi kiya</div>`:megaList.map((e,i)=>userRow(e,i,'251,191,36',true,'megaPrizes','mega',d11m.megaParticipantsTeams)).join('')}
@@ -30067,6 +30156,7 @@ function renderAdminD11ParticipantsPanel(matchId) {
         ${miniMegaList.length>0?`<div style="display:flex;gap:6px;margin-top:8px">
           ${!d11m.miniMegaDistributed?`<button style="flex:1;padding:6px 10px;font-size:10.5px;border:none;border-radius:8px;background:rgba(34,197,94,0.15);color:#4ade80;font-weight:700;cursor:pointer" onclick="d11PayoutOneMiniMega('${matchId}')">💰 Payout Mini Mega</button>`:''}
           ${d11m.miniMegaDistributed&&!d11m.miniMegaCancelled?`<button style="flex:1;padding:6px 10px;font-size:10.5px;border:none;border-radius:8px;background:rgba(251,146,60,0.15);color:#fb923c;font-weight:700;cursor:pointer" onclick="d11UndoOneMiniMegaPayout('${matchId}')">↩️ Undo Payout</button>`:''}
+          <button style="flex:1;padding:6px 10px;font-size:10.5px;border:none;border-radius:8px;background:rgba(220,38,38,0.15);color:#f87171;font-weight:700;cursor:pointer" onclick="d11RefundOneMiniMega('${matchId}')">↩️ Refund Mini Mega</button>
         </div>`:''}
       </div>
       ${miniMegaList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Kisi ne join nahi kiya</div>`:miniMegaList.map((e,i)=>userRow(e,i,'96,165,250',true,'miniMegaPrizes','minimega',d11m.miniMegaParticipantsTeams)).join('')}
@@ -30106,6 +30196,7 @@ function renderAdminD11ParticipantsPanel(matchId) {
           </div>
           ${c.status!=='completed'?`<button style="width:auto;padding:4px 9px;font-size:10px;border:none;border-radius:7px;background:rgba(34,197,94,0.12);color:#4ade80;font-weight:700;cursor:pointer;margin-top:6px" onclick="d11PayoutOneCustom('${c.id}')">💰 Payout</button>`:''}
           ${c.status==='completed'&&!c.cancelled?`<button style="width:auto;padding:4px 9px;font-size:10px;border:none;border-radius:7px;background:rgba(251,146,60,0.12);color:#fb923c;font-weight:700;cursor:pointer;margin-top:6px" onclick="d11UndoOneCustomPayout('${c.id}')">↩️ Undo Payout</button>`:''}
+          ${c.status!=='cancelled'&&(c.participants||[]).length?`<button style="width:auto;padding:4px 9px;font-size:10px;border:none;border-radius:7px;background:rgba(220,38,38,0.12);color:#f87171;font-weight:700;cursor:pointer;margin-top:6px" onclick="d11RefundOneCustom('${c.id}')">↩️ Refund</button>`:''}
           ${ranked.map((p,ri) => {
             const prize = c.prizes?.[p.email];
             return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0">
