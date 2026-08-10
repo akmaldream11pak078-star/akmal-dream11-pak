@@ -29572,12 +29572,12 @@ function renderDream11ViewTeam() {
   </div>` : '';
 
   return `
-  <div style="display:flex;gap:8px;margin-bottom:14px">
-    <button class="btn-secondary" style="font-size:12px;padding:8px 14px;flex:1" onclick="goDream11Hub()">← Back to Dream11</button>
-    ${isOwnTeam && !isD11Locked(t.matchId) ? `<button class="btn-primary" style="font-size:12px;padding:8px 14px;background:linear-gradient(135deg,#f97316,#ea580c)" onclick="openDream11Match('${t.matchId}')">✏️ Edit Team</button>` : ''}
+  <div style="display:flex;gap:6px;margin-bottom:10px">
+    <button class="btn-secondary" style="font-size:10.5px;padding:7px 10px;flex:1" onclick="goDream11Hub()">← Back to Dream11</button>
+    ${isOwnTeam && !isD11Locked(t.matchId) ? `<button class="btn-primary" style="font-size:10.5px;padding:7px 10px;background:linear-gradient(135deg,#f97316,#ea580c)" onclick="openDream11Match('${t.matchId}')">✏️ Edit Team</button>` : ''}
   </div>
 
-  <div class="card mb14">
+  <div class="card mb10">
     <div style="display:flex;align-items:center;justify-content:center;gap:14px;margin:0 0 4px">
       <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
         ${flagA ? `<img src="${flagA}" style="width:30px;height:30px;border-radius:8px;object-fit:cover;border:1px solid var(--border)" />` : ''}
