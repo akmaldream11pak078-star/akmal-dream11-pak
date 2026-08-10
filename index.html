@@ -259,9 +259,9 @@
 
   /* ── Stat boxes ── */
   .stat-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-  .stat-box { background:var(--card); border:1px solid var(--card-b); border-radius:13px; padding:12px; text-align:center; }
-  .stat-val { font-family:Rajdhani,sans-serif; font-weight:700; font-size:19px; }
-  .stat-lbl { font-size:10px; color:var(--dim); margin-top:2px; font-weight:600; }
+  .stat-box { background:var(--card); border:1px solid var(--card-b); border-radius:11px; padding:9px; text-align:center; }
+  .stat-val { font-family:Rajdhani,sans-serif; font-weight:700; font-size:16px; }
+  .stat-lbl { font-size:9px; color:var(--dim); margin-top:1px; font-weight:600; }
 
   /* ── Match card (signature element: prediction slip) ── */
   .match-slip {
@@ -566,21 +566,21 @@
    ══════════════════════════════════════════════════════════════ */
 .i11-section{margin-bottom:18px;}
 .i11-section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
-.i11-section-title{font-size:15px;font-weight:800;color:var(--text);}
+.i11-section-title{font-size:13px;font-weight:800;color:var(--text);}
 .i11-section-link{font-size:12px;font-weight:700;color:#dc2626;}
-.i11-match-banner{border-radius:12px;overflow:hidden;background:#161b2e;border:1px solid rgba(255,255,255,0.08);box-shadow:0 2px 10px rgba(0,0,0,0.25);margin-bottom:10px;}
+.i11-match-banner{border-radius:11px;overflow:hidden;background:#161b2e;border:1px solid rgba(255,255,255,0.08);box-shadow:0 2px 10px rgba(0,0,0,0.25);margin-bottom:8px;}
 html[data-theme="light"] .i11-match-banner{background:#fff;border-color:rgba(15,23,42,0.08);box-shadow:0 2px 10px rgba(0,0,0,0.06);}
-.i11-match-banner-head{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;background:linear-gradient(115deg,#dc2626 46%,#111827 46%);}
-.i11-match-banner-title{display:flex;align-items:center;gap:8px;color:#fff;font-weight:800;font-size:12.5px;}
-.i11-match-banner-body{padding:10px 12px;}
-.i11-team-row{display:flex;align-items:center;gap:10px;background:rgba(220,38,38,0.12);border-radius:9px;padding:7px 10px;margin-bottom:6px;}
+.i11-match-banner-head{display:flex;align-items:center;justify-content:space-between;padding:7px 10px;background:linear-gradient(115deg,#dc2626 46%,#111827 46%);}
+.i11-match-banner-title{display:flex;align-items:center;gap:6px;color:#fff;font-weight:800;font-size:11px;}
+.i11-match-banner-body{padding:8px 10px;}
+.i11-team-row{display:flex;align-items:center;gap:8px;background:rgba(220,38,38,0.12);border-radius:8px;padding:5px 8px;margin-bottom:5px;}
 html[data-theme="light"] .i11-team-row{background:rgba(220,38,38,0.06);}
 .i11-team-row:last-child{margin-bottom:0;}
-.i11-team-flag{font-size:19px;line-height:1;width:24px;text-align:center;}
-.i11-team-name{font-weight:800;font-size:12.5px;color:var(--text);flex:1;}
-.i11-team-code{font-weight:800;font-size:11px;color:var(--text);width:28px;}
-.i11-countdown-badge{font-size:10px;font-weight:700;color:#dc2626;}
-.i11-status-pill{font-size:9.5px;font-weight:800;padding:3px 8px;border-radius:7px;background:#dc2626;color:#fff;}
+.i11-team-flag{font-size:16px;line-height:1;width:20px;text-align:center;}
+.i11-team-name{font-weight:800;font-size:11px;color:var(--text);flex:1;}
+.i11-team-code{font-weight:800;font-size:9.5px;color:var(--text);width:24px;}
+.i11-countdown-badge{font-size:9px;font-weight:700;color:#dc2626;}
+.i11-status-pill{font-size:8.5px;font-weight:800;padding:2px 7px;border-radius:6px;background:#dc2626;color:#fff;}
 .i11-status-pill.live{background:#16a34a;}
 .i11-status-pill.finished{background:#64748b;}
 .i11-fair-play{display:flex;align-items:center;gap:6px;font-size:11px;color:#16a34a;font-weight:700;padding:10px 14px;border-top:1px solid rgba(255,255,255,0.06);}
@@ -6361,20 +6361,20 @@ function renderHome() {
     </div>
   </div>
 
-  <div class="card mb18" style="background:linear-gradient(135deg,rgba(37,99,235,0.13),rgba(249,115,22,0.08));border-color:rgba(37,99,235,0.3)">
+  <div class="card mb14" style="background:linear-gradient(135deg,rgba(37,99,235,0.13),rgba(249,115,22,0.08));border-color:rgba(37,99,235,0.3)">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <div>
-        <div style="font-size:11px;color:var(--dim);font-weight:600">Wallet Balance</div>
-        <div class="display" style="font-size:20px;color:var(--text);margin-top:2px">Rs ${(u.balance||0).toFixed(2)}</div>
+        <div style="font-size:10px;color:var(--dim);font-weight:600">Wallet Balance</div>
+        <div class="display" style="font-size:17px;color:var(--text);margin-top:1px">Rs ${(u.balance||0).toFixed(2)}</div>
       </div>
-      <div style="display:flex;gap:6px">
-        <button onclick="goTab('deposit')" style="background:rgba(22,163,74,0.15);border:1px solid rgba(22,163,74,0.35);color:#4ade80;padding:7px 11px;border-radius:9px;font-size:11px;font-weight:700">⬇ Deposit</button>
-        <button onclick="goTab('withdraw')" style="background:rgba(220,38,38,0.12);border:1px solid rgba(220,38,38,0.3);color:#f87171;padding:7px 11px;border-radius:9px;font-size:11px;font-weight:700">⬆ Withdraw</button>
+      <div style="display:flex;gap:5px">
+        <button onclick="goTab('deposit')" style="background:rgba(22,163,74,0.15);border:1px solid rgba(22,163,74,0.35);color:#4ade80;padding:6px 9px;border-radius:8px;font-size:10px;font-weight:700">⬇ Deposit</button>
+        <button onclick="goTab('withdraw')" style="background:rgba(220,38,38,0.12);border:1px solid rgba(220,38,38,0.3);color:#f87171;padding:6px 9px;border-radius:8px;font-size:10px;font-weight:700">⬆ Withdraw</button>
       </div>
     </div>
-    <div style="display:flex;gap:8px;margin-top:10px">
-      <button onclick="goNewsTab()" style="flex:1;background:rgba(234,179,8,0.12);border:1px solid rgba(234,179,8,0.3);color:#facc15;padding:8px 12px;border-radius:9px;font-size:11.5px;font-weight:700">📰 News</button>
-      <button onclick="goPlayerRankingTab()" style="flex:1;background:rgba(168,85,247,0.12);border:1px solid rgba(168,85,247,0.3);color:#c084fc;padding:8px 12px;border-radius:9px;font-size:11.5px;font-weight:700">🏆 Player Rankings</button>
+    <div style="display:flex;gap:6px;margin-top:8px">
+      <button onclick="goNewsTab()" style="flex:1;background:rgba(234,179,8,0.12);border:1px solid rgba(234,179,8,0.3);color:#facc15;padding:7px 10px;border-radius:8px;font-size:10.5px;font-weight:700">📰 News</button>
+      <button onclick="goPlayerRankingTab()" style="flex:1;background:rgba(168,85,247,0.12);border:1px solid rgba(168,85,247,0.3);color:#c084fc;padding:7px 10px;border-radius:8px;font-size:10.5px;font-weight:700">🏆 Player Rankings</button>
     </div>
   </div>
 
@@ -6443,31 +6443,31 @@ function renderHome() {
             <span class="i11-team-name">${m.teamB||'TBD'}</span>
             <span class="i11-team-code">${codeB}</span>
           </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
-            ${deadlineStr && !isCompletedCard ? `<span style="font-size:11px;color:var(--dim)">${deadlineStr}</span>` : `<span></span>`}
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+            ${deadlineStr && !isCompletedCard ? `<span style="font-size:9.5px;color:var(--dim)">${deadlineStr}</span>` : `<span></span>`}
             ${countdownHtml}
           </div>
-          <div style="font-size:11.5px;color:var(--dim);margin-top:10px">👥 ${d11m.players.length} players pool ready</div>
-          <div style="font-size:11.5px;color:#16a34a;margin-top:4px">🎯 ${megaJoinedCount} ${megaJoinedCount === 1 ? 'user' : 'users'} joined Mega Contest</div>
-          <div style="font-size:11.5px;color:#16a34a;margin-top:2px">🔸 ${(d11m.miniMegaParticipants||[]).length} ${(d11m.miniMegaParticipants||[]).length === 1 ? 'user' : 'users'} joined Mini Mega Contest</div>
-          <div style="font-size:11.5px;color:#16a34a;margin-top:2px;margin-bottom:10px">🎁 ${freeJoinedCount} ${freeJoinedCount === 1 ? 'user' : 'users'} joined Free Contest</div>
+          <div style="font-size:10px;color:var(--dim);margin-top:8px">👥 ${d11m.players.length} players pool ready</div>
+          <div style="font-size:10px;color:#16a34a;margin-top:3px">🎯 ${megaJoinedCount} ${megaJoinedCount === 1 ? 'user' : 'users'} joined Mega Contest</div>
+          <div style="font-size:10px;color:#16a34a;margin-top:2px">🔸 ${(d11m.miniMegaParticipants||[]).length} ${(d11m.miniMegaParticipants||[]).length === 1 ? 'user' : 'users'} joined Mini Mega Contest</div>
+          <div style="font-size:10px;color:#16a34a;margin-top:2px;margin-bottom:8px">🎁 ${freeJoinedCount} ${freeJoinedCount === 1 ? 'user' : 'users'} joined Free Contest</div>
 
           ${isCompletedCard
-            ? `<button class="btn-secondary btn-block mb10" style="font-size:12px;padding:9px" onclick="openCompletedMatchDetail('${m.id}','home')">🏅 View Live Leaderboard</button>
-               <button class="btn-block" style="font-size:12px;padding:9px;border:none;border-radius:10px;background:linear-gradient(135deg,#25D366,#1ea952);color:#fff;font-weight:700;cursor:pointer" onclick="d11ShareResultPdfWhatsApp('${m.id}', event)">📲 Share Result Image on WhatsApp</button>`
+            ? `<button class="btn-secondary btn-block mb10" style="font-size:10.5px;padding:7px" onclick="openCompletedMatchDetail('${m.id}','home')">🏅 View Live Leaderboard</button>
+               <button class="btn-block" style="font-size:10.5px;padding:7px;border:none;border-radius:9px;background:linear-gradient(135deg,#25D366,#1ea952);color:#fff;font-weight:700;cursor:pointer" onclick="d11ShareResultPdfWhatsApp('${m.id}', event)">📲 Share Result Image on WhatsApp</button>`
             : myTeam
-              ? `<div style="display:flex;gap:8px">
-                   <button class="btn-secondary" style="flex:1;font-size:12px;padding:9px" onclick="openDream11ViewTeam('${myTeam.id}')">👁 My Team ${myTeam.totalPoints?'· '+myTeam.totalPoints+' pts':''}</button>
-                   <button class="btn-secondary" style="flex:1;font-size:12px;padding:9px" onclick="openDream11Leaderboard('${m.id}')">🏅 Leaderboard</button>
+              ? `<div style="display:flex;gap:6px">
+                   <button class="btn-secondary" style="flex:1;font-size:10.5px;padding:7px" onclick="openDream11ViewTeam('${myTeam.id}')">👁 My Team ${myTeam.totalPoints?'· '+myTeam.totalPoints+' pts':''}</button>
+                   <button class="btn-secondary" style="flex:1;font-size:10.5px;padding:7px" onclick="openDream11Leaderboard('${m.id}')">🏅 Leaderboard</button>
                  </div>`
               : !dLocked
-                ? `<div style="display:flex;gap:8px">
-                     <button class="btn-primary" style="flex:1;font-size:12px;padding:9px;background:linear-gradient(135deg,#dc2626,#991b1b)" onclick="openDream11Match('${m.id}')">🎮 Build My Team</button>
-                     <button class="btn-secondary" style="flex:1;font-size:12px;padding:9px" onclick="openDream11Leaderboard('${m.id}')">🏅 Leaderboard</button>
+                ? `<div style="display:flex;gap:6px">
+                     <button class="btn-primary" style="flex:1;font-size:10.5px;padding:7px;background:linear-gradient(135deg,#dc2626,#991b1b)" onclick="openDream11Match('${m.id}')">🎮 Build My Team</button>
+                     <button class="btn-secondary" style="flex:1;font-size:10.5px;padding:7px" onclick="openDream11Leaderboard('${m.id}')">🏅 Leaderboard</button>
                    </div>`
-                : `<div style="text-align:center;font-size:12px;color:var(--dim);padding:8px">🔒 Contest locked — joining closed</div>`
+                : `<div style="text-align:center;font-size:10.5px;color:var(--dim);padding:6px">🔒 Contest locked — joining closed</div>`
           }
-          <button class="btn-block" style="font-size:12px;padding:9px;margin-top:8px;border:none;border-radius:10px;background:linear-gradient(135deg,#f97316,#dc2626);color:#fff;font-weight:700;cursor:pointer" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore(true).then(()=>render()).catch(()=>{})">${!isCompletedCard && !dLocked ? '🎪 Join Mega / H2H / Custom Contest' : '🎪 View Contests'}</button>
+          <button class="btn-block" style="font-size:10.5px;padding:7px;margin-top:6px;border:none;border-radius:9px;background:linear-gradient(135deg,#f97316,#dc2626);color:#fff;font-weight:700;cursor:pointer" onclick="d11ContestMatchId='${m.id}';tab='dream11JoinContest';render();window.scrollTo(0,0);_loadAllDream11MatchesFromFirestore(true).then(()=>render()).catch(()=>{})">${!isCompletedCard && !dLocked ? '🎪 Join Mega / H2H / Custom Contest' : '🎪 View Contests'}</button>
           ${(() => {
             const badges = [];
             if ((d11m.freeParticipants||[]).includes(currentUser.email)) {
