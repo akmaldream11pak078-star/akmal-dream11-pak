@@ -16112,7 +16112,20 @@ async function d11SyncLiveMatchCb2(matchId, showToast) {
     // derive ourselves), falling back to our own calculation only if
     // status is genuinely blank/absent.
     const providerStatusText = (raw.status || '').trim();
-    if (resultText) {
+    // FIX (see debug JSON with is_hundred/The Hundred matches): this
+    // provider's completed-match response can have raw.result EMPTY while
+    // the actual final result text ("Afghanistan won by 3 wkts") only
+    // appears in raw.status, alongside raw.ismatchcomplete === true. The
+    // code below used to treat any non-empty raw.status as a live
+    // in-progress trail/lead summary — which meant a genuinely finished
+    // match's real result never reached m.resultText, and the UI fell back
+    // to guessing the winner from scoreA/scoreB ("won by 1 run (approx.)"),
+    // which is wrong whenever the margin isn't literally runs (e.g. a
+    // wickets-margin win, or Duckworth-Lewis-affected results). Treat
+    // raw.status as the actual final result whenever the provider itself
+    // says the match is complete.
+    const effectiveResultText = resultText || (raw.ismatchcomplete === true ? providerStatusText : '');
+    if (effectiveResultText) {
       delete m.liveStatusText;
     } else if (providerStatusText) {
       m.liveStatusText = providerStatusText;
@@ -16129,9 +16142,9 @@ async function d11SyncLiveMatchCb2(matchId, showToast) {
     } else {
       delete m.liveStatusText;
     }
-    if (innings.length >= 2 && resultText) {
+    if (innings.length >= 2 && effectiveResultText) {
       const pendingKey = matchId + '_cb2';
-      if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = resultText; delete m.liveStatusText; }
+      if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = effectiveResultText; delete m.liveStatusText; }
       else { _d11PendingFinish[pendingKey] = true; }
     } else {
       delete _d11PendingFinish[matchId + '_cb2'];
@@ -18215,17 +18228,42 @@ async function d11LinkLl4Match(matchId, ll4MatchId) {
 async function d11UnlinkLl4Match(matchId) {
   const m = matches[matchId];
   if (!m) return;
-  const prevLl4MatchId = m.ll4MatchId;
+  const prevSnapshot = { ll4MatchId: m.ll4MatchId, ll4AutoSync: m.ll4AutoSync };
   delete m.ll4MatchId;
+  delete m.ll4AutoSync;
   render();
   try {
     await _saveMatchToFirestore(matchId, m);
     showNotif('Unlinked from Cricket Live Line 4 — switched back to manual paste');
     render();
   } catch(e) {
-    m.ll4MatchId = prevLl4MatchId;
+    m.ll4MatchId = prevSnapshot.ll4MatchId;
+    m.ll4AutoSync = prevSnapshot.ll4AutoSync;
     console.error('Cricket Live Line 4 unlink save failed:', e);
     showNotif('❌ Unlink did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
+}
+
+// Same mechanism as d11ToggleLl3AutoSync / d11ToggleLl5AutoSync — one
+// switch arms both the pre-deadline Playing XI catch-up and the
+// post-deadline Sync Now catch-up for Cricket Live Line 4.
+async function d11ToggleLl4AutoSync(matchId) {
+  const m = matches[matchId];
+  if (!m) return;
+  const prevAutoSync = m.ll4AutoSync;
+  m.ll4AutoSync = !m.ll4AutoSync;
+  render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif(m.ll4AutoSync
+      ? '🤖 Automatic armed — deadline se pehle 25/22/18/15/11/7min pe Playing XI, deadline ke baad 20/40/80/130/180/250/320min pe Sync Now, sab khud-b-khud chalega'
+      : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
+    render();
+  } catch(e) {
+    m.ll4AutoSync = prevAutoSync;
+    console.error('Cricket Live Line 4 auto-sync toggle save failed:', e);
+    showNotif('❌ Toggle did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
     render();
   }
 }
@@ -18581,6 +18619,99 @@ async function d11SyncLiveMatchLl4(matchId, showToast) {
   }
 }
 
+// ── Cricket Live Line 4 — Automatic PRE-deadline Playing XI (catch-up) ───
+// Same mechanism as d11AutoCheckLl3PlayingXI / d11AutoCheckLl5PlayingXI.
+// Only runs for matches where admin has the per-match "🤖 Automatic" toggle
+// on (m.ll4AutoSync). Tracked in d11m.autoLl4PreDeadlineXI = { w25, w22, w18, w15, w11, w7 }.
+const LL4_PRE_DEADLINE_XI_WINDOWS_MIN = [
+  { key: 'w25', mins: 25 },
+  { key: 'w22', mins: 22 },
+  { key: 'w18', mins: 18 },
+  { key: 'w15', mins: 15 },
+  { key: 'w11', mins: 11 },
+  { key: 'w7', mins: 7 },
+];
+
+async function d11AutoCheckLl4PlayingXI() {
+  const now = Date.now();
+  for (const m of Object.values(matches)) {
+    if (!m.ll4MatchId || !m.ll4AutoSync) continue; // not linked to Cricket Live Line 4, or admin hasn't armed it
+    const d11m = dream11Matches[m.id];
+    if (!d11m) continue;
+    if (d11m.scored || d11m.locked) continue;
+    if ((d11m.players || []).some(p => p.isPlayingXI)) continue; // already confirmed — stop calling
+    if (!m.deadline) continue;
+    const deadlineMs = new Date(m.deadline).getTime();
+    if (isNaN(deadlineMs)) continue;
+    const minsToDeadline = (deadlineMs - now) / 60000;
+    if (minsToDeadline <= 0 || minsToDeadline > 25) continue;
+
+    const done = d11m.autoLl4PreDeadlineXI || {};
+    let windowHit = null;
+    for (const w of LL4_PRE_DEADLINE_XI_WINDOWS_MIN) {
+      if (!done[w.key] && minsToDeadline <= w.mins) windowHit = w.key;
+    }
+    if (!windowHit) continue;
+
+    const newDoneLl4Xi = { ...done };
+    LL4_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDoneLl4Xi[w.key] && minsToDeadline <= w.mins) newDoneLl4Xi[w.key] = true; });
+    d11m.autoLl4PreDeadlineXI = newDoneLl4Xi;
+    await _updateDream11MatchScoringFields(m.id, { autoLl4PreDeadlineXI: newDoneLl4Xi });
+    try {
+      await d11CheckPlayingXIAnnouncedLl4(m.id, /*silent=*/true);
+    } catch (e) {
+      console.warn('Auto LL4 pre-deadline Playing XI check failed for', m.id, e.message);
+    }
+  }
+}
+
+// 20/40/80/130/180/250/320 minutes after the deadline, tracked in
+// d11m.autoLl4PostDeadline = { w20, w40, w80, w130, w180, w250, w320 }.
+const LL4_AUTO_SYNC_WINDOWS_MIN = [
+  { key: 'w20', mins: 20 },
+  { key: 'w40', mins: 40 },
+  { key: 'w80', mins: 80 },
+  { key: 'w130', mins: 130 },
+  { key: 'w180', mins: 180 },
+  { key: 'w250', mins: 250 },
+  { key: 'w320', mins: 320 },
+];
+
+async function d11AutoSyncLl4PostDeadline() {
+  const now = Date.now();
+  for (const m of Object.values(matches)) {
+    if (!m.ll4MatchId || !m.ll4AutoSync) continue; // not linked to Cricket Live Line 4, or admin hasn't armed it
+    const d11m = dream11Matches[m.id];
+    if (!d11m) continue;
+    if (d11m.scored) continue;
+    if (!m.deadline) continue;
+    const deadlineMs = new Date(m.deadline).getTime();
+    if (isNaN(deadlineMs)) continue;
+    const minsSinceDeadline = (now - deadlineMs) / 60000;
+    if (minsSinceDeadline <= 0) continue;
+
+    const done = d11m.autoLl4PostDeadline || {};
+    let windowHit = null;
+    for (const w of LL4_AUTO_SYNC_WINDOWS_MIN) {
+      if (!done[w.key] && minsSinceDeadline >= w.mins) windowHit = w.key;
+    }
+    if (!windowHit) continue;
+
+    const newDone = { ...done };
+    LL4_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDone[w.key] && minsSinceDeadline >= w.mins) newDone[w.key] = true; });
+    d11m.autoLl4PostDeadline = newDone;
+    await _updateDream11MatchScoringFields(m.id, { autoLl4PostDeadline: newDone });
+    try {
+      // Sync Now only — NOT Playing XI. Post-deadline the XI is already
+      // locked in from the pre-deadline checks; all that's needed now is
+      // fresh scorecard/points data.
+      await d11SyncLiveMatchLl4(m.id, /*showToast=*/false);
+    } catch (e) {
+      console.warn('Auto LL4 post-deadline sync failed for', m.id, e.message);
+    }
+  }
+}
+
 function _d11RenderLl4SyncRow(m) {
   if (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll3MatchId || m.sbxMatchId) return ''; // already on another provider
   if (!m.ll4MatchId) {
@@ -18591,8 +18722,10 @@ function _d11RenderLl4SyncRow(m) {
   }
   const lastSync = _d11Ll4LastSyncedAt[m.id];
   const lastSyncStr = lastSync ? new Date(lastSync).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : 'not yet';
+  const autoOn = !!m.ll4AutoSync;
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
     <span style="font-size:11px;color:#fbbf24;flex:1;min-width:140px">⚡ Linked to Cricket Live Line 4 · Last synced: ${lastSyncStr}</span>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleLl4AutoSync('${m.id}')" title="Deadline se pehle 25/22/18/15/11/7min pe Playing XI, aur deadline ke baad 20/40/80/130/180/250/320min pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchLl4('${m.id}', true)">🔄 Sync Now</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchLl4('${m.id}', true)">🏁 Fetch Final Result</button>
     <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromLl4('${m.id}')">📥 Fetch Squad</button>
@@ -35833,6 +35966,8 @@ async function initApp() {
     // right here on the very next app open (by ANY user or admin) to catch
     // up immediately instead of waiting up to 5 more minutes for the
     // background loop's own next tick.
+    if (typeof d11AutoCheckLl4PlayingXI === 'function') d11AutoCheckLl4PlayingXI().catch(function(){});
+    if (typeof d11AutoSyncLl4PostDeadline === 'function') d11AutoSyncLl4PostDeadline().catch(function(){});
     if (typeof d11AutoCheckLl5PlayingXI === 'function') d11AutoCheckLl5PlayingXI().catch(function(){});
     if (typeof d11AutoSyncLl5PostDeadline === 'function') d11AutoSyncLl5PostDeadline().catch(function(){});
     if (typeof d11AutoCheckAllPlayingXI === 'function') d11AutoCheckAllPlayingXI().catch(function(){});
@@ -35920,6 +36055,8 @@ if ('serviceWorker' in navigator) {
     // — the currentUser/auth gate below is kept ONLY for the parts that
     // are genuinely per-session (re-render, currentUser refresh).
     if(document.hidden)return;
+    if (typeof d11AutoCheckLl4PlayingXI === 'function') d11AutoCheckLl4PlayingXI().catch(function(){});
+    if (typeof d11AutoSyncLl4PostDeadline === 'function') d11AutoSyncLl4PostDeadline().catch(function(){});
     if (typeof d11AutoCheckLl5PlayingXI === 'function') d11AutoCheckLl5PlayingXI().catch(function(){});
     if (typeof d11AutoSyncLl5PostDeadline === 'function') d11AutoSyncLl5PostDeadline().catch(function(){});
     if (typeof d11AutoCheckAllPlayingXI === 'function') d11AutoCheckAllPlayingXI().catch(function(){});
