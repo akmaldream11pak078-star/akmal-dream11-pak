@@ -3327,32 +3327,23 @@ function switchAuthMode(mode) {
 }
 
 async function handleVerifyTpinReset() {
-  const name = (document.getElementById('a-forgot-name')?.value||'').trim();
   const email = (document.getElementById('a-forgot-email')?.value||'').toLowerCase().trim();
-  const tpin = (document.getElementById('a-forgot-tpin')?.value||'').trim();
-  if (!name) return setAuthError('Please enter your username');
   if (!email || !email.includes('@')) return setAuthError('Please enter a valid email');
-  if (!tpin || tpin.length !== 4) return setAuthError('Please enter your 4-digit T-Pin');
 
   let user = users[email];
   if (!user && window._firebaseReady) { await _loadOneUserFromFirestore(email); user = users[email]; }
   if (!user) return setAuthError('No account found with this email — check your email or register');
 
-  if ((user.name||'').trim().toLowerCase() !== name.toLowerCase()) {
-    return setAuthError('Username does not match this email');
-  }
-  if (!user.tpin) {
-    return setAuthError('This account has no T-Pin set, so it can\'t be reset this way — please contact admin for help.');
-  }
-  if (user.tpin !== tpin) {
-    return setAuthError('Incorrect T-Pin');
-  }
-
-  // Identity confirmed via name + email + T-Pin — proceed straight to setting a new password.
+  // FIX: was requiring username + T-Pin match here before proceeding to
+  // handleSendResetLink — per explicit request, identity is now confirmed
+  // by email ownership alone (which is exactly what Firebase's own
+  // reset-link flow verifies: only someone with access to that inbox can
+  // actually use the link). Removed the username/T-Pin fields and their
+  // checks entirely; this now goes straight to sending the reset email
+  // instead of an intermediate "verified, now set new password" step.
   forgotEmailPending = email;
-  forgotStep = 'newpass';
   authError = '';
-  render();
+  await handleSendResetLink();
 }
 
 async function handleSendResetLink() {
@@ -3366,15 +3357,16 @@ async function handleSendResetLink() {
   }
   if (!user) return setAuthError('No account found with this email — check your email or register');
 
-  // Identity was already confirmed by name + email + T-Pin in
-  // handleVerifyTpinReset. There's no server function anymore (GitHub Pages
-  // is static hosting), and Firebase Auth deliberately does not allow any
-  // client-side code to set another account's password directly — even one
-  // that has already verified identity another way — since that would let
-  // anyone who can read the client code hijack any account. The one
-  // client-safe way to finish a password reset is Firebase's own built-in
-  // reset-email flow: it sends a link only Firebase itself can generate and
-  // verify, and the user sets their new password on Firebase's own page.
+  // Identity is confirmed by email ownership — Firebase's own reset-email
+  // flow is exactly what verifies that (only someone with access to that
+  // inbox can use the link). There's no server function anymore (GitHub
+  // Pages is static hosting), and Firebase Auth deliberately does not allow
+  // any client-side code to set another account's password directly, since
+  // that would let anyone who can read the client code hijack any account.
+  // The one client-safe way to finish a password reset is Firebase's own
+  // built-in reset-email flow: it sends a link only Firebase itself can
+  // generate and verify, and the user sets their new password on
+  // Firebase's own page.
   if (!window._fbAuthSendPasswordReset) return setAuthError('Password reset is not available right now — please try again shortly');
   try {
     await window._fbAuthSendPasswordReset(email);
@@ -5953,24 +5945,15 @@ function renderAuth() {
     ${authError ? `<div class="err">⚠️ ${authError}</div>` : ''}
 
     <div style="font-size:13px;color:var(--dim);margin-bottom:16px;text-align:center">
-      Confirm your identity with your username, email, and T-Pin — no code needed.
+      Enter your registered email and we'll send you a password reset link.
     </div>
 
-    <div class="mb14">
-      <label class="label">Username</label>
-      <input class="input" id="a-forgot-name" type="text" placeholder="Your username" />
-    </div>
-    <div class="mb14">
+    <div class="mb18">
       <label class="label">Registered Email</label>
       <input class="input" id="a-forgot-email" type="email" placeholder="you@example.com" />
     </div>
-    <div class="mb18">
-      <label class="label">T-Pin</label>
-      <input class="input" id="a-forgot-tpin" type="password" inputmode="numeric" maxlength="4" placeholder="4-digit T-Pin" />
-    </div>
 
-    <button class="btn-primary btn-orange" onclick="handleVerifyTpinReset()" id="a-verify-tpin-btn">✅ Verify &amp; Continue</button>
-    <div style="font-size:11px;color:var(--dim);margin-top:10px;text-align:center">Don't have a T-Pin set? Contact admin for help resetting your password.</div>
+    <button class="btn-primary btn-orange" onclick="handleVerifyTpinReset()" id="a-verify-tpin-btn">✅ Send Reset Link</button>
     <div style="text-align:center;margin-top:14px">
       <button onclick="switchAuthMode('login')" style="background:none;border:none;color:var(--dim);font-size:12.5px;cursor:pointer;text-decoration:underline">← ← Back to Login</button>
     </div>
@@ -9799,16 +9782,6 @@ function renderCompletedMatchDetail() {
   <div class="section-title" style="margin-top:14px">🏆 Top Performers</div>
   ${topPreview}
   <button class="btn-secondary btn-block" style="margin-top:8px;font-size:12px;padding:10px" onclick="openDream11Leaderboard('${m.id}')">View Full Leaderboard →</button>
-  ` : ''}
-
-  ${m.scorecardText ? `
-  <div style="margin-top:10px">
-    <button class="btn-primary btn-block" style="background:linear-gradient(135deg,#0f766e,#0d9488);font-size:13px;padding:14px" onclick="openD11ScorecardPage('${m.id}')">📋 Full Batting & Bowling Scorecard Dekho →</button>
-  </div>
-  ` : (d11m.players||[]).some(p => p.stats) ? `
-  <div style="margin-top:10px">
-    <button class="btn-primary btn-block" style="background:linear-gradient(135deg,#0f766e,#0d9488);font-size:13px;padding:14px" onclick="openD11LiveScorecard('${m.id}')">📋 Full Batting & Bowling Scorecard Dekho →</button>
-  </div>
   ` : ''}
   `;
 }
@@ -22964,21 +22937,33 @@ function d11AiAutoSelect() {
   const userSeed = (currentUser && currentUser.email) || 'guest';
   const players = d11m.players;
 
-  // Upfront feasibility check — is a valid 11 even theoretically possible
-  // with this pool? (enough total players + enough players in each
-  // mandatory role). If not, fail fast with a clear message instead of
-  // running the selection loops at all.
-  const mins = { WK: 1, BAT: 3, AR: 1, BOWL: 3 };
+  // FIXED composition per explicit request: 1 WK, 5 BAT, 2-or-3 AR (whichever
+  // scores better), 3 BOWL — always summing to 11. This replaces the old
+  // flexible-within-role-max approach, which could land on e.g. 4 BAT/2 AR
+  // depending on the pool; the team shape is no longer a side-effect of
+  // availability, it's fixed up front and only the AR split (2 vs 3) adapts.
+  const FIXED_COMPOSITION = { WK: 1, BAT: 5, BOWL: 3 }; // AR decided below: 11 - (1+5+3) = 2, or 3 if that scores higher
   const roleAvail = { WK: 0, BAT: 0, AR: 0, BOWL: 0 };
   players.forEach(p => { if (roleAvail[p.role] !== undefined) roleAvail[p.role]++; });
-  const feasible = players.length >= D11_TEAM_SIZE &&
-    Object.keys(mins).every(r => roleAvail[r] >= mins[r]);
-  if (!feasible) {
-    showNotif('Not enough players in the pool to build a valid 11 — add more players (need at least 1 WK, 3 BAT, 1 AR, 3 BOWL).', 'error');
+  const baseFeasible = roleAvail.WK >= FIXED_COMPOSITION.WK && roleAvail.BAT >= FIXED_COMPOSITION.BAT && roleAvail.BOWL >= FIXED_COMPOSITION.BOWL;
+  if (!baseFeasible) {
+    showNotif('Not enough players in the pool to build 1 WK + 5 BAT + 3 BOWL — add more players.', 'error');
     return;
   }
+  // FIX: was a hard requirement of at least 2 AR players, which errored out
+  // entirely on a pool with 0 or 1 AR — per explicit request, a short (or
+  // empty) AR pool is now backfilled from WK/BAT/BOWL instead of blocking
+  // selection. arTarget is how many AR slots we'd LIKE (2, capped by what's
+  // actually available); whatever's left of the 11 after WK/BAT/BOWL/AR
+  // mandatory minimums goes to the mix-fill role below.
+  const arTarget = Math.min(2, roleAvail.AR);
+  const canDo3AR = roleAvail.AR >= 3;
 
-  // Objective quality score — same for every user (no randomness here).
+  // Quality score: player.points is the only per-player performance signal
+  // available (already reflects recent-match history), scaled up so it
+  // dominates the tie-break; isPlayingXI is a priority nudge, not a hard
+  // filter, so a strong non-XI player can still be picked if the pool is
+  // thin on confirmed-XI options for a mandatory slot.
   const qualityScore = (p) =>
     (Number(p.points) || 0) * 4 + d11PlayerCredit(p) * 2 + (p.isPlayingXI ? 10 : 0);
   const minCredit = Math.min(...players.map(d11PlayerCredit));
@@ -22988,30 +22973,21 @@ function d11AiAutoSelect() {
   const picks = [];
   let creditsUsed = 0;
   let rngCounter = 0;
-  // Deterministic per-user, per-turn random draw — same user always gets
-  // the same team for this pool, different users get different teams.
   const nextRand = () => _aiSeedRandom(userSeed, 'turn' + (rngCounter++));
 
-  // Budget-safety lookahead: never take a player if doing so would make it
-  // impossible to afford the cheapest possible combination for the slots
-  // still remaining after this pick. This is what guarantees the loop
-  // always reaches 11 picks (when a valid 11 exists at all) instead of
-  // greedily painting itself into a corner on credits.
-  const isBudgetSafe = (p) => {
-    const slotsLeftAfter = D11_TEAM_SIZE - picks.length - 1;
+  const isBudgetSafe = (p, slotsTotal, targetComposition) => {
+    const slotsLeftAfter = slotsTotal - picks.length - 1;
     const creditAfter = creditsUsed + d11PlayerCredit(p);
     return creditAfter + slotsLeftAfter * minCredit <= D11_CREDIT_BUDGET + 1e-9;
   };
-  const canAdd = (p, relaxRoleMax) => {
+  const canAdd = (p, targetComposition, slotsTotal) => {
     if (picks.includes(p.id)) return false;
-    if (picks.length >= D11_TEAM_SIZE) return false;
-    if (!relaxRoleMax) {
-      const [, max] = D11_ROLE_LIMITS[p.role];
-      if ((roleCounts[p.role] || 0) >= max) return false;
-    }
+    if (picks.length >= slotsTotal) return false;
+    const cap = targetComposition[p.role];
+    if (cap === undefined || (roleCounts[p.role] || 0) >= cap) return false;
     if ((sideCounts[p.side] || 0) >= D11_MAX_PER_SIDE) return false;
     if (creditsUsed + d11PlayerCredit(p) > D11_CREDIT_BUDGET + 1e-9) return false;
-    if (!isBudgetSafe(p)) return false;
+    if (!isBudgetSafe(p, slotsTotal)) return false;
     return true;
   };
   const addPlayer = (p) => {
@@ -23021,14 +22997,10 @@ function d11AiAutoSelect() {
     creditsUsed += d11PlayerCredit(p);
   };
 
-  // Weighted-random pick among the top-K eligible candidates (ranked by
-  // quality) — this is what makes every user's team genuinely different
-  // while still staying among the strongest available options, rather
-  // than every user converging on the identical single "best" 11.
   function pickWeightedRandom(eligible, k) {
     if (eligible.length === 0) return null;
     const topK = eligible.slice(0, Math.min(k, eligible.length));
-    const weights = topK.map((_, idx) => topK.length - idx); // better ranked → higher weight
+    const weights = topK.map((_, idx) => topK.length - idx);
     const total = weights.reduce((a, b) => a + b, 0);
     let r = nextRand() * total;
     for (let i = 0; i < topK.length; i++) {
@@ -23038,57 +23010,77 @@ function d11AiAutoSelect() {
     return topK[topK.length - 1];
   }
 
-  // Phase 1: lock in role minimums first (1 WK, 3 BAT, 1 AR, 3 BOWL) so a
-  // later fallback phase can never end up with a team missing a mandatory role.
-  for (const role of ['WK', 'BOWL', 'BAT', 'AR']) {
-    while ((roleCounts[role] || 0) < mins[role]) {
-      const eligible = players.filter(p => p.role === role && canAdd(p)).sort((a, b) => qualityScore(b) - qualityScore(a));
-      const chosen = pickWeightedRandom(eligible, 4);
-      if (!chosen) break;
-      addPlayer(chosen);
+  // Build one full 11 for a given fixed composition (used to try both the
+  // 2-AR and 3-AR shapes below and keep whichever scores better).
+  // composition can include a 'MIX' pseudo-role: count of slots to fill
+  // from whichever of WK/BAT/BOWL currently has the best available player
+  // (used to backfill AR slots the pool can't cover with real all-rounders).
+  function buildTeamForComposition(composition) {
+    const slotsTotal = Object.values(composition).reduce((a,b) => a+b, 0);
+    const localPicks = [];
+    const localRoleCounts = { WK: 0, BAT: 0, AR: 0, BOWL: 0 };
+    const localSideCounts = { A: 0, B: 0 };
+    let localCredits = 0;
+    const localCanAdd = (p, forRole) => {
+      if (localPicks.includes(p.id)) return false;
+      if (localPicks.length >= slotsTotal) return false;
+      if (forRole !== 'MIX' && p.role !== forRole) return false;
+      if ((localSideCounts[p.side] || 0) >= D11_MAX_PER_SIDE) return false;
+      if (localCredits + d11PlayerCredit(p) > D11_CREDIT_BUDGET + 1e-9) return false;
+      const slotsLeftAfter = slotsTotal - localPicks.length - 1;
+      if (localCredits + d11PlayerCredit(p) + slotsLeftAfter * minCredit > D11_CREDIT_BUDGET + 1e-9) return false;
+      return true;
+    };
+    const localAdd = (p) => {
+      localPicks.push(p.id);
+      localRoleCounts[p.role] = (localRoleCounts[p.role] || 0) + 1;
+      localSideCounts[p.side] = (localSideCounts[p.side] || 0) + 1;
+      localCredits += d11PlayerCredit(p);
+    };
+    // Playing XI first within each role, then everyone else — this is the
+    // "priority, not mandatory" behavior: XI-confirmed players are tried
+    // first for each slot, but the loop still reaches uncapped roles with
+    // non-XI players rather than leaving a slot empty.
+    // Real roles (WK/BAT/AR/BOWL) are filled before MIX, so the mix-fill
+    // only ever eats into what's genuinely left over after every mandatory
+    // slot in every other role is satisfied.
+    const roleOrder = Object.keys(composition).filter(r => r !== 'MIX').concat(composition.MIX ? ['MIX'] : []);
+    for (const role of roleOrder) {
+      const target = role === 'MIX' ? composition.MIX : composition[role];
+      let filled = role === 'MIX' ? 0 : (localRoleCounts[role] || 0);
+      while (filled < target) {
+        const xiFirst = players
+          .filter(p => (role === 'MIX' ? ['WK','BAT','BOWL'].includes(p.role) : p.role === role) && p.isPlayingXI && localCanAdd(p, role))
+          .sort((a, b) => qualityScore(b) - qualityScore(a));
+        const rest = players
+          .filter(p => (role === 'MIX' ? ['WK','BAT','BOWL'].includes(p.role) : p.role === role) && !p.isPlayingXI && localCanAdd(p, role))
+          .sort((a, b) => qualityScore(b) - qualityScore(a));
+        const eligible = xiFirst.length ? xiFirst : rest;
+        if (eligible.length === 0) break;
+        const topK = eligible.slice(0, Math.min(3, eligible.length));
+        const chosen = topK[Math.floor(nextRand() * topK.length)] || topK[0];
+        localAdd(chosen);
+        filled++;
+      }
     }
+    if (localPicks.length < slotsTotal) return null; // couldn't fill this shape
+    const totalQuality = localPicks.reduce((sum, pid) => sum + qualityScore(players.find(p => p.id === pid)), 0);
+    return { picks: localPicks, quality: totalQuality };
   }
 
-  // Phase 2: fill remaining slots (role max + budget-safety still enforced)
-  let guard = 0;
-  while (picks.length < D11_TEAM_SIZE && guard++ < 200) {
-    const eligible = players.filter(p => canAdd(p)).sort((a, b) => qualityScore(b) - qualityScore(a));
-    const chosen = pickWeightedRandom(eligible, 5);
-    if (!chosen) break;
-    addPlayer(chosen);
-  }
-
-  // Phase 3 (fallback): relax per-role MAX caps only — role minimums were
-  // already locked in during Phase 1, so this can't produce an invalid team.
-  if (picks.length < D11_TEAM_SIZE) {
-    let guard2 = 0;
-    while (picks.length < D11_TEAM_SIZE && guard2++ < 200) {
-      const eligible = players.filter(p => canAdd(p, true)).sort((a, b) => qualityScore(b) - qualityScore(a));
-      const chosen = pickWeightedRandom(eligible, 5);
-      if (!chosen) break;
-      addPlayer(chosen);
-    }
-  }
-
-  // Phase 4 (last resort): relax role max + drop the budget-safety lookahead
-  // (hard credit cap and side limit are still respected) — fills with the
-  // cheapest remaining players first. Only reachable on extremely tight
-  // pools; role minimums are still intact from Phase 1.
-  if (picks.length < D11_TEAM_SIZE) {
-    const byCheapest = [...players].sort((a, b) => d11PlayerCredit(a) - d11PlayerCredit(b));
-    for (const p of byCheapest) {
-      if (picks.length >= D11_TEAM_SIZE) break;
-      if (picks.includes(p.id)) continue;
-      if ((sideCounts[p.side] || 0) >= D11_MAX_PER_SIDE) continue;
-      if (creditsUsed + d11PlayerCredit(p) > D11_CREDIT_BUDGET + 1e-9) continue;
-      addPlayer(p);
-    }
-  }
-
-  if (picks.length < D11_TEAM_SIZE) {
-    showNotif(`AI could only select ${picks.length} valid players — add more players or adjust credits`, 'error');
+  // AR slots the pool genuinely can't cover (arTarget < 2, or the 3-AR
+  // attempt) get backfilled via MIX (best available WK/BAT/BOWL) instead of
+  // blocking selection entirely.
+  const arSlots2 = arTarget;
+  const mixSlots2 = 2 - arTarget; // 0 unless the pool is short on AR
+  const attempt2AR = buildTeamForComposition({ ...FIXED_COMPOSITION, AR: arSlots2, ...(mixSlots2 > 0 ? { MIX: mixSlots2 } : {}) });
+  const attempt3AR = canDo3AR ? buildTeamForComposition({ ...FIXED_COMPOSITION, AR: 3 }) : null;
+  const best = [attempt2AR, attempt3AR].filter(Boolean).sort((a, b) => b.quality - a.quality)[0];
+  if (!best) {
+    showNotif('AI could not build a valid 11 within the credit budget — add more players.', 'error');
     return;
   }
+  best.picks.forEach(pid => addPlayer(players.find(p => p.id === pid)));
 
   // Auto C & VC — top 2 by quality among selected
   const pickedPlayers = picks
@@ -23100,10 +23092,22 @@ function d11AiAutoSelect() {
   d11TeamDraft.captain = pickedPlayers[0]?.id || null;
   d11TeamDraft.viceCaptain = pickedPlayers[1]?.id || null;
 
+  // Auto-select 4 backups from the UNPICKED pool — best 4 by quality score,
+  // any role (BAT/AR/BOWL/WK), per explicit request ("AI khud decide kare").
+  // Backups are free picks (no credit cost), so budget doesn't factor in here.
+  const backupPool = players
+    .filter(p => !picks.includes(p.id))
+    .sort((a, b) => qualityScore(b) - qualityScore(a));
+  d11TeamDraft.backups = backupPool.slice(0, D11_MAX_BACKUPS).map(p => p.id);
+
   render();
   const capName = pickedPlayers[0]?.name || '';
   const vcName = pickedPlayers[1]?.name || '';
-  showNotif(`🤖 AI selected your best team! Captain: ${capName} · Vice-Captain: ${vcName}`);
+  const usedMix = mixSlots2 > 0 && best === attempt2AR;
+  const compSummary = usedMix
+    ? `${roleCounts.WK} WK · ${roleCounts.BAT} BAT · ${roleCounts.AR} AR · ${roleCounts.BOWL} BOWL (pool had too few AR, filled the rest with the best available WK/BAT/BOWL)`
+    : `1 WK · 5 BAT · ${roleCounts.AR} AR · 3 BOWL`;
+  showNotif(`🤖 AI selected your best team (${compSummary} + ${d11TeamDraft.backups.length} backups)! Captain: ${capName} · Vice-Captain: ${vcName}`);
   if (window.speechSynthesis) {
     window.speechSynthesis.cancel();
     const msg = new SpeechSynthesisUtterance(`AI has selected your best Dream 11 team! Captain is ${capName}, Vice Captain is ${vcName}. Review and submit!`);
@@ -27774,10 +27778,18 @@ function renderDream11Hub() {
     </div>
   </details>
   ${(() => {
+    // FIX: was Object.values(dream11Teams).some(...) — only checked whether
+    // the user had a team DOCUMENT for this match (i.e. submitted a draft),
+    // not whether they'd actually joined any contest with it. That let a
+    // match count here even if the user built a team but never joined Mega
+    // /Mini Mega/Free/Custom/H2H — which is why this button's count (64)
+    // didn't match Home's "Completed" tally (59), which already used the
+    // correct d11UserHasJoinedAnyContest check. Both now use the same
+    // definition of "joined".
     const completedCount = eligible.filter(m => {
       const d11m = dream11Matches[m.id];
       if (!d11m || !d11m.published || !d11m.scored) return false;
-      return Object.values(dream11Teams).some(t => t.matchId === m.id && t.userEmail === currentUser.email);
+      return d11UserHasJoinedAnyContest(m.id, currentUser.email);
     }).length;
     return `<button class="btn-secondary btn-block mb14" style="background:rgba(74,222,128,0.1);border-color:rgba(74,222,128,0.3);color:#4ade80" onclick="tab='dream11Completed';render();window.scrollTo(0,0)">🏁 Completed Matches${completedCount > 0 ? ` (${completedCount})` : ''}</button>`;
   })()}
@@ -27863,7 +27875,11 @@ function renderDream11CompletedMatches() {
   const completed = eligible.filter(m => {
     const d11m = dream11Matches[m.id];
     if (!d11m || !d11m.published || !d11m.scored) return false;
-    return Object.values(dream11Teams).some(t => t.matchId === m.id && t.userEmail === currentUser.email);
+    // FIX: see the "Completed Matches" button's own comment — was
+    // Object.values(dream11Teams).some(...), which only checked for a
+    // submitted team draft, not an actual contest join. Now matches the
+    // button's count exactly.
+    return d11UserHasJoinedAnyContest(m.id, currentUser.email);
   }).sort((a,b) => new Date(b.deadline||0) - new Date(a.deadline||0));
 
   return `
