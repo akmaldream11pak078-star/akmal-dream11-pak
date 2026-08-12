@@ -21111,7 +21111,16 @@ async function d11SyncLiveMatch(matchId, showToast) {
     _d11SetSyncDebugData({ matchId, fetchedAt: Date.now(), raw: data });
 
     const header = data.matchHeader || {};
-    const statusText = data.status || header.status || '';
+    // FIX: was only reading data.status || header.status — this endpoint's
+    // response has also been seen returning the final result under a plain
+    // top-level "result" field instead (e.g. {"result": "Afghanistan won by
+    // 42 runs", ...}), with status left empty/absent. When that happened,
+    // statusText stayed blank, so the finish-detection below (which sniffs
+    // "won by"/"drawn"/etc from statusText) never fired even though the
+    // match had clearly finished — the header kept showing just the score
+    // with no result line until the match was later re-synced through a
+    // response shape that DID populate status. Now both fields are checked.
+    const statusText = data.status || header.status || data.result || '';
     const isComplete = data.ismatchcomplete !== undefined ? !!data.ismatchcomplete : undefined;
 
     // ── Running score per team + Playing XI, from each innings on the scorecard ──
