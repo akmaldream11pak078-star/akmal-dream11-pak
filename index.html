@@ -14225,6 +14225,7 @@ async function d11SyncLiveMatchSbx(matchId, showToast) {
       _d11MarkTeamsScoredForMatch(matchId);
       await _saveMatchToFirestore(matchId, m);
       await _saveDream11MatchToFirestore(matchId, d11m);
+      if (isClearWinResult) await _d11AutoFinalizeIfClearResult(matchId);
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (resultText) {
@@ -15025,6 +15026,12 @@ async function d11SyncLiveMatchAll(matchId, showToast) {
       _d11MarkTeamsScoredForMatch(matchId);
       await _updateMatchScoreFields(matchId, { status: 'completed' });
       await _updateDream11MatchScoringFields(matchId, { scored: true });
+      // Per explicit request: this provider doesn't have a result-text
+      // pattern to check (it confirms finish via its own status_str field
+      // instead — see the double-confirm guard above), so auto-finalize
+      // fires on isFinished directly here rather than an isClearWinResult
+      // check like the other providers.
+      await _d11AutoFinalizeIfClearResult(matchId);
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (battersApplied === 0 && bowlersApplied === 0) {
@@ -16570,6 +16577,7 @@ async function d11SyncLiveMatchCll(matchId, showToast) {
       _d11MarkTeamsScoredForMatch(matchId);
       await _saveMatchToFirestore(matchId, m);
       await _saveDream11MatchToFirestore(matchId, d11m);
+      if (isClearWinResult) await _d11AutoFinalizeIfClearResult(matchId);
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (resultText) {
@@ -16885,6 +16893,7 @@ async function d11SyncLiveMatchLl2(matchId, showToast) {
       _d11MarkTeamsScoredForMatch(matchId);
       await _saveMatchToFirestore(matchId, m);
       await _saveDream11MatchToFirestore(matchId, d11m);
+      if (isClearWinResult) await _d11AutoFinalizeIfClearResult(matchId);
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (battersApplied === 0 && bowlersApplied === 0) {
@@ -17823,6 +17832,7 @@ async function d11SyncLiveMatchLl3(matchId, showToast) {
       _d11MarkTeamsScoredForMatch(matchId);
       await _updateMatchScoreFields(matchId, { status: 'completed', resultText: resultText });
       await _updateDream11MatchScoringFields(matchId, { scored: true });
+      if (isClearWinResult) await _d11AutoFinalizeIfClearResult(matchId);
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (battersApplied === 0 && bowlersApplied === 0) {
@@ -18753,16 +18763,25 @@ async function d11SyncLiveMatchLl4(matchId, showToast) {
     let isFinished = false;
     const resultText = (data.result || '').trim();
     const isClearWinResult = /won by\s+\d+\s+(run|wkt)/i.test(resultText);
-    if (innings.length >= 2 && resultText) {
-      if (isClearWinResult) {
-        isFinished = true;
-        delete _d11PendingFinish[matchId + '_ll4'];
-        m.resultText = resultText;
-      } else {
-        const pendingKey = matchId + '_ll4';
-        if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = resultText; }
-        else { _d11PendingFinish[pendingKey] = true; }
-      }
+    // FIX: was requiring innings.length >= 2 even for a clear win result —
+    // but data.result is the provider's own authoritative final-result
+    // field, populated independently of whether the scorecard's innings
+    // array has fully filled in for both teams yet. On the very first sync
+    // right after a match finished, the provider was seen returning the
+    // correct "X won by N runs" in data.result while only 1 of the 2
+    // innings objects had appeared in scorecard so far — so this guard
+    // blocked the match from finishing even though the result was already
+    // unambiguous, and it only finished on a LATER sync once the second
+    // innings object happened to be present too. A clear win result no
+    // longer waits on innings.length at all.
+    if (isClearWinResult) {
+      isFinished = true;
+      delete _d11PendingFinish[matchId + '_ll4'];
+      m.resultText = resultText;
+    } else if (innings.length >= 2 && resultText) {
+      const pendingKey = matchId + '_ll4';
+      if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; m.resultText = resultText; }
+      else { _d11PendingFinish[pendingKey] = true; }
     } else {
       delete _d11PendingFinish[matchId + '_ll4'];
     }
@@ -18772,6 +18791,7 @@ async function d11SyncLiveMatchLl4(matchId, showToast) {
       _d11MarkTeamsScoredForMatch(matchId);
       await _saveMatchToFirestore(matchId, m);
       await _saveDream11MatchToFirestore(matchId, d11m);
+      if (isClearWinResult) await _d11AutoFinalizeIfClearResult(matchId);
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (battersApplied === 0 && bowlersApplied === 0) {
@@ -19871,6 +19891,7 @@ async function d11SyncLiveMatchLl5(matchId, showToast) {
       _d11MarkTeamsScoredForMatch(matchId);
       await _updateMatchScoreFields(matchId, { status: 'completed', resultText: resultText });
       await _updateDream11MatchScoringFields(matchId, { scored: true });
+      if (isClearWinResult) await _d11AutoFinalizeIfClearResult(matchId);
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (battersApplied === 0 && bowlersApplied === 0) {
@@ -21635,6 +21656,7 @@ async function d11SyncLiveMatchEspn(matchId, showToast) {
       _d11MarkTeamsScoredForMatch(matchId);
       await _saveMatchToFirestore(matchId, m);
       await _saveDream11MatchToFirestore(matchId, d11m);
+      if (isClearWinResult) await _d11AutoFinalizeIfClearResult(matchId);
       if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
     } else if (showToast) {
       if (battersApplied === 0 && bowlersApplied === 0) {
@@ -22691,28 +22713,36 @@ function d11RecordPlayerHistoryForMatch(matchId) {
   });
 }
 
+// Shared finalize logic used by both the manual "🏁 Finalize & Close Match"
+// button (d11FinalizeScoring, which wraps this with a confirm() dialog) and
+// automatic finalization from a sync that already returned a clear "X won
+// by N runs/wkts" result (see _d11AutoFinalizeIfClearResult below) — no
+// confirm dialog here since the automatic path has no one to confirm with.
+async function _d11FinalizeScoringCore(matchId) {
+  const d11m = dream11Matches[matchId];
+  if (!d11m) return;
+  recalcDream11MatchPoints(d11m);
+  d11m.scored = true;
+  d11m.locked = true;
+  _d11MarkTeamsScoredForMatch(matchId);
+  await _saveDream11MatchToFirestore(matchId, d11m);
+  d11RecordPlayerHistoryForMatch(matchId);
+
+  const teams = Object.values(dream11Teams).filter(t => t.matchId === matchId);
+  for (const team of teams) {
+    team.totalPoints = calcDream11TeamPoints(team, d11m);
+    await _saveDream11TeamToFirestore(team.id, team);
+  }
+  await d11SyncToUtTournaments(matchId, d11m);
+  await d11CheckTournamentsForMatch(matchId);
+}
+
 async function d11FinalizeScoring() {
   const d11m = dream11Matches[d11ActiveMatchId];
   const m = matches[d11ActiveMatchId];
   if (!d11m) return;
   if (!confirm(`Finalize scoring for "${m?.teamA||'Team A'} vs ${m?.teamB||'Team B'}"?\n\nThis locks the contest and freezes the leaderboard. It does NOT pay out any contests — use the separate "💰 Payouts All" button for that, whenever you're ready. Only do this once the match has fully ended.`)) return;
-  recalcDream11MatchPoints(d11m);
-  d11m.scored = true;
-  d11m.locked = true;
-  _d11MarkTeamsScoredForMatch(d11ActiveMatchId);
-  await _saveDream11MatchToFirestore(d11ActiveMatchId, d11m);
-  d11RecordPlayerHistoryForMatch(d11ActiveMatchId);
-
-  // Recompute every user's team total for this match
-  const teams = Object.values(dream11Teams).filter(t => t.matchId === d11ActiveMatchId);
-  for (const team of teams) {
-    team.totalPoints = calcDream11TeamPoints(team, d11m);
-    await _saveDream11TeamToFirestore(team.id, team);
-  }
-  // Mirror final players/points/scored status into any UT tournament that
-  // added this match, and recompute its teams' totals the same way.
-  await d11SyncToUtTournaments(d11ActiveMatchId, d11m);
-  await d11CheckTournamentsForMatch(d11ActiveMatchId);
+  await _d11FinalizeScoringCore(d11ActiveMatchId);
 
   // NOTE: contest payouts (Mega/Mini-Mega/H2H/Custom) intentionally do NOT
   // run here anymore. Finalizing scoring only locks the match and settles
@@ -22724,6 +22754,20 @@ async function d11FinalizeScoring() {
   // action.
   render();
   showNotif('✅ Scoring finalized — match closed, leaderboard updated. Tap "💰 Payouts All" when you\'re ready to pay out contests.');
+}
+
+// ── Automatic Finalize & Close when a sync returns a clear win result ──
+// Per explicit request: when any provider's sync sees an unambiguous "X
+// won by N runs/wkts" result, don't stop at just marking the match
+// "scored" (which only updates player points) — run the SAME full
+// Finalize & Close that the admin's manual button runs (recalculate
+// points, lock the match, freeze team totals, sync to UT tournaments).
+// Guarded by d11m.locked so this can't re-run on every subsequent sync
+// once a match is already finalized.
+async function _d11AutoFinalizeIfClearResult(matchId) {
+  const d11m = dream11Matches[matchId];
+  if (!d11m || d11m.locked) return;
+  await _d11FinalizeScoringCore(matchId);
 }
 
 // ── Admin: One-click "Payouts" button ──────────────────────
