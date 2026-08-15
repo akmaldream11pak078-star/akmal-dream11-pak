@@ -1489,6 +1489,13 @@ let d11Ll5PlayerRankingPanelOpen = false;
 const ALL_RAPIDAPI_HOST = "cricket-live-line-advance.p.rapidapi.com";
 const ALL_BASE = "https://cricket-live-line-advance.p.rapidapi.com";
 const ALL_RAPIDAPI_KEY = "73179aa451msh888d9c2c9df173ep1ad928jsn490c05fe3e12";
+// Advance Live Line 2 — same underlying API/host as Advance Live Line
+// above, but a separate RapidAPI key so the two providers draw from
+// independent rate-limit quotas and can be linked/synced completely
+// independently per match.
+const ALL2_RAPIDAPI_HOST = "cricket-live-line-advance.p.rapidapi.com";
+const ALL2_BASE = "https://cricket-live-line-advance.p.rapidapi.com";
+const ALL2_RAPIDAPI_KEY = "a957688052msh0344d11d0be5533p1804f8jsnec67a9ab817f";
 let _d11AllSearchResults = []; // last Advance Live Line matches shown in the "Link Match" picker
 let _d11AllSearchLoading = false;
 let _d11AllSearchError = null;
@@ -1500,6 +1507,21 @@ let d11AllImportResults = []; // filtered list of individual match objects from 
 let _d11AllDebugData = null; // { allRaw } — raw last response, own debug modal
 let d11AllLinkPickerMatchId = null;
 let _d11AllLastSyncedAt = {}; // { [matchId]: timestamp } — for the "Last synced" label in admin UI
+
+// Advance Live Line 2 — same shape as the All provider's state above, kept
+// fully separate so the two providers' searches/imports/debug data never
+// collide with each other.
+let _d11All2SearchResults = [];
+let _d11All2SearchLoading = false;
+let _d11All2SearchError = null;
+let d11All2ImportPanelOpen = false;
+let d11All2ImportLoading = false;
+let all2ApiLog = [];
+let d11All2ImportError = null;
+let d11All2ImportResults = [];
+let _d11All2DebugData = null;
+let d11All2LinkPickerMatchId = null;
+let _d11All2LastSyncedAt = {};
 
 let d11Ll3ImportError = null;
 let d11Ll3ImportResults = []; // filtered list of individual match objects from upcomingMatches
@@ -6157,6 +6179,7 @@ function _renderInner() {
       ${tab==='dream11Ll5Hub' ? renderD11Ll5Hub() : ''}
       ${tab==='dream11SbxHub' ? renderD11SbxHub() : ''}
       ${tab==='dream11AllHub' ? renderD11AllHub() : ''}
+      ${tab==='dream11All2Hub' ? renderD11All2Hub() : ''}
       ${tab==='myMatches' ? renderD11MyMatchesPage() : ''}
       ${tab==='dream11Completed' ? renderDream11CompletedMatches() : ''}
       ${tab==='completedMatchDetail' ? renderCompletedMatchDetail() : ''}
@@ -9160,6 +9183,7 @@ async function d11AdminSaveNewMatch() {
   const wantsLl5Link = !!draftMatch._linkToLl5AfterSave;
   const wantsSbxLink = !!draftMatch._linkToSbxAfterSave;
   const wantsAllLink = !!draftMatch._linkToAllAfterSave;
+  const wantsAll2Link = !!draftMatch._linkToAll2AfterSave;
   matches[mid] = { ...draftMatch, status: 'upcoming' };
   delete matches[mid]._linkToEspnAfterSave; // internal navigation flag only — never persisted
   delete matches[mid]._linkToCllAfterSave; // internal navigation flag only — never persisted
@@ -9170,6 +9194,7 @@ async function d11AdminSaveNewMatch() {
   delete matches[mid]._linkToLl5AfterSave; // internal navigation flag only — never persisted
   delete matches[mid]._linkToSbxAfterSave; // internal navigation flag only — never persisted
   delete matches[mid]._linkToAllAfterSave; // internal navigation flag only — never persisted
+  delete matches[mid]._linkToAll2AfterSave; // internal navigation flag only — never persisted
   // Every match gets a permanent, sequential Match ID No (000100, 000101, ...)
   // at creation time — assigned before the first save so it's there from
   // the very first Firestore write, not patched in afterward.
@@ -9253,6 +9278,14 @@ async function d11AdminSaveNewMatch() {
     window.scrollTo(0,0);
     showNotif(`✅ Match created! Match ID No ${formatMatchSeqNo(matches[mid].matchSeqNo)} — now searching Advance Live Line…`);
     d11OpenAllLinkPicker(mid);
+    return;
+  }
+  if (wantsAll2Link) {
+    tab = 'dream11All2Hub';
+    render();
+    window.scrollTo(0,0);
+    showNotif(`✅ Match created! Match ID No ${formatMatchSeqNo(matches[mid].matchSeqNo)} — now searching Advance Live Line 2…`);
+    d11OpenAll2LinkPicker(mid);
     return;
   }
   d11AdminTab = 'pool';
@@ -15342,6 +15375,1003 @@ function d11AdminCreateMatchForAll() {
   window.scrollTo(0,0);
 }
 
+async function _all2Fetch(endpoint, callCtx, queryParams) {
+  if (!ALL2_RAPIDAPI_KEY) {
+    throw new Error('No Advance Live Line 2 API key configured — paste a RapidAPI key into ALL2_RAPIDAPI_KEY in the code to restore these features.');
+  }
+  const qs = queryParams ? '?' + new URLSearchParams(queryParams).toString() : '';
+  const url = `${ALL2_BASE}/${endpoint}${qs}`;
+  let res;
+  try {
+    res = await fetch(url, { headers: {
+      'Content-Type': 'application/json',
+      'x-rapidapi-host': ALL2_RAPIDAPI_HOST,
+      'x-rapidapi-key': ALL2_RAPIDAPI_KEY
+    }});
+  } catch (e) {
+    throw new Error('Could not reach Advance Live Line 2 API — check your internet connection and try again.');
+  }
+  if (res.status === 429) {
+    throw new Error('HTTP 429 — Advance Live Line 2 API rate limit hit — wait a moment and try again.');
+  }
+  if (!res.ok) {
+    let bodyText = '';
+    try { bodyText = await res.text(); } catch (e) {}
+    const trimmed = bodyText ? bodyText.replace(/\s+/g, ' ').trim().slice(0, 200) : '';
+    throw new Error(`Advance Live Line 2 API returned HTTP ${res.status}${trimmed ? ` — ${trimmed}` : ' (no response body)'}`);
+  }
+  const text = await res.text();
+  if (!text) throw new Error('Advance Live Line 2 API returned an empty response — likely a temporary hiccup, please try again.');
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`Advance Live Line 2 API returned an unreadable response (${text.slice(0,60)}...) — please try again.`);
+  }
+  if (callCtx) _logAll2ApiCall(callCtx.feature || '', callCtx.matchId, endpoint).catch(()=>{});
+  return json;
+}
+
+async function _logAll2ApiCall(feature, matchId, path) {
+  const now = getDateTime();
+  const month = now.slice(0, 7);
+  const m = matchId ? matches[matchId] : null;
+  const entry = { at: now, month, feature, matchId: matchId || null, matchLabel: m ? `${m.teamA} vs ${m.teamB}` : null, path };
+  all2ApiLog = [entry, ...all2ApiLog].filter(e => e.month === month);
+  try {
+    await setDoc(doc(window._fbDb, 'pp_meta', 'all2_api_log'), { entries: all2ApiLog });
+  } catch (e) { console.warn('Could not persist Advance Live Line 2 API log:', e.message); }
+}
+
+async function _loadAllApiLog() {
+  try {
+    const snap = await getDoc(doc(window._fbDb, 'pp_meta', 'all2_api_log'));
+    if (snap.exists()) {
+      const month = getDateTime().slice(0, 7);
+      all2ApiLog = (snap.data().entries || []).filter(e => e.month === month);
+    }
+  } catch (e) { console.warn('Could not load Advance Live Line 2 API log:', e.message); }
+}
+
+function goD11All2Hub() {
+  tab = 'dream11All2Hub';
+  render();
+  window.scrollTo(0,0);
+}
+
+async function d11FetchAll2ImportList() {
+  d11All2ImportLoading = true;
+  d11All2ImportError = null;
+  render();
+  try {
+    // GET matches?status=1&per_paged=50&paged=1 — status=1 = "Scheduled"
+    // per the sample response. Shape: { status, response: { items: [
+    // {match_id, title, short_title, teama:{name}, teamb:{name}, format_str,
+    // status_str, date_start, timestamp_start, competition:{cid, title,
+    // category}, venue:{...}}, ... ] } }
+    // Fetch 4 pages (per_paged=50 each) so enough of the 4-day window is
+    // actually covered. NOTE: the Advance Live Line 2 API appears to silently
+    // cap each page at ~10 items regardless of the per_paged value we send —
+    // so we do NOT stop early just because a page came back with fewer than
+    // 50 items (that used to wrongly end the loop after page 1). We only
+    // stop early if a page comes back completely empty, since that reliably
+    // means we've run past the end of the list.
+    let all2Matches = [];
+    for (let page = 1; page <= 4; page++) {
+      const raw = await _all2Fetch('matches', { feature: 'Import List', matchId: null }, { status: 1, per_paged: 50, paged: page });
+      if (page === 1) _d11All2DebugData = { all2Raw: raw };
+      const items = Array.isArray(raw?.response?.items) ? raw.response.items : [];
+      if (items.length === 0) break; // genuinely no more pages
+      all2Matches = all2Matches.concat(items);
+    }
+    if (all2Matches.length === 0) {
+      throw new Error('Advance Live Line 2 has no matches listed right now — try again later, or create the match manually and link it instead.');
+    }
+
+    const juniorWomenTags = ['women',' u19','u-19','u16','u-16','under-19','under 19',"women's",'girls'];
+    const now = Date.now();
+    const fourDaysMs = 4 * 24 * 60 * 60 * 1000;
+    const seen = new Set();
+    d11All2ImportResults = all2Matches.filter(mt => {
+      const teamAName = mt.teama?.name || '';
+      const teamBName = mt.teamb?.name || '';
+      if (!teamAName || !teamBName) return false;
+      const label = `${teamAName} vs ${teamBName}`;
+      if (seen.has(label)) return false;
+
+      const combinedText = `${teamAName} ${teamBName} ${mt.competition?.title||''}`.toLowerCase();
+      if (juniorWomenTags.some(t => combinedText.includes(t))) return false;
+
+      // Note: an earlier "international/international-league only" filter
+      // on competition.category was removed — it excluded far too many
+      // legitimate matches (this provider's category field apparently
+      // isn't a reliable "international" vs "domestic" signal in practice).
+      // All non-women's/junior, non-completed matches within the date
+      // window are kept instead.
+
+      if ((mt.status_str||'').toLowerCase() === 'completed') return false;
+
+      // Keep matches starting anywhere from now up to 4 days out. If a
+      // match has no timestamp at all, keep it too (better to show than
+      // silently drop it) — sorting below still pushes undated ones last.
+      const startMs = mt.timestamp_start ? mt.timestamp_start * 1000 : null;
+      if (startMs !== null && (startMs < now - 3*60*60*1000 || startMs > now + fourDaysMs)) return false;
+
+      seen.add(label);
+      return true;
+    }).sort((a,b) => (a.timestamp_start||Infinity) - (b.timestamp_start||Infinity));
+
+    if (d11All2ImportResults.length === 0) {
+      throw new Error(`Advance Live Line 2 returned ${all2Matches.length} match(es), but none were within the next 4 days (or all finished/women's/junior, which are filtered). Try 🐛 View Raw Data to check, or create the match manually and link it instead.`);
+    }
+  } catch (e) {
+    console.error(e);
+    d11All2ImportError = 'Could not reach Advance Live Line 2 API — ' + (e.message||'unknown error');
+  } finally {
+    d11All2ImportLoading = false;
+    render();
+  }
+}
+
+async function d11ImportMatchFromAll2(mt) {
+  if (!mt || !mt.match_id) return;
+  const teamA = (mt.teama?.name || 'TBD').trim();
+  const teamB = (mt.teamb?.name || 'TBD').trim();
+  const startMs = mt.timestamp_start ? mt.timestamp_start * 1000 : Date.now();
+  const formatMap = { TEST: 'Test', ODI: 'ODI', T20: 'T20', T10: 'T10' };
+  const format = formatMap[(mt.format_str||'').toUpperCase()] || 'T20';
+
+  const mid = 'm_' + Date.now() + '_' + Math.random().toString(36).slice(2,8);
+  matches[mid] = {
+    id: mid,
+    sport: 'cricket',
+    format,
+    teamA, teamB,
+    seriesName: mt.competition?.title || '',
+    deadline: startMs,
+    status: 'upcoming',
+    questions: [],
+    matchSeqNo: await _nextMatchSeqNo(),
+    all2MatchId: mt.match_id,
+    all2SeriesId: mt.competition?.cid || null
+  };
+  await _saveMatchToFirestore(mid, matches[mid]);
+
+  dream11Matches[mid] = { players: [], scored: false, locked: false, published: false, megaPool: 0, freePool: 0 };
+  await _saveDream11MatchToFirestore(mid, dream11Matches[mid]);
+
+  d11All2ImportPanelOpen = false;
+  d11All2ImportResults = [];
+  showNotif(`✅ Created & linked "${teamA} vs ${teamB}" — fetching squad now...`);
+  d11ActiveMatchId = mid;
+  d11AdminTab = 'pool';
+  tab = 'dream11Pool';
+  render();
+  window.scrollTo(0,0);
+  d11FetchSquadFromAll2(mid).catch(e => console.warn('Auto squad fetch after Advance Live Line 2 import failed:', e.message));
+}
+
+async function d11OpenAll2ImportPanel() {
+  d11All2ImportPanelOpen = true;
+  d11All2ImportResults = [];
+  d11All2ImportError = null;
+  render();
+  d11FetchAll2ImportList();
+}
+
+function d11CloseAll2ImportPanel() {
+  d11All2ImportPanelOpen = false;
+  d11All2ImportResults = [];
+  d11All2ImportError = null;
+  render();
+}
+
+function renderD11AllImportPanelModal() {
+  if (!d11All2ImportPanelOpen) return '';
+  return `<div style="position:fixed;inset:0;z-index:2000;background:rgba(5,10,20,0.82);backdrop-filter:blur(4px);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseAll2ImportPanel()">
+    <div class="card" style="width:100%;max-width:600px;max-height:82vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:18px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="font-size:15px;font-weight:700">🚀 Import from Advance Live Line 2</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseAll2ImportPanel()">✕</button>
+      </div>
+      <div style="font-size:11.5px;color:var(--dim);margin-bottom:14px">Upcoming fixtures from Advance Live Line 2, next 4 days — tap one to create + auto-link a Dream11 match in one step.</div>
+      ${_d11All2DebugData ? `<button class="btn-secondary btn-block" style="font-size:11px;padding:7px;margin-bottom:10px;background:rgba(239,68,68,0.1);border-color:rgba(239,68,68,0.3);color:#fca5a5" onclick="d11OpenAll2DebugModal()">🐛 View Raw Data</button>` : ''}
+      ${d11All2ImportLoading ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">🔄 Loading fixtures…</div>` : ''}
+      ${d11All2ImportError ? `<div style="background:rgba(220,38,38,0.1);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:10px;font-size:12px;color:#f87171;margin-bottom:10px">${d11All2ImportError}</div>` : ''}
+      ${!d11All2ImportLoading ? d11All2ImportResults.map(mt => {
+        const title = `${mt.teama?.name||'TBD'} vs ${mt.teamb?.name||'TBD'}`;
+        const sub = [mt.subtitle, mt.competition?.title].filter(Boolean).join(' · ');
+        const dateStr = mt.date_start || '';
+        const fmtBadge = mt.format_str ? `<span style="font-size:9.5px;font-weight:700;color:#8b5cf6;background:#8b5cf61a;border-radius:5px;padding:2px 6px;white-space:nowrap;margin-left:6px">${mt.format_str}</span>` : '';
+        return `
+        <div style="background:var(--input-bg);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+          <div style="font-size:12.5px;font-weight:600;line-height:1.4;margin-bottom:2px">${title}${fmtBadge}</div>
+          <div style="font-size:10.5px;color:var(--dim);margin-bottom:2px">${sub}</div>
+          ${dateStr ? `<div style="font-size:10px;color:var(--dim2);margin-bottom:8px">⏰ ${dateStr}</div>` : `<div style="margin-bottom:8px"></div>`}
+          <button class="btn-secondary btn-block" style="font-size:11px;padding:8px;background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;border:none" onclick='d11ImportMatchFromAll2(${JSON.stringify(mt).replace(/'/g,"&apos;")})'>➕ Create & Link This Match</button>
+        </div>
+      `;
+      }).join('') : ''}
+      ${!d11All2ImportLoading && !d11All2ImportResults.length && !d11All2ImportError ? `<div style="text-align:center;padding:14px 4px 4px">
+        <div style="color:var(--dim);font-size:13px;margin-bottom:12px">No upcoming fixtures found</div>
+        <button class="btn-secondary btn-block" style="font-size:12px;padding:9px;background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;border:none" onclick="d11CloseAll2ImportPanel();d11AdminCreateMatchForAll2()">➕ Create Match Manually Instead</button>
+      </div>` : ''}
+      <button class="btn-secondary btn-block" style="margin-top:10px;font-size:12px" onclick="d11FetchAll2ImportList()">🔄 Refresh</button>
+    </div>
+  </div>`;
+}
+
+async function d11SearchLiveMatchAll2(matchId) {
+  const m = matches[matchId];
+  if (!m) return;
+  _d11All2SearchLoading = true;
+  _d11All2SearchError = null;
+  _d11All2SearchResults = [];
+  render();
+  try {
+    let pool = [];
+    for (let page = 1; page <= 4; page++) {
+      const raw = await _all2Fetch('matches', { feature: 'Link Match Search', matchId: null }, { status: 1, per_paged: 50, paged: page });
+      const items = Array.isArray(raw?.response?.items) ? raw.response.items : [];
+      if (items.length === 0) break; // genuinely no more pages — don't stop just because a page had <50 items
+      pool = pool.concat(items);
+    }
+    if (pool.length === 0) throw new Error('No matches returned from Advance Live Line 2 right now');
+
+    const teamAWords = (m.teamA||'').toLowerCase().split(/\s+/).filter(w=>w.length>2);
+    const teamBWords = (m.teamB||'').toLowerCase().split(/\s+/).filter(w=>w.length>2);
+    const juniorWomenTags = ['women','u19','u-19','u16','u-16','under-19','under 19'];
+    const ourMatchIsJuniorWomen = juniorWomenTags.some(t => (m.teamA+' '+m.teamB).toLowerCase().includes(t));
+
+    const scored = pool.map(mt => {
+      const nameL = `${mt.teama?.name||''} ${mt.teamb?.name||''} ${mt.competition?.title||''}`.toLowerCase();
+      const isJuniorWomen = juniorWomenTags.some(t => nameL.includes(t));
+      if (isJuniorWomen && !ourMatchIsJuniorWomen) return { mt, score: -1 };
+      const aHit = teamAWords.some(w => nameL.includes(w));
+      const bHit = teamBWords.some(w => nameL.includes(w));
+      if (!aHit || !bHit) return { mt, score: 0 };
+      let score = 0;
+      teamAWords.forEach(w => { if (nameL.includes(w)) score++; });
+      teamBWords.forEach(w => { if (nameL.includes(w)) score++; });
+      return { mt, score };
+    }).filter(x => x.score > 0).sort((a,b)=>b.score-a.score);
+
+    _d11All2SearchResults = scored.slice(0, 8).map(x => x.mt);
+    if (_d11All2SearchResults.length === 0) {
+      _d11All2SearchError = 'No exact match found on Advance Live Line 2 for both team names together. Showing recent matches instead — pick manually, or use manual paste if not listed.';
+      _d11All2SearchResults = pool.slice(0, 15);
+    }
+  } catch (e) {
+    console.error(e);
+    _d11All2SearchError = 'Could not reach Advance Live Line 2 API — ' + (e.message||'unknown error');
+  } finally {
+    _d11All2SearchLoading = false;
+    render();
+  }
+}
+
+async function d11LinkAll2Match(matchId, all2MatchId, seriesId) {
+  const m = matches[matchId];
+  if (!m) return;
+  const prevSnapshot = { all2MatchId: m.all2MatchId, all2SeriesId: m.all2SeriesId };
+  m.all2MatchId = all2MatchId;
+  if (seriesId) m.all2SeriesId = seriesId;
+  _d11All2SearchResults = [];
+  d11All2LinkPickerMatchId = null;
+  render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('🔗 Linked to Advance Live Line 2! Fetching squad…');
+    render();
+    d11FetchSquadFromAll2(matchId).catch(e => console.warn('Auto squad fetch after Advance Live Line 2 link failed:', e.message));
+  } catch(e) {
+    Object.assign(m, prevSnapshot);
+    console.error('Advance Live Line 2 link save failed:', e);
+    showNotif('❌ Link did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
+}
+
+async function d11UnlinkAll2Match(matchId) {
+  const m = matches[matchId];
+  if (!m) return;
+  const prevSnapshot = { all2MatchId: m.all2MatchId, all2SeriesId: m.all2SeriesId, all2AutoSync: m.all2AutoSync };
+  delete m.all2MatchId;
+  delete m.all2SeriesId;
+  delete m.all2AutoSync;
+  render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif('Unlinked from Advance Live Line 2 — switched back to manual paste');
+    render();
+  } catch(e) {
+    Object.assign(m, prevSnapshot);
+    console.error('Advance Live Line 2 unlink save failed:', e);
+    showNotif('❌ Unlink did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
+}
+
+async function d11ToggleAll2AutoSync(matchId) {
+  const m = matches[matchId];
+  if (!m) return;
+  const prevAutoSync = m.all2AutoSync;
+  m.all2AutoSync = !m.all2AutoSync;
+  render();
+  try {
+    await _saveMatchToFirestore(matchId, m);
+    showNotif(m.all2AutoSync
+      ? '🤖 Automatic armed — deadline se pehle 25/22/18/15/11/7min pe Playing XI, deadline ke baad 20/40/80/130/180/250/320min pe Sync Now, sab khud-b-khud chalega'
+      : '🤖 Automatic off — ab sirf manual buttons chalenge (jo windows already fire ho chuki hain wo nahi rukengi)');
+    render();
+  } catch(e) {
+    m.all2AutoSync = prevAutoSync;
+    console.error('Advance Live Line 2 auto-sync toggle save failed:', e);
+    showNotif('❌ Toggle did NOT save — ' + (e.message || 'unknown error') + '. Please try again.', 'error');
+    render();
+  }
+}
+
+function d11OpenAll2LinkPicker(matchId) {
+  d11All2LinkPickerMatchId = matchId;
+  _d11All2SearchResults = [];
+  _d11All2SearchError = null;
+  render();
+  d11SearchLiveMatchAll2(matchId);
+}
+
+function d11CloseAll2LinkPicker() {
+  d11All2LinkPickerMatchId = null;
+  _d11All2SearchResults = [];
+  render();
+}
+
+function renderD11AllLinkPickerModal() {
+  if (!d11All2LinkPickerMatchId) return '';
+  const m = matches[d11All2LinkPickerMatchId];
+  if (!m) return '';
+  return `<div style="position:fixed;inset:0;z-index:2000;background:rgba(5,10,20,0.82);backdrop-filter:blur(4px);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseAll2LinkPicker()">
+    <div class="card" style="width:100%;max-width:600px;max-height:82vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:18px;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div style="font-size:15px;font-weight:700">🔗 Link Advance Live Line 2 Match</div>
+        <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseAll2LinkPicker()">✕</button>
+      </div>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:12px">Searching Advance Live Line 2 for: <b>${m.teamA} vs ${m.teamB}</b></div>
+      ${_d11All2SearchLoading ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">🔄 Searching…</div>` : ''}
+      ${_d11All2SearchError ? `<div style="background:rgba(220,38,38,0.1);border:1px solid rgba(220,38,38,0.25);border-radius:8px;padding:10px;font-size:12px;color:#f87171;margin-bottom:10px">${_d11All2SearchError}</div>` : ''}
+      ${!_d11All2SearchLoading ? _d11All2SearchResults.map(mt => {
+        const title = `${mt.teama?.name||'TBD'} vs ${mt.teamb?.name||'TBD'}`;
+        const sub = [mt.subtitle, mt.competition?.title].filter(Boolean).join(' · ');
+        const status = mt.status_str || '';
+        return `
+        <div style="background:var(--input-bg);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+          <div style="font-size:12.5px;font-weight:600;line-height:1.4;margin-bottom:2px">${title}</div>
+          <div style="font-size:10.5px;color:var(--dim);margin-bottom:2px">${sub}</div>
+          ${status ? `<div style="font-size:10px;color:var(--dim2);margin-bottom:8px">${status}</div>` : `<div style="margin-bottom:8px"></div>`}
+          <button class="btn-secondary btn-block" style="font-size:11px;padding:8px;background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;border:none" onclick="d11LinkAll2Match('${d11All2LinkPickerMatchId}',${mt.match_id},${mt.competition?.cid || 'null'})">Link this match</button>
+        </div>
+      `;
+      }).join('') : ''}
+      ${!_d11All2SearchLoading && !_d11All2SearchResults.length && !_d11All2SearchError ? `<div style="text-align:center;padding:24px;color:var(--dim);font-size:13px">No matches found</div>` : ''}
+      <button class="btn-secondary btn-block" style="margin-top:10px;font-size:12px" onclick="d11SearchLiveMatchAll2('${d11All2LinkPickerMatchId}')">🔄 Search Again</button>
+    </div>
+  </div>`;
+}
+
+function d11OpenAll2DebugModal() { render(); }
+
+function d11CloseAll2DebugModal() { _d11All2DebugData = null; render(); }
+
+function renderD11AllDebugModal() {
+  if (!_d11All2DebugData) return '';
+  const pretty = JSON.stringify(_d11All2DebugData, null, 2);
+  return `<div style="position:fixed;inset:0;z-index:2100;background:rgba(5,10,20,0.9);display:flex;align-items:center;justify-content:center;padding:16px" onclick="if(event.target===this) d11CloseAll2DebugModal()">
+    <div class="card" style="width:100%;max-width:640px;max-height:82vh;overflow-y:auto;padding:16px" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-size:14px;font-weight:700">🐛 Raw Advance Live Line 2 Response (debug)</div>
+        <div style="display:flex;gap:8px">
+          <button class="btn-secondary" style="width:auto;padding:6px 12px;font-size:11px;white-space:nowrap" onclick="d11CopyDebugText('d11-all-debug-text', this)">📋 Copy</button>
+          <button class="btn-secondary" style="width:auto;padding:6px 12px" onclick="d11CloseAll2DebugModal()">✕</button>
+        </div>
+      </div>
+      <textarea id="d11-all-debug-text" readonly style="width:100%;height:400px;font-family:monospace;font-size:10px;background:var(--input-bg);color:#e5e7eb;border:1px solid var(--card-b);border-radius:8px;padding:8px" onclick="this.select()">${pretty}</textarea>
+    </div>
+  </div>`;
+}
+
+async function d11FetchSquadFromAll2(matchId) {
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m) return;
+  if (!m.all2MatchId) {
+    return showNotif('Link this match to Advance Live Line 2 first (🔗 Link Advance Live Line 2), then try again', 'error');
+  }
+  showNotif('📥 Fetching squad from Advance Live Line 2…');
+  try {
+    // GET matches/{matchId}/info — response.squads.teama.squads[] /
+    // response.squads.teamb.squads[] give names + roles per side, and the
+    // SAME response also has a top-level response.players[] array — full
+    // profile per player (pid, title, playing_role, profile_image, etc.)
+    // for just this match's squads. So we get everything, including
+    // photos, from this one call — no extra per-player request needed.
+    const raw = await _all2Fetch(`matches/${m.all2MatchId}/info`, { feature: 'Fetch Squad', matchId });
+    _d11All2DebugData = { all2Raw: raw, all2MatchId: m.all2MatchId };
+    const squadsObj = raw?.response?.squads || {};
+    const playersById = {};
+    (Array.isArray(raw?.response?.players) ? raw.response.players : []).forEach(pl => {
+      if (pl.pid != null) playersById[String(pl.pid)] = pl;
+    });
+    const toSquad = (teamObj, side) => {
+      const list = (teamObj?.squads || []).map(p => {
+        const pid = p.player_id || p.pid || null;
+        const full = pid != null ? playersById[String(pid)] : null;
+        return {
+          title: p.name,
+          playing_role: p.role_str || p.role || '',
+          profile_image: full?.profile_image || full?.photo_url || full?.image_url || full?.thumb_url || '',
+          player_id: pid,
+        };
+      });
+      return list.length ? { title: side === 'A' ? m.teamA : m.teamB, players: list } : null;
+    };
+    const squadA = toSquad(squadsObj.teama, 'A');
+    const squadB = toSquad(squadsObj.teamb, 'B');
+
+    if (!squadA && !squadB) {
+      showNotif('📭 Advance Live Line 2 hasn\'t published the playing XI for this match yet (or the response shape was unexpected — check 🐛 View Raw Data). Try again closer to match time, or add players manually for now.', 'error');
+      render();
+      return;
+    }
+
+    // NOTE: matches/{id}/info squad entries carry no photo field at all, and
+    // unlike the other providers (which return the photo inline with the
+    // squad in a single call) Advance Live Line 2 only has it behind a
+    // separate player/{id}/info call — one full extra request per player.
+    // That's 20+ extra calls just for this one fetch, so on cost/rate-limit
+    // grounds we deliberately don't do it: this squad import comes in
+    // without photos, matching how a fresh manually-typed squad looks.
+
+    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    let addedCount = 0;
+    let backfilledCount = 0;
+    // BUGFIX: matches linked/squad-fetched before this fix has players
+    // with no all2Pid at all — live sync silently could never match any of
+    // them to a batting/bowling row (see d11SyncLiveMatchAll2's idToName
+    // map), so points always stayed at 0 no matter how many times Sync Now
+    // ran. Backfill all2Pid onto any EXISTING player (by name match) that's
+    // missing it, using this same fetch — no duplicate players created.
+    const backfillPid = (squadObj) => {
+      if (!squadObj) return;
+      (squadObj.players || []).forEach(p => {
+        const name = (p.title || p.short_name || '').trim();
+        if (!name || !p.player_id) return;
+        const existing = (d11m.players || []).find(dp => dp.name.toLowerCase().trim() === name.toLowerCase());
+        if (existing && !existing.all2Pid) { existing.all2Pid = p.player_id; backfilledCount++; }
+      });
+    };
+    backfillPid(squadA);
+    backfillPid(squadB);
+    const addSide = (squadObj, side) => {
+      if (!squadObj) return;
+      (squadObj.players || []).forEach(p => {
+        const name = (p.title || p.short_name || '').trim();
+        if (!name || existingNamesLower.has(name.toLowerCase())) return;
+        const roleText = p.playing_role || p.fielding_position || '';
+        const isKeeper = /keeper|wk/i.test(roleText);
+        const role = _d11MapCricbuzzRole(roleText, isKeeper);
+        const photoRaw = p.profile_image || p.photo_url || p.image_url || p.player_image || p.photo || p.image || p.vector_url || p.logo_url || p.thumb_url || '';
+        const photo = photoRaw.trim() || null;
+        const player = newDream11Player(name, role, side, { photo, all2Pid: p.player_id || null });
+        d11m.players.push(player);
+        d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
+        existingNamesLower.add(name.toLowerCase());
+        addedCount++;
+      });
+    };
+    addSide(squadA, 'A');
+    addSide(squadB, 'B');
+
+    if (addedCount === 0 && backfilledCount === 0) {
+      showNotif('No new players to add — squad already matches what\'s in your pool.');
+      render();
+      return;
+    }
+
+    await _saveDream11MatchToFirestore(matchId, d11m);
+    if (addedCount > 0 && backfilledCount > 0) {
+      showNotif(`✅ Added ${addedCount} new players, and fixed ${backfilledCount} existing players' IDs so live sync/points will work now.`);
+    } else if (backfilledCount > 0) {
+      showNotif(`✅ Fixed ${backfilledCount} existing players' IDs — live sync/points should update correctly on the next Sync Now.`);
+    } else {
+      showNotif(`✅ Added ${addedCount} players from Advance Live Line 2 squad!`);
+    }
+    render();
+  } catch (e) {
+    console.error('Advance Live Line 2 squad fetch failed:', e);
+    showNotif('Could not fetch squad from Advance Live Line 2 — ' + (e.message||'unknown error'), 'error');
+    render();
+  }
+}
+
+async function d11CheckPlayingXIAnnouncedAll2(matchId, silent) {
+  const notify = silent ? (()=>{}) : showNotif;
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m || !m.all2MatchId) return;
+  notify('🔍 Checking Advance Live Line 2 for Playing XI…');
+  try {
+    // GET matches/{matchId}/info — per RapidAPI docs, this returns
+    // squads.teama/teamb.squads[], each entry carrying name + playing11
+    // ("true"/"false" as a STRING, not boolean) directly. This is the
+    // correct endpoint for Playing XI confirmation — previously this used
+    // /newpoint2 (a fantasy-points payload) which doesn't reliably carry
+    // an explicit "confirmed in the XI" signal the way /info's playing11
+    // field does.
+    const raw = await _all2Fetch(`matches/${m.all2MatchId}/info`, { feature: silent ? 'Auto Playing XI Check' : 'Check Playing XI', matchId });
+    _d11All2DebugData = { all2Raw: raw, all2MatchId: m.all2MatchId };
+    const squads = raw?.response?.squads || raw?.squads || {};
+    const namesInXI = new Set();
+    [squads.teama, squads.teamb].forEach(t => {
+      (t?.squads || []).forEach(p => {
+        const isXI = p.playing11 === true || p.playing11 === 'true';
+        if (isXI) { const n = (p.name||'').trim(); if (n) namesInXI.add(n.toLowerCase()); }
+      });
+    });
+    if (namesInXI.size === 0) {
+      notify('Playing XI not announced yet on Advance Live Line 2 — try again closer to match time.', 'error');
+      return;
+    }
+    let confirmedCount = 0, unconfirmedCount = 0;
+    (d11m.players || []).forEach(p => {
+      const inLatestXI = namesInXI.has(p.name.toLowerCase().trim());
+      if (inLatestXI && !p.isPlayingXI) { p.isPlayingXI = true; confirmedCount++; }
+      else if (!inLatestXI && p.isPlayingXI && !_d11PlayerHasActivity(p)) { p.isPlayingXI = false; unconfirmedCount++; }
+    });
+    if (confirmedCount > 0 || unconfirmedCount > 0) {
+      // FIX: 'players' is regular-user-legal per the rules — narrow update
+      // works for any user, not just admin/subAdminXI.
+      await _updateDream11MatchScoringFields(matchId, { players: d11m.players });
+      d11ApplyBackupReplacements(matchId);
+      notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
+      render();
+    } else {
+      notify('No changes — latest Playing XI matches what was already confirmed.', 'error');
+    }
+  } catch (e) {
+    console.error('Advance Live Line 2 Playing XI check failed:', e);
+    notify('Could not check Playing XI — ' + (e.message||'unknown error'), 'error');
+  }
+}
+
+async function d11SyncLiveMatchAll2(matchId, showToast) {
+  const m = matches[matchId];
+  const d11m = dream11Matches[matchId];
+  if (!m || !d11m || !m.all2MatchId) return;
+  try {
+    // GET matches/{matchId}/wagons — innings[] with batsmen[]/bowlers[]
+    // (flat per-innings arrays, batsman_id/bowler_id keyed) plus each
+    // inning's own runs/wickets/overs for the team score line, same idea
+    // as other providers' scorecard endpoints.
+    const raw = await _all2Fetch(`matches/${m.all2MatchId}/wagons`, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
+    _d11SetSyncDebugData({ matchId, fetchedAt: Date.now(), raw, source: 'Advance Live Line 2' });
+
+    const innings = Array.isArray(raw?.response?.innings) ? raw.response.innings : [];
+    if (innings.length === 0) {
+      if (showToast) showNotif('No scorecard data yet on Advance Live Line 2 — try again once the match has started.', 'error');
+      return;
+    }
+
+    const idToName = {}; // batsman_id/bowler_id -> name isn't in this payload directly, so names come from our existing pool by pid match via the squads fetch; fall back to id-based lookup on players' storedProviderId if present
+    (d11m.players || []).forEach(p => { if (p.all2Pid) idToName[p.all2Pid] = p.name; });
+
+    let battersApplied = 0, bowlersApplied = 0;
+
+    innings.forEach(inn => {
+      const teamNameL = (inn.name || inn.short_name || '').toLowerCase();
+      if (inn.runs !== undefined) {
+        const scoreStr = `${inn.runs}/${inn.wickets ?? 0} (${inn.overs ?? 0} Ov)`;
+        if (_d11TeamNameMatches(teamNameL, m.teamA, m.teamB)) m.scoreA = scoreStr;
+        else if (_d11TeamNameMatches(teamNameL, m.teamB, m.teamA)) m.scoreB = scoreStr;
+      }
+
+      (inn.batsmen || []).forEach(b => {
+        const name = idToName[b.batsman_id] || b.name;
+        if (!name) return;
+        const mapped = {
+          name, runs: b.runs, balls: b.balls_faced,
+          outdec: b.dismissal || (b.how_out === 'Not out' ? 'not out' : ''),
+          fours: b.fours, sixes: b.sixes,
+        };
+        if (_d11ApplyLiveBattingRow(d11m, mapped)) battersApplied++;
+      });
+      (inn.bowlers || []).forEach(bl => {
+        const name = idToName[bl.bowler_id] || bl.name;
+        if (!name) return;
+        const mapped = {
+          name, overs: bl.overs, wickets: bl.wickets, maidens: bl.maidens,
+          runs: bl.runs_conceded,
+        };
+        if (_d11ApplyLiveBowlingRow(d11m, mapped)) bowlersApplied++;
+      });
+    });
+
+    (d11m.players || []).forEach(p => { if (p.stats) p.points = calcDream11PlayerPoints(p.stats, matchId); });
+    recalcDream11MatchPoints(d11m);
+
+    // BUGFIX: "have to Sync Now 2-3 times before fresh data shows" — this
+    // function captures `m`/`d11m` ONCE at the top, then does several
+    // sequential awaited Firestore writes below. Firestore's onSnapshot
+    // listener fires an echo-back of our OWN write mid-function (see
+    // _liveLoadCollection, which fully REPLACES dream11Matches/matches
+    // with a brand-new object on every snapshot, not a merge). If that
+    // echo lands between our captured `m`/`d11m` references and our next
+    // save, we'd be writing our locally-computed data on top of a
+    // now-detached, no-longer-current object — the fresher listener copy
+    // gets silently clobbered by our stale one, and the visible result
+    // only catches up once a LATER sync happens to land after the race
+    // resolves the other way. Re-anchor to whatever's actually live in
+    // the global objects right before writing, copying our freshly
+    // computed fields onto it, so we never write from a detached copy.
+    const liveM = matches[matchId] || m;
+    const liveD11m = dream11Matches[matchId] || d11m;
+    if (liveM !== m) Object.assign(liveM, { scoreA: m.scoreA, scoreB: m.scoreB, status: m.status });
+    if (liveD11m !== d11m) Object.assign(liveD11m, { players: d11m.players, scored: d11m.scored });
+
+    _d11All2LastSyncedAt[matchId] = Date.now();
+    d11ApplyBackupReplacements(matchId);
+    // OPTION A: Firestore rules now allow any signed-in user to write
+    // pp_matches.scoreA/scoreB/status/resultText and
+    // pp_dream11_matches.scored/colPasteText1/2 (not just admin/subAdminXI)
+    // — so automatic sync can fully complete (score header + finalize) even
+    // when no privileged session is online. Using narrow updateDoc calls
+    // (not a full setDoc) so the write only ever touches exactly the fields
+    // the rules' onlyFieldsChanged() allow-list expects.
+    await _updateDream11MatchScoringFields(matchId, {
+      players: liveD11m.players,
+      lastLiveUpdateAt: getDateTime(),
+    });
+    await _updateMatchScoreFields(matchId, {
+      scoreA: liveM.scoreA,
+      scoreB: liveM.scoreB,
+    });
+    await d11RefreshLiveTeamPoints(matchId);
+
+    // Advance Live Line 2's own match-list endpoint carries the authoritative
+    // "Completed" status (status_str) separately from the scorecard, so we
+    // check it directly via a lightweight matches lookup rather than
+    // guessing from the wagons payload — same double-confirm guard pattern
+    // as other providers so a transient response can't finalize on its own.
+    let isFinished = false;
+    if (innings.length >= 2) {
+      const pendingKey = matchId + '_all';
+      if (_d11PendingFinish[pendingKey]) { isFinished = true; delete _d11PendingFinish[pendingKey]; }
+      else { _d11PendingFinish[pendingKey] = true; }
+    } else {
+      delete _d11PendingFinish[matchId + '_all'];
+    }
+    if (isFinished) {
+      liveM.status = 'completed';
+      liveD11m.scored = true;
+      _d11MarkTeamsScoredForMatch(matchId);
+      await _updateMatchScoreFields(matchId, { status: 'completed' });
+      await _updateDream11MatchScoringFields(matchId, { scored: true });
+      // Per explicit request: this provider doesn't have a result-text
+      // pattern to check (it confirms finish via its own status_str field
+      // instead — see the double-confirm guard above), so auto-finalize
+      // fires on isFinished directly here rather than an isClearWinResult
+      // check like the other providers.
+      await _d11AutoFinalizeIfClearResult(matchId);
+      if (showToast) showNotif('🏁 Match finished — final scorecard & points applied automatically!');
+    } else if (showToast) {
+      if (battersApplied === 0 && bowlersApplied === 0) {
+        showNotif((typeof isAdmin === 'function' && (isAdmin() || (typeof isSubAdminXI === 'function' && isSubAdminXI())))
+          ? '⚠️ Synced, but 0 players updated — tap "🐛 View Raw Sync Data" below to check why (name mismatch or unexpected format).'
+          : '⚠️ Synced, but 0 players updated — please try again shortly.', 'error');
+      } else {
+        showNotif(`✅ Live data synced — ${battersApplied} batting + ${bowlersApplied} bowling rows updated`);
+      }
+    }
+    render();
+  } catch (e) {
+    console.error('Advance Live Line 2 live sync error:', e);
+    if (showToast) showNotif('Could not sync — ' + (e.message||'unknown error') + '. You can still paste manually.', 'error');
+  }
+}
+
+// ── Advance Live Line 2 — Automatic PRE-deadline Playing XI (catch-up) ─────
+// Same mechanism as d11AutoCheckLl5PlayingXI (see that function's comment
+// for the full "why" — catch-up on app open instead of a tight polling
+// window, since no tab may be open through an entire due window). Only
+// runs for matches where admin has the per-match "🤖 Automatic" toggle on
+// (m.all2AutoSync). Tracked in d11m.autoAll2PreDeadlineXI = { w20, w15, w10, w5 }.
+// ── Atomic "claim this auto-sync window" helper ──────────────────────────
+// Every auto-sync scheduler (Advance Live Line 2, Cricbuzz No 2, LL3, LL5 —
+// both pre-deadline Playing XI and post-deadline Sync Now) needs to fire
+// each timing window EXACTLY ONCE per match, no matter how many users'
+// sessions have the app open and are independently running the same 15-
+// second/app-open scheduler check. The dedup flag lives in Firestore
+// (d11m.autoXxxPreDeadlineXI / autoXxxPostDeadline), which is correct in
+// principle — but a plain "read the flag, then write it back" (what every
+// scheduler did before) has a race: two sessions can both read `false` for
+// the same window microseconds apart, both then fire the real API call,
+// and only afterwards do their writes land (whichever lands second just
+// overwrites the same `true` value, so the DUPLICATE CALL already happened
+// by the time the flag catches up). A Firestore transaction closes that
+// gap: it re-reads the flag from the server at the moment of the write, and
+// if two sessions race, only the one that reads0-and-writes atomically first
+// actually gets `claimed: true` back — the loser sees `claimed: false` and
+// skips its own API call entirely, so the underlying provider's API only
+// ever gets hit once per window per match, regardless of how many users are
+// online.
+async function _d11ClaimAutoSyncWindow(matchId, fieldName, windowKey) {
+  if (!window._fbDb || !window._fbFns?.runTransaction) {
+    // Offline/no-Firebase fallback: can't guarantee atomicity, so just
+    // trust the in-memory flag (matches the old behavior — better than
+    // never firing at all if Firestore's transaction API is unavailable).
+    const d11m = dream11Matches[matchId];
+    const done = (d11m && d11m[fieldName]) || {};
+    return !done[windowKey];
+  }
+  const { doc, runTransaction } = window._fbFns;
+  const ref = doc(window._fbDb, 'pp_dream11_matches', matchId);
+  try {
+    return await runTransaction(window._fbDb, async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists()) return false;
+      const data = snap.data();
+      const done = data[fieldName] || {};
+      if (done[windowKey]) return false; // someone else already claimed this window — don't fire again
+      tx.update(ref, { [fieldName]: { ...done, [windowKey]: true }, updatedAt: Date.now() });
+      return true; // we won the race — safe to fire the real API call
+    });
+  } catch (e) {
+    console.warn('Window claim transaction failed for', matchId, fieldName, windowKey, ':', e.message);
+    return false; // on any doubt, don't fire — a missed window is far less costly than a duplicate API call
+  }
+}
+
+// Variant of _d11ClaimAutoSyncWindow for the "catch-up to latest due
+// window" schedulers (post-deadline sync): marks EVERY currently-overdue
+// window as done in the same atomic transaction (not just the one being
+// claimed), so if the app was closed for hours and several windows are
+// simultaneously overdue, only the freshest one actually fires — the
+// earlier stale ones are marked done without a redundant extra API call,
+// exactly like the original single-session logic intended, just now race-
+// safe across multiple simultaneous sessions.
+async function _d11ClaimAutoSyncWindowCatchUp(matchId, fieldName, windowKey, all2Windows, isOverdue) {
+  if (!window._fbDb || !window._fbFns?.runTransaction) {
+    const d11m = dream11Matches[matchId];
+    const done = (d11m && d11m[fieldName]) || {};
+    return !done[windowKey];
+  }
+  const { doc, runTransaction } = window._fbFns;
+  const ref = doc(window._fbDb, 'pp_dream11_matches', matchId);
+  try {
+    return await runTransaction(window._fbDb, async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists()) return false;
+      const data = snap.data();
+      const done = data[fieldName] || {};
+      if (done[windowKey]) return false; // someone else already claimed this exact window
+      const newDone = { ...done };
+      all2Windows.forEach(w => { if (!newDone[w.key] && isOverdue(w)) newDone[w.key] = true; });
+      tx.update(ref, { [fieldName]: newDone, updatedAt: Date.now() });
+      return true;
+    });
+  } catch (e) {
+    console.warn('Window catch-up claim transaction failed for', matchId, fieldName, windowKey, ':', e.message);
+    return false;
+  }
+}
+
+
+const ALL2_PRE_DEADLINE_XI_WINDOWS_MIN = [
+  { key: 'w25', mins: 25 },
+  { key: 'w22', mins: 22 },
+  { key: 'w18', mins: 18 },
+  { key: 'w15', mins: 15 },
+  { key: 'w11', mins: 11 },
+  { key: 'w7', mins: 7 },
+];
+
+async function d11AutoCheckAll2PlayingXI() {
+  const now = Date.now();
+  for (const m of Object.values(matches)) {
+    if (!m.all2MatchId || !m.all2AutoSync) continue; // not linked to Advance Live Line 2, or admin hasn't armed it
+    const d11m = dream11Matches[m.id];
+    if (!d11m) continue;
+    if (d11m.scored || d11m.locked) continue;
+    if ((d11m.players || []).some(p => p.isPlayingXI)) continue; // already confirmed — stop calling
+    if (!m.deadline) continue;
+    const deadlineMs = new Date(m.deadline).getTime();
+    if (isNaN(deadlineMs)) continue;
+    const minsToDeadline = (deadlineMs - now) / 60000;
+    if (minsToDeadline <= 0 || minsToDeadline > 25) continue;
+
+    const done = d11m.autoAll2PreDeadlineXI || {};
+    let windowHit = null;
+    for (const w of ALL2_PRE_DEADLINE_XI_WINDOWS_MIN) {
+      if (!done[w.key] && minsToDeadline <= w.mins) windowHit = w.key;
+    }
+    if (!windowHit) continue;
+
+    const newDoneAllXi = { ...done };
+    ALL2_PRE_DEADLINE_XI_WINDOWS_MIN.forEach(w => { if (!newDoneAllXi[w.key] && minsToDeadline <= w.mins) newDoneAllXi[w.key] = true; });
+    d11m.autoAll2PreDeadlineXI = newDoneAllXi;
+    // FIX: autoAll2PreDeadlineXI is regular-user-legal per the rules.
+    await _updateDream11MatchScoringFields(m.id, { autoAll2PreDeadlineXI: newDoneAllXi });
+    try {
+      await d11CheckPlayingXIAnnouncedAll2(m.id, /*silent=*/true);
+    } catch (e) {
+      console.warn('Auto Advance Live Line 2 pre-deadline Playing XI check failed for', m.id, e.message);
+    }
+  }
+}
+
+// ── Advance Live Line 2 — Automatic POST-deadline sync (5 fixed windows) ───
+// Same mechanism as d11AutoSyncLl5PostDeadline. Fires Sync Now only, at
+// 20/40/80/130/180/250/320 minutes after the deadline, tracked in
+// d11m.autoAll2PostDeadline = { w20, w40, w80, w130, w180, w250, w320 }.
+const ALL2_AUTO_SYNC_WINDOWS_MIN = [
+  { key: 'w20', mins: 20 },
+  { key: 'w40', mins: 40 },
+  { key: 'w80', mins: 80 },
+  { key: 'w130', mins: 130 },
+  { key: 'w180', mins: 180 },
+  { key: 'w250', mins: 250 },
+  { key: 'w320', mins: 320 },
+];
+
+async function d11AutoSyncAll2PostDeadline() {
+  const now = Date.now();
+  for (const m of Object.values(matches)) {
+    if (!m.all2MatchId || !m.all2AutoSync) continue; // not linked to Advance Live Line 2, or admin hasn't armed it
+    const d11m = dream11Matches[m.id];
+    if (!d11m) continue;
+    if (d11m.scored) continue; // already finalized — nothing left to sync
+    if (!m.deadline) continue;
+    const deadlineMs = new Date(m.deadline).getTime();
+    if (isNaN(deadlineMs)) continue;
+    const minsSinceDeadline = (now - deadlineMs) / 60000;
+    if (minsSinceDeadline <= 0) continue; // deadline hasn't passed yet — this is a POST-deadline scheduler only
+
+    const done = d11m.autoAll2PostDeadline || {};
+    let windowHit = null;
+    for (const w of ALL2_AUTO_SYNC_WINDOWS_MIN) {
+      if (!done[w.key] && minsSinceDeadline >= w.mins) windowHit = w.key; // keep overwriting — last match wins = latest due window
+    }
+    if (!windowHit) continue;
+
+    const newDoneAll = { ...done };
+    ALL2_AUTO_SYNC_WINDOWS_MIN.forEach(w => { if (!newDoneAll[w.key] && minsSinceDeadline >= w.mins) newDoneAll[w.key] = true; });
+    d11m.autoAll2PostDeadline = newDoneAll;
+    // FIX: autoAll2PostDeadline is regular-user-legal per the rules.
+    await _updateDream11MatchScoringFields(m.id, { autoAll2PostDeadline: newDoneAll });
+    try {
+      // Sync Now only — NOT Playing XI. Post-deadline the XI is already
+      // locked in from the pre-deadline checks; all that's needed now is
+      // fresh scorecard/points data.
+      await d11SyncLiveMatchAll2(m.id, /*showToast=*/false);
+    } catch (e) {
+      console.warn('Auto Advance Live Line 2 post-deadline sync failed for', m.id, e.message);
+    }
+  }
+}
+
+function _d11RenderAll2SyncRow(m) {
+  if (!m.all2MatchId && (m.cricketDataMatchId || m.espnMatchId || m.cllMatchId || m.cb2MatchId || m.ll2MatchId || m.ll3MatchId || m.ll4MatchId || m.ll5MatchId || m.sbxMatchId)) return ''; // already on another provider
+  if (!m.all2MatchId) {
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
+      <span style="font-size:11px;color:#a78bfa;flex:1;min-width:140px">🚀 Advance Live Line 2: not linked</span>
+      <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;border:none" onclick="d11OpenAll2LinkPicker('${m.id}')">🔗 Link Advance Live Line 2</button>
+    </div>`;
+  }
+  const lastSync = _d11All2LastSyncedAt[m.id];
+  const lastSyncStr = lastSync ? new Date(lastSync).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : 'not yet';
+  const autoOn = !!m.all2AutoSync;
+  return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;padding:8px 10px;flex-wrap:wrap">
+    <span style="font-size:11px;color:#a78bfa;flex:1;min-width:140px">🚀 Linked to Advance Live Line 2 · Last synced: ${lastSyncStr}</span>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:${autoOn ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)'};border-color:${autoOn ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.15)'};color:${autoOn ? '#4ade80' : 'var(--dim)'}" onclick="d11ToggleAll2AutoSync('${m.id}')" title="Deadline se pehle 25/22/18/15/11/7min pe Playing XI, aur deadline ke baad 20/40/80/130/180/250/320min pe Sync Now — sab khud-b-khud (app khulte hi catch-up ho jata hai)">${autoOn ? '🤖 Automatic: ON' : '🤖 Automatic: OFF'}</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11SyncLiveMatchAll2('${m.id}', true)">🔄 Sync Now</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11SyncLiveMatchAll2('${m.id}', true)">🏁 Fetch Final Result</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(168,85,247,0.12);border-color:rgba(168,85,247,0.3);color:#c084fc" onclick="d11FetchSquadFromAll2('${m.id}')">📥 Fetch Squad</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11CheckPlayingXIAnnouncedAll2('${m.id}')">🏏 Check Playing XI</button>
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.3);color:#4ade80" onclick="d11ActiveMatchId='${m.id}';d11AdminTab='pool';tab='dream11Pool';d11StartPasteSquad();window.scrollTo(0,0)">✍️ Paste Playing XI</button>
+    ${_d11All2DebugData ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(234,179,8,0.12);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11OpenAll2DebugModal()">🐛 View Raw Data</button>` : ''}
+    ${_d11SyncDebugData && _d11SyncDebugData.matchId === m.id ? `<button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.3);color:#fca5a5" onclick="d11OpenSyncDebugModal()">🐛 View Raw Sync Data</button>` : ''}
+    <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap;background:rgba(220,38,38,0.12);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11UnlinkAll2Match('${m.id}')">✕ Unlink</button>
+  </div>`;
+}
+
+function renderD11All2Hub() {
+  const linked = Object.values(matches).filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && m.all2MatchId);
+  const unlinkedEligible = Object.values(matches)
+    .filter(m => (m.sport === 'cricket' || dream11Matches[m.id]) && !m.all2MatchId && !m.cricketDataMatchId && !m.espnMatchId && !m.cllMatchId && !m.cb2MatchId && !m.ll2MatchId && !m.ll3MatchId && !m.ll4MatchId && !m.ll5MatchId && !m.sbxMatchId && !dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
+
+  function renderCard(m) {
+    const d11m = dream11Matches[m.id];
+    const playerCount = d11m ? d11m.players.length : 0;
+    const teamCount = Object.values(dream11Teams).filter(t => t.matchId === m.id).length;
+    const xiCount = d11m ? d11m.players.filter(p => p.isPlayingXI).length : 0;
+    const dLocked = isD11Locked(m.id);
+    const deadlineStr = m.deadline ? pkDateTime(m.deadline) : 'Not set';
+    return `
+    <div class="card mb14">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div class="match-teams" style="gap:8px">
+          <span class="team-name" style="font-size:14px">${m.teamA||'TBD'}</span>
+          <span class="vs-badge" style="font-size:10px;padding:2px 8px">VS</span>
+          <span class="team-name" style="font-size:14px">${m.teamB||'TBD'}</span>
+        </div>
+        ${d11m?.scored ? `<span class="match-status status-completed">SCORED</span>` : dLocked ? `<span class="match-status status-live">LOCKED</span>` : `<span class="match-status status-upcoming">OPEN</span>`}
+      </div>
+      <div style="margin-bottom:8px">
+        ${d11m?.published ? `<span class="match-status" style="background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.35)">🟢 PUBLISHED — visible to users</span>` : `<span class="match-status" style="background:rgba(234,179,8,0.15);color:#facc15;border:1px solid rgba(234,179,8,0.35)">🔒 NOT PUBLISHED — hidden from users</span>`}
+      </div>
+      <div style="font-size:11.5px;color:var(--dim);margin-bottom:6px">👥 ${playerCount} players · 🏏 ${xiCount} XI confirmed · 📋 ${teamCount} teams</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;background:var(--input-bg);border-radius:8px;padding:8px 10px">
+        <span style="font-size:11px;color:var(--orange);flex:1">⏰ Deadline: ${deadlineStr}${dLocked && !d11m?.locked ? ' (auto-locked)' : ''}</span>
+        <button class="btn-secondary" style="font-size:10px;padding:5px 10px;white-space:nowrap" onclick="d11EditDeadline('${m.id}')">✏️ Change</button>
+      </div>
+      ${_d11RenderAll2SyncRow(m)}
+      <button class="btn-primary btn-block" style="font-size:12px;padding:10px;margin-bottom:8px;background:${d11m?.published ? 'linear-gradient(135deg,#dc2626,#b91c1c)' : 'linear-gradient(135deg,#16a34a,#15803d)'}" onclick="d11TogglePublish('${m.id}')">${d11m?.published ? '🚫 Unpublish (hide from users)' : '🚀 Publish (show to users)'}</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn-secondary" style="flex:1;font-size:12px;padding:10px" onclick="openDream11Match('${m.id}')">⚙️ Manage Pool</button>
+        ${teamCount > 0 ? `<button class="btn-secondary" style="flex:1;font-size:12px;padding:10px" onclick="openDream11Leaderboard('${m.id}')">🏅 Leaderboard</button>` : ''}
+        <button class="btn-secondary" style="font-size:12px;padding:10px;background:rgba(220,38,38,0.12);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11DeleteMatch('${m.id}')">🗑️</button>
+      </div>
+    </div>`;
+  }
+
+  const notScored = linked.filter(m => !dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(a.deadline||0) - new Date(b.deadline||0));
+  const scoredList = linked.filter(m => dream11Matches[m.id]?.scored)
+    .sort((a,b) => new Date(b.deadline||0) - new Date(a.deadline||0));
+
+  return `
+  ${renderD11Hero('Live sync via Advance Live Line 2 — Match Link, Squad, Playing 11 & Scoring, fully automatic')}
+  <button class="btn-secondary mb14" style="font-size:12px;padding:8px 14px" onclick="tab='dream11';render();window.scrollTo(0,0)">← Back to Dream11</button>
+  <div class="section-title">🚀 Advance Live Line 2 Matches</div>
+  <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9)" onclick="d11OpenAll2ImportPanel()">🚀 Import from Advance Live Line 2 (Upcoming)</button>
+  <button class="btn-secondary btn-block mb14" style="background:rgba(139,92,246,0.1);border-color:rgba(139,92,246,0.3);color:#a78bfa" onclick="d11AdminCreateMatchForAll2()">➕ Create New Match & Link Manually</button>
+  <div class="empty-state" style="padding:6px 2px;font-size:11.5px;text-align:left;line-height:1.6;margin-bottom:14px">
+    Or link a match you already created (manually, or via another provider, if not covered there) using the list below.
+  </div>
+  ${unlinkedEligible.length > 0 ? `
+    <div class="section-title" style="font-size:13px">Link a match</div>
+    ${unlinkedEligible.slice(0, 10).map(m => `
+      <div class="card mb10" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <div>
+          <div style="font-weight:700;font-size:13px">${m.teamA||'TBD'} vs ${m.teamB||'TBD'}</div>
+          <div style="font-size:10.5px;color:var(--dim)">${m.deadline ? pkDateTime(m.deadline) : 'No deadline set'}</div>
+        </div>
+        <button class="btn-secondary" style="font-size:11px;padding:7px 12px;white-space:nowrap;background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;border:none" onclick="d11OpenAll2LinkPicker('${m.id}')">🔗 Link</button>
+      </div>
+    `).join('')}
+  ` : ''}
+  <div class="section-title" style="font-size:13px;margin-top:${unlinkedEligible.length > 0 ? '18px' : '0'}">Linked matches</div>
+  ${notScored.length === 0 ? `<div class="empty-state"><div class="empty-icon">🚀</div>No Advance Live Line 2-linked matches yet.<br/>Pick a match above to link one.</div>` : notScored.map(renderCard).join('')}
+  ${scoredList.length > 0 ? `
+    <button class="btn-secondary btn-block mb14" style="font-size:12px;padding:10px" onclick="d11AdminShowCompleted=!d11AdminShowCompleted;render()">
+      ${d11AdminShowCompleted ? '▲' : '▼'} ✅ Completed / Scored Matches (${scoredList.length})
+    </button>
+    ${d11AdminShowCompleted ? scoredList.map(renderCard).join('') : ''}
+  ` : ''}
+  `;
+}
+
+function d11AdminCreateMatchForAll2() {
+  startNewMatch();
+  if (draftMatch) { draftMatch.sport = 'cricket'; draftMatch._linkToAll2AfterSave = true; }
+  adminTab = 'create';
+  tab = 'dream11';
+  d11AdminCreatePending = true;
+  render();
+  window.scrollTo(0,0);
+}
+
+
 
 // ══════════════════════════════════════════════════════════════════════
 // ── Cricket Live Line 2 (LL2) — Import / Link / Squad / XI / Sync ─────────────
@@ -18680,14 +19710,32 @@ async function d11SyncLiveMatchLl4(matchId, showToast) {
 
     let battersApplied = 0, bowlersApplied = 0;
     const fieldingRowsAll = [];
+    // FIX: was `m.scoreA = scoreStr` inside the innings loop below — for a
+    // Test match where a team bats twice (this match's raw response has 3
+    // innings: Australia, Bangladesh, Australia again), each team's LATER
+    // innings overwrote its earlier one, so Australia's first-innings 198
+    // silently vanished from both the header and (via the same per-player
+    // overwrite bug, fixed separately in _d11ApplyLiveBattingRow/
+    // _d11ApplyLiveBowlingRow) every Australian batter/bowler's own stats.
+    // Now each team's innings scores are collected in order and joined with
+    // " & " (e.g. "198 & 94/3 (26 Ov)"), matching standard Test-scorecard
+    // convention — the overs shown are always the most recent (currently
+    // in-progress or last-completed) innings for that team.
+    const inningsScoresA = [], inningsScoresB = [];
+    let latestOversA = null, latestOversB = null;
 
-    innings.forEach(inn => {
+    innings.forEach((inn, idx) => {
       const team = inn.team || {};
       const teamNameL = (team.name || team.short_name || '').toLowerCase();
       if (team.score !== undefined) {
-        const scoreStr = `${team.score}/${team.wicket ?? 0} (${team.over ?? 0} Ov)`;
-        if (_d11TeamNameMatches(teamNameL, m.teamA, m.teamB)) m.scoreA = scoreStr;
-        else if (_d11TeamNameMatches(teamNameL, m.teamB, m.teamA)) m.scoreB = scoreStr;
+        const summaryStr = `${team.score}/${team.wicket ?? 0}`;
+        if (_d11TeamNameMatches(teamNameL, m.teamA, m.teamB)) {
+          inningsScoresA.push(summaryStr);
+          latestOversA = team.over ?? 0;
+        } else if (_d11TeamNameMatches(teamNameL, m.teamB, m.teamA)) {
+          inningsScoresB.push(summaryStr);
+          latestOversB = team.over ?? 0;
+        }
       }
 
       (inn.batsman || []).forEach(b => {
@@ -18696,6 +19744,7 @@ async function d11SyncLiveMatchLl4(matchId, showToast) {
           runs: b.run, balls: b.ball,
           outdec: b.out_by || (b.out_by === 'not out' ? 'not out' : ''),
           fours: b.fours, sixes: b.sixes,
+          inningsNo: idx,
         };
         if (_d11ApplyLiveBattingRow(d11m, mapped)) battersApplied++;
         _d11ExtractLiveFieldingCredit(mapped, fieldingRowsAll);
@@ -18705,10 +19754,14 @@ async function d11SyncLiveMatchLl4(matchId, showToast) {
           name: bl.name,
           overs: bl.over, wickets: bl.wicket, maidens: bl.maiden,
           runs: bl.run, dotBalls: bl.dot_ball,
+          inningsNo: idx,
         };
         if (_d11ApplyLiveBowlingRow(d11m, mapped)) bowlersApplied++;
       });
     });
+
+    if (inningsScoresA.length) m.scoreA = `${inningsScoresA.join(' & ')} (${latestOversA} Ov)`;
+    if (inningsScoresB.length) m.scoreB = `${inningsScoresB.join(' & ')} (${latestOversB} Ov)`;
 
     const mergedFieldingAll = {};
     fieldingRowsAll.forEach(r => {
@@ -19789,14 +20842,29 @@ async function d11SyncLiveMatchLl5(matchId, showToast) {
 
     let battersApplied = 0, bowlersApplied = 0;
     const fieldingRowsAll = [];
+    // FIX: same Test-match double-innings issue as Cricket Live Line 4 —
+    // was `m.scoreA = scoreStr` inside the innings loop, so a team batting
+    // twice had its earlier innings silently overwritten by its later one
+    // (both in the header AND in every player's own accumulated stats, via
+    // _d11ApplyLiveBattingRow/_d11ApplyLiveBowlingRow). Now collects each
+    // team's innings scores in order and joins them "198 & 94/3 (26 Ov)",
+    // and tags each batting/bowling row with its innings index so those
+    // shared apply functions can sum rather than overwrite.
+    const inningsScoresA = [], inningsScoresB = [];
+    let latestOversA = null, latestOversB = null;
 
-    innings.forEach(inn => {
+    innings.forEach((inn, idx) => {
       const team = inn.team || {};
       const teamNameL = (team.name || team.short_name || '').toLowerCase();
       if (team.score !== undefined) {
-        const scoreStr = `${team.score}/${team.wicket ?? 0} (${team.over ?? 0} Ov)`;
-        if (_d11TeamNameMatches(teamNameL, m.teamA, m.teamB)) m.scoreA = scoreStr;
-        else if (_d11TeamNameMatches(teamNameL, m.teamB, m.teamA)) m.scoreB = scoreStr;
+        const summaryStr = `${team.score}/${team.wicket ?? 0}`;
+        if (_d11TeamNameMatches(teamNameL, m.teamA, m.teamB)) {
+          inningsScoresA.push(summaryStr);
+          latestOversA = team.over ?? 0;
+        } else if (_d11TeamNameMatches(teamNameL, m.teamB, m.teamA)) {
+          inningsScoresB.push(summaryStr);
+          latestOversB = team.over ?? 0;
+        }
       }
 
       (inn.batsman || []).forEach(b => {
@@ -19805,6 +20873,7 @@ async function d11SyncLiveMatchLl5(matchId, showToast) {
           runs: b.run, balls: b.ball,
           outdec: b.out_by || '',
           fours: b.fours, sixes: b.sixes,
+          inningsNo: idx,
         };
         if (_d11ApplyLiveBattingRow(d11m, mapped)) battersApplied++;
         _d11ExtractLiveFieldingCredit(mapped, fieldingRowsAll);
@@ -19814,10 +20883,14 @@ async function d11SyncLiveMatchLl5(matchId, showToast) {
           name: bl.name,
           overs: bl.over, wickets: bl.wicket, maidens: bl.maiden,
           runs: bl.run, dotBalls: bl.dot_ball,
+          inningsNo: idx,
         };
         if (_d11ApplyLiveBowlingRow(d11m, mapped)) bowlersApplied++;
       });
     });
+
+    if (inningsScoresA.length) m.scoreA = `${inningsScoresA.join(' & ')} (${latestOversA} Ov)`;
+    if (inningsScoresB.length) m.scoreB = `${inningsScoresB.join(' & ')} (${latestOversB} Ov)`;
 
     const mergedFieldingAll = {};
     fieldingRowsAll.forEach(r => {
@@ -21801,9 +22874,33 @@ function _d11ApplyLiveBattingRow(d11m, b) {
   // bonus (and any batting bonuses that happen to trigger at 0) to players
   // who never took the field.
   if (ballsFaced === 0 && !isOut) return false;
+  // FIX: a Test match innings loop calls this once per innings, and a
+  // player can genuinely bat in TWO innings of the same Test (1st innings
+  // + 2nd/follow-on innings). This used to overwrite p.stats each call, so
+  // only whichever innings happened to sync LAST survived — the entire
+  // first-innings knock (runs, balls, boundaries) silently vanished from
+  // both the header total and this player's own stats/points the moment
+  // their second-innings numbers came in. Track each innings' batting line
+  // separately by innings number (b.inningsNo, passed by the calling sync
+  // function) and store the summed totals in p.stats — same shape as
+  // before so nothing downstream (points calc, UI) needs to change, but
+  // now correctly reflecting the full match instead of just the latest
+  // innings. Falls back to simple overwrite if no innings number is given
+  // (matches this match's only/first innings, or a provider that doesn't
+  // distinguish innings — behavior is unchanged for those).
+  const inningsKey = b.inningsNo != null ? String(b.inningsNo) : '_only';
+  const battingByInnings = { ...(p.stats?.battingByInnings || {}) };
+  battingByInnings[inningsKey] = { runs, ballsFaced, fours: Number(b.fours ?? b.four4s)||0, sixes: Number(b.sixes ?? b.six6s)||0, isOut };
+  const summed = Object.values(battingByInnings).reduce((acc, inn) => ({
+    runs: acc.runs + inn.runs,
+    ballsFaced: acc.ballsFaced + inn.ballsFaced,
+    fours: acc.fours + inn.fours,
+    sixes: acc.sixes + inn.sixes,
+  }), { runs: 0, ballsFaced: 0, fours: 0, sixes: 0 });
   p.stats = { ...(p.stats||{}),
-    runs, ballsFaced, fours: Number(b.fours ?? b.four4s)||0, sixes: Number(b.sixes ?? b.six6s)||0,
-    isOut,
+    ...summed,
+    isOut, // reflects most recent innings' dismissal status (still batting or out in the innings that just synced)
+    battingByInnings,
     isPlayingXI: true
   };
   // Also set the top-level flag — the UI's ✅/"XI confirmed" badges and the
@@ -21834,10 +22931,23 @@ function _d11ApplyLiveBowlingRow(d11m, bl) {
   // site that doesn't explicitly pass `dotBalls` (i.e. both Cricbuzz
   // sources) simply won't affect the stored count at all.
   const dotBalls = bl.dotBalls !== undefined ? (Number(bl.dotBalls)||0) : (p.stats?.dotBalls || 0);
+  // FIX: same reasoning as _d11ApplyLiveBattingRow — a bowler can bowl in
+  // both innings of a Test, and this used to overwrite p.stats per call so
+  // only the last-synced innings' bowling figures survived. Track each
+  // innings' bowling line separately and store summed totals.
+  const inningsKey = bl.inningsNo != null ? String(bl.inningsNo) : '_only';
+  const bowlingByInnings = { ...(p.stats?.bowlingByInnings || {}) };
+  bowlingByInnings[inningsKey] = { wickets: Number(bl.wickets)||0, maidens: Number(bl.maidens)||0, oversBowled, runsGiven: Number(bl.runs ?? bl.runsConceded)||0, dotBalls };
+  const summedBowl = Object.values(bowlingByInnings).reduce((acc, inn) => ({
+    wickets: acc.wickets + inn.wickets,
+    maidens: acc.maidens + inn.maidens,
+    oversBowled: acc.oversBowled + inn.oversBowled,
+    runsGiven: acc.runsGiven + inn.runsGiven,
+    dotBalls: acc.dotBalls + inn.dotBalls,
+  }), { wickets: 0, maidens: 0, oversBowled: 0, runsGiven: 0, dotBalls: 0 });
   p.stats = { ...(p.stats||{}),
-    wickets: Number(bl.wickets)||0, maidens: Number(bl.maidens)||0,
-    oversBowled, runsGiven: Number(bl.runs ?? bl.runsConceded)||0,
-    dotBalls,
+    ...summedBowl,
+    bowlingByInnings,
     isPlayingXI: true
   };
   // Same fix as batting above — keep the top-level flag in sync so the UI
@@ -27965,6 +29075,7 @@ function renderDream11Hub() {
     <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#0891b2,#0e7490)" onclick="goD11Ll5Hub()">⚡ Cricket Live Line 5 Matches</button>
     <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#e11d2d,#991b1b)" onclick="goD11SbxHub()">🎯 Sportbex Matches</button>
     <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9)" onclick="goD11AllHub()">🚀 Advance Live Line Matches</button>
+    <button class="btn-primary btn-block mb14" style="background:linear-gradient(135deg,#7c3aed,#5b21b6)" onclick="goD11All2Hub()">🚀 Advance Live Line 2 Matches</button>
     <button class="btn-secondary btn-block mb14" style="background:rgba(22,163,74,0.1);border-color:rgba(22,163,74,0.3);color:#4ade80" onclick="d11OpenLl3PlayerRankingPanel()">🏆 Player Ranking (Cricket Live Line 3)</button>
     <button class="btn-secondary btn-block mb14" style="background:rgba(225,29,72,0.1);border-color:rgba(225,29,72,0.3);color:#fb7185" onclick="d11OpenLl4PlayerRankingPanel()">🏆 Player Ranking (Cricket Live Line 4)</button>
     <button class="btn-secondary btn-block mb14" style="background:rgba(8,145,178,0.1);border-color:rgba(8,145,178,0.3);color:#22d3ee" onclick="d11OpenLl5PlayerRankingPanel()">🏆 Player Ranking (Cricket Live Line 5)</button>
@@ -29933,8 +31044,30 @@ function renderDream11ViewTeam() {
   const picked = t.picks.map(pid => d11m?.players.find(x => x.id === pid)).filter(Boolean);
   const roleOrder = ['WK','BAT','AR','BOWL'];
   const roleLabels = { WK: 'WICKET-KEEPERS', BAT: 'BATTERS', AR: 'ALL-ROUNDERS', BOWL: 'BOWLERS' };
+  // FIX: was `picked.filter(p => p.role === r)` — grouped every player by
+  // their OWN role, including backups who swapped in for a different-role
+  // main pick. Backups are explicitly role-agnostic ("no role/category
+  // restriction" — any backup can cover any main player), so when e.g. an
+  // All-Rounder backup replaced a Batter, that backup moved to the
+  // ALL-ROUNDERS section while the BATTERS section was left one player
+  // short — showing an empty slot there even though the swap itself had
+  // completed successfully (confirmed correct in the Backup Players list
+  // below, which showed "In lineup — replacing X"). A slot's section is
+  // now determined by the ORIGINAL pick's role for that slot (the person
+  // being covered), not the covering backup's own role — the backup slots
+  // into the same visual position the person they replaced held.
+  const slotRoleForPlayer = (p) => {
+    if (t.replacements) {
+      const originalId = Object.keys(t.replacements).find(origId => t.replacements[origId] === p.id);
+      if (originalId) {
+        const originalPlayer = (d11m?.players||[]).find(x => x.id === originalId);
+        if (originalPlayer) return originalPlayer.role;
+      }
+    }
+    return p.role;
+  };
   const byRole = {};
-  roleOrder.forEach(r => byRole[r] = picked.filter(p => p.role === r));
+  roleOrder.forEach(r => byRole[r] = picked.filter(p => slotRoleForPlayer(p) === r));
 
   const fieldPlayerCard = (p) => {
     const isC = t.captain === p.id, isVC = t.viceCaptain === p.id;
@@ -35920,8 +37053,22 @@ function renderUtViewTeam() {
   const picked = team.picks.map(pid => m?.players.find(x => x.id === pid)).filter(Boolean);
   const roleOrder = ['WK','BAT','AR','BOWL'];
   const roleLabels = { WK: 'WICKET-KEEPERS', BAT: 'BATTERS', AR: 'ALL-ROUNDERS', BOWL: 'BOWLERS' };
+  // Same fix as the main Dream11 team view — group by the slot's original
+  // role (who a backup replaced), not the backup's own role, since backups
+  // are role-agnostic and can otherwise leave a section showing an empty
+  // slot while the backup itself renders under a different section.
+  const slotRoleForPlayer = (p) => {
+    if (team.replacements) {
+      const originalId = Object.keys(team.replacements).find(origId => team.replacements[origId] === p.id);
+      if (originalId) {
+        const originalPlayer = (m?.players||[]).find(x => x.id === originalId);
+        if (originalPlayer) return originalPlayer.role;
+      }
+    }
+    return p.role;
+  };
   const byRole = {};
-  roleOrder.forEach(r => byRole[r] = picked.filter(p => p.role === r));
+  roleOrder.forEach(r => byRole[r] = picked.filter(p => slotRoleForPlayer(p) === r));
 
   const fieldPlayerCard = (p) => {
     const isC = team.captain === p.id, isVC = team.viceCaptain === p.id;
@@ -36270,6 +37417,8 @@ async function initApp() {
     if (typeof d11AutoSyncLl5PostDeadline === 'function') d11AutoSyncLl5PostDeadline().catch(function(){});
     if (typeof d11AutoCheckAllPlayingXI === 'function') d11AutoCheckAllPlayingXI().catch(function(){});
     if (typeof d11AutoSyncAllPostDeadline === 'function') d11AutoSyncAllPostDeadline().catch(function(){});
+    if (typeof d11AutoCheckAll2PlayingXI === 'function') d11AutoCheckAll2PlayingXI().catch(function(){});
+    if (typeof d11AutoSyncAll2PostDeadline === 'function') d11AutoSyncAll2PostDeadline().catch(function(){});
     if (typeof d11AutoCheckLl3PlayingXI === 'function') d11AutoCheckLl3PlayingXI().catch(function(){});
     if (typeof d11AutoSyncLl3PostDeadline === 'function') d11AutoSyncLl3PostDeadline().catch(function(){});
     if (typeof d11AutoCheckCb2PlayingXI === 'function') d11AutoCheckCb2PlayingXI().catch(function(){});
@@ -36361,6 +37510,8 @@ if ('serviceWorker' in navigator) {
     if (typeof d11AutoSyncLl5PostDeadline === 'function') d11AutoSyncLl5PostDeadline().catch(function(){});
     if (typeof d11AutoCheckAllPlayingXI === 'function') d11AutoCheckAllPlayingXI().catch(function(){});
     if (typeof d11AutoSyncAllPostDeadline === 'function') d11AutoSyncAllPostDeadline().catch(function(){});
+    if (typeof d11AutoCheckAll2PlayingXI === 'function') d11AutoCheckAll2PlayingXI().catch(function(){});
+    if (typeof d11AutoSyncAll2PostDeadline === 'function') d11AutoSyncAll2PostDeadline().catch(function(){});
     if (typeof d11AutoCheckLl3PlayingXI === 'function') d11AutoCheckLl3PlayingXI().catch(function(){});
     if (typeof d11AutoSyncLl3PostDeadline === 'function') d11AutoSyncLl3PostDeadline().catch(function(){});
     if (typeof d11AutoCheckCb2PlayingXI === 'function') d11AutoCheckCb2PlayingXI().catch(function(){});
@@ -36475,7 +37626,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.62.0";
+const APP_VERSION = "4.64.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
