@@ -8912,23 +8912,42 @@ function d11ApplyBackupReplacements(matchId) {
           return bp && bp.isPlayingXI;
         });
         if (backupId) {
-          const slotIdx = team.picks.indexOf(originalId);
+          let slotIdx = team.picks.indexOf(originalId);
+          // FIX: was `if (slotIdx >= 0) { ...swap... }` with no else — if
+          // originalId had somehow already gone missing from team.picks
+          // (e.g. an earlier partial/interrupted update left picks and
+          // originalPicks out of sync), a fully valid, Playing-XI-confirmed
+          // backup was found here but the swap silently did nothing,
+          // because the slot to put it in couldn't be located. The whole
+          // point of this function is to guarantee a non-playing original
+          // pick gets covered by a backup whenever one is available — so
+          // if picks doesn't contain the slot to replace, add the backup
+          // as a new slot instead of dropping the swap on the floor.
           if (slotIdx >= 0) {
             team.picks[slotIdx] = backupId;
-            team.replacements = team.replacements || {};
-            team.replacements[originalId] = backupId;
-            // If the player being replaced was Captain or Vice-Captain,
-            // pass that designation to the backup stepping into their
-            // spot — otherwise the C/VC badge (and 2x/1.5x points
-            // multiplier) silently vanishes since it was keyed to a
-            // player ID that's no longer in `picks`.
-            if (team.captain === originalId) team.captain = backupId;
-            if (team.viceCaptain === originalId) team.viceCaptain = backupId;
-            usedBackupIds.add(backupId);
-            changed = true;
+          } else {
+            console.warn(`d11ApplyBackupReplacements: originalId ${originalId} not found in team.picks (team ${team.id}) — appending backup ${backupId} instead of swapping in place`);
+            team.picks.push(backupId);
           }
+          team.replacements = team.replacements || {};
+          team.replacements[originalId] = backupId;
+          // If the player being replaced was Captain or Vice-Captain,
+          // pass that designation to the backup stepping into their
+          // spot — otherwise the C/VC badge (and 2x/1.5x points
+          // multiplier) silently vanishes since it was keyed to a
+          // player ID that's no longer in `picks`.
+          if (team.captain === originalId) team.captain = backupId;
+          if (team.viceCaptain === originalId) team.viceCaptain = backupId;
+          usedBackupIds.add(backupId);
+          changed = true;
         }
+        return;
       }
+      // currentlyInXI && !alreadyReplaced: original pick is confirmed in
+      // the Playing XI and was never replaced — correct, steady state,
+      // nothing to do. Spelled out explicitly (rather than just falling
+      // through with no matching branch) so every combination of
+      // currentlyInXI/alreadyReplaced is visibly accounted for.
     });
 
     if (changed) {
