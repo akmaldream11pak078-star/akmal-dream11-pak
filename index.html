@@ -31686,15 +31686,21 @@ function renderAdminD11ParticipantsPanel(matchId) {
     // making ranks/prizes look scrambled even when the payout was correct.
     const team = d11GetTeamForContest(matchId, email, teamsMap);
     const prize = showPrize && (d11m[prizeField||'megaPrizes']?.[email]);
+    // Per explicit request: tapping a participant's name/team info in any
+    // admin contest-participants list opens their actual submitted team —
+    // same screen (openDream11ViewTeam) admin sees from "View Team"
+    // elsewhere — instead of only being able to remove them with no way to
+    // inspect what they actually picked.
+    const clickAttr = team ? `onclick="openDream11ViewTeam('${team.id}')" style="cursor:pointer"` : '';
     return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
       <div style="width:24px;height:24px;border-radius:50%;background:rgba(${color},0.2);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:rgb(${color});flex-shrink:0">${i+1}</div>
-      <div style="flex:1;min-width:0">
+      <div style="flex:1;min-width:0" ${clickAttr}>
         <div style="font-size:13px;font-weight:700">${u?.name||email}</div>
         <div style="font-size:10px;color:var(--dim)">${email}</div>
         ${team ? `<div style="font-size:10px;color:#4ade80">✅ Team ${team.teamSlot||1} · ${team.totalPoints||0} pts</div>` : `<div style="font-size:10px;color:#f87171">⚠️ No team</div>`}
       </div>
       ${prize ? `<div style="font-size:12px;font-weight:700;color:#4ade80">+Rs ${prize}</div>` : ''}
-      ${contestType ? `<button title="Remove & Refund" style="flex-shrink:0;width:auto;padding:5px 8px;font-size:10.5px;border:none;border-radius:7px;background:rgba(220,38,38,0.12);color:#f87171;font-weight:700;cursor:pointer" onclick="d11AdminRemoveParticipant('${matchId}','${contestType}','${email}')">✕ Remove</button>` : ''}
+      ${contestType ? `<button title="Remove & Refund" style="flex-shrink:0;width:auto;padding:5px 8px;font-size:10.5px;border:none;border-radius:7px;background:rgba(220,38,38,0.12);color:#f87171;font-weight:700;cursor:pointer" onclick="event.stopPropagation();d11AdminRemoveParticipant('${matchId}','${contestType}','${email}')">✕ Remove</button>` : ''}
     </div>`;
   }
 
@@ -31746,7 +31752,7 @@ function renderAdminD11ParticipantsPanel(matchId) {
         <span>🎁 Free Contest — Admin manually rewards winners</span>
         ${freeList.length>0?`<button style="flex-shrink:0;width:auto;padding:5px 10px;font-size:10.5px;border:none;border-radius:8px;background:linear-gradient(135deg,#25D366,#1ea952);color:#fff;font-weight:700;cursor:pointer" onclick="d11ShareContestResult('${matchId}','free',null,event)">📤 Image Result</button>`:''}
       </div>
-      ${freeList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Kisi ne join nahi kiya</div>`:freeList.map((e,i)=>userRow(e,i,'74,222,128',false,null,'free')).join('')}
+      ${freeList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Kisi ne join nahi kiya</div>`:freeList.map((e,i)=>userRow(e,i,'74,222,128',false,null,'free',d11m.freeParticipantsTeams)).join('')}
     `:tab==='h2h'?`
       ${h2hList.length===0?`<div style="font-size:12px;color:var(--dim);text-align:center;padding:10px">Koi H2H nahi</div>`:h2hList.map((c,i)=>`
         <div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
@@ -37645,7 +37651,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.64.0";
+const APP_VERSION = "4.65.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
