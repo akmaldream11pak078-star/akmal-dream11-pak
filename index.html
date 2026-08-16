@@ -8844,7 +8844,33 @@ function d11ApplyBackupReplacements(matchId) {
     const usedBackupIds = new Set(Object.values(team.replacements || {}));
     let changed = false;
 
-    team.originalPicks.forEach(originalId => {
+    // FIX: was `team.originalPicks.forEach(originalId => ...)` — originalPicks
+    // is a permanent, never-updated record of the user's FIRST-EVER
+    // submission (by design — see d11SubmitTeam's own comment on why it's
+    // only set once). If the user later edited their team and added a
+    // player who wasn't part of that first submission (e.g. swapped
+    // someone else out for Naseem Shah), that player's ID never appears in
+    // originalPicks — so this loop never even looked at them, and no
+    // backup could ever be swapped in for them if they missed the Playing
+    // XI, no matter how many valid backups were available. Iterating
+    // team.picks (the actual CURRENT squad, always up to date after every
+    // edit) instead means every player genuinely in the team gets checked,
+    // regardless of whether they were part of the original submission or
+    // added in a later edit. team.replacements is still keyed by
+    // whichever ID is being covered, matching the same shape as before.
+    // Union of current picks AND any already-replaced original IDs — a
+    // replaced original is no longer in team.picks (the backup took its
+    // slot), but still needs to be checked here so the revert-back
+    // (currentlyInXI && alreadyReplaced) and cascade-to-next-backup
+    // (!currentlyInXI && alreadyReplaced) branches below can still find it.
+    const idsToCheck = new Set([...team.picks, ...Object.keys(team.replacements || {})]);
+    idsToCheck.forEach(originalId => {
+      // Skip IDs that are themselves a backup currently standing in for
+      // someone else — e.g. once Hasan Ali has replaced Naseem Shah,
+      // Hasan Ali's ID is in team.picks too, but he's not "an original
+      // pick that might need covering himself", he's already the covering
+      // backup for the slot in question.
+      if (usedBackupIds.has(originalId)) return;
       const originalPlayer = (d11m.players||[]).find(x => x.id === originalId);
       if (!originalPlayer) return;
 
@@ -37665,7 +37691,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.65.0";
+const APP_VERSION = "4.66.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
