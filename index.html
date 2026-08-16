@@ -24797,11 +24797,25 @@ function d11GetUserTeam(matchId, email) {
 // made before per-contest team selection existed, so nothing that
 // already joined a contest breaks. ──
 function d11GetTeamForContest(matchId, email, contestTeamsMap) {
+  // FIX: was `contestTeamsMap[email]` first, falling back to Team 1 only if
+  // that lookup came up empty. Per explicit request — if the user only has
+  // ONE team for this match (the overwhelmingly common case: one team,
+  // joined into every contest), always show that CURRENT/LIVE team here,
+  // not whatever teamId happened to get snapshotted into this specific
+  // contest's teamsMap when they joined. A user who joined Free, then
+  // edited Team 1, then joined Mega could otherwise see the SAME team
+  // display differently between the two contests' leaderboards depending
+  // on which snapshot each one recorded — same team, same picks, same
+  // backups, yet Free showed a backup swap Mega didn't (or vice versa).
+  // The snapshot map is now only consulted when the user actually has 2+
+  // teams for this match, where it's the only way to know which specific
+  // team they entered into which contest.
+  const myTeams = d11GetUserTeams(matchId, email);
+  if (myTeams.length <= 1) {
+    return myTeams[0] || null;
+  }
   const teamId = contestTeamsMap && contestTeamsMap[email];
   if (teamId && dream11Teams[teamId]) return dream11Teams[teamId];
-  // Fallback: no team recorded for this contest (pre-multi-team entry) —
-  // use the user's Team 1, or whichever single team they have.
-  const myTeams = d11GetUserTeams(matchId, email);
   return myTeams.find(t => (t.teamSlot||1) === 1) || myTeams[0] || null;
 }
 
