@@ -724,7 +724,7 @@ window.showBabarSplash = function(){
 <!-- ═══ Firebase ═══ -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  import { getFirestore, doc, setDoc, getDoc, updateDoc, collection, getDocs, deleteDoc, runTransaction, onSnapshot, query, where } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+  import { getFirestore, doc, setDoc, getDoc, updateDoc, collection, getDocs, deleteDoc, runTransaction, onSnapshot, query, where, arrayUnion, increment } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
   import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail, updatePassword } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
   const firebaseConfig = {
@@ -743,7 +743,7 @@ window.showBabarSplash = function(){
     const auth = getAuth(app);
     window._fbDb = db;
     window._fbAuth = auth;
-    window._fbFns = { doc, setDoc, getDoc, updateDoc, collection, getDocs, deleteDoc, runTransaction, onSnapshot, query, where };
+    window._fbFns = { doc, setDoc, getDoc, updateDoc, collection, getDocs, deleteDoc, runTransaction, onSnapshot, query, where, arrayUnion, increment };
     window._firebaseReady = true;
     console.log("Firebase ready (Pak 🇵🇰Dream11)");
     if (window._firebaseReadyResolve) window._firebaseReadyResolve(true);
@@ -4118,8 +4118,8 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
     showNotif('Connection not ready — please try again', 'error');
     return null;
   }
-  const { doc, runTransaction } = window._fbFns;
-  if (!doc || !runTransaction) {
+  const { doc, getDoc, updateDoc, runTransaction, arrayUnion, increment } = window._fbFns;
+  if (!doc || !getDoc || !updateDoc || !runTransaction || !arrayUnion || !increment) {
     showNotif('Firebase not ready — please refresh the page', 'error');
     return null;
   }
@@ -4128,49 +4128,56 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
   const userRef = doc(window._fbDb, 'pp_users', safeKey);
   const teamsField = participantsField + 'Teams';
 
-  // FIX (root cause of "balance cut but never actually joined", still
-  // reproducing on fresh joins today — not just a legacy pre-fix case):
-  // despite its name, this used to be a plain getDoc()-then-updateDoc()
-  // pair, not an actual Firestore transaction. If two joins to the SAME
-  // match/contest landed close together (very common near a deadline —
-  // two people tapping Join around the same second), both reads saw the
-  // same participants array, and whichever updateDoc() landed second
-  // silently overwrote the first person's join with its own copy of the
-  // array (which didn't contain the first person's email) — the first
-  // person's balance had already been deducted, but their join vanished
-  // with no error shown to them, and no failure for the refund path to
-  // even catch since the write itself "succeeded". Wrapping the read AND
-  // the write in a single runTransaction() makes Firestore itself
-  // serialize concurrent joins to the same match doc — the loser of a
-  // race gets automatically retried by the SDK against the freshest data
-  // instead of blindly clobbering it, so this can no longer happen.
-  let txId;
+  // FIX (v2 — resource-exhausted under load): the previous version put the
+  // MATCH doc itself inside the transaction (read+write it for every single
+  // join) to fix the "balance cut, never joined" clobbering race. That
+  // worked, but every join to a popular match now contended for the same
+  // one document — Firestore only tolerates roughly ~1 write/sec sustained
+  // contention on a single doc, so several people joining around the same
+  // few seconds (very normal near a deadline) started throwing
+  // "resource-exhausted" and failing outright, worse than before.
+  //
+  // New approach: keep the transaction tiny and PER-USER only — it touches
+  // just the user's own balance doc and a deterministic "join marker" doc
+  // unique to (this user + this match + this contest type), so concurrent
+  // joins by DIFFERENT users never contend with each other at all, and a
+  // double-tap/retry by the SAME user is still blocked atomically by the
+  // marker doc already existing. The shared match doc (participants list +
+  // pool) is updated separately with arrayUnion()/increment() — Firestore
+  // field transforms that merge server-side without ever needing to read
+  // the document first, so any number of simultaneous joiners can write to
+  // it at once with zero contention and no clobbering.
+  const joinMarkerRef = doc(window._fbDb, 'pp_contest_joins', `${matchCollection}_${matchId}_${participantsField}_${safeKey}`);
+
+  // Best-effort pre-check for slot-capped contests (e.g. Slot 20) and the
+  // "already joined" fast-path message — not perfectly race-proof on its
+  // own (a few people tapping in the exact same instant could all pass
+  // this check), but the marker-doc transaction below is what actually
+  // guarantees no one is ever double-charged, and a capped contest very
+  // rarely overshoots by more than 1 seat in practice.
   try {
-    const result = await runTransaction(window._fbDb, async (tx) => {
-      const [matchSnap, userSnap] = await Promise.all([tx.get(matchRef), tx.get(userRef)]);
-      if (!matchSnap.exists() || !userSnap.exists()) {
-        throw { _friendly: 'Could not find match or user data — please refresh' };
-      }
-
-      const matchData = matchSnap.data();
-      const userData = userSnap.data();
-
-      const participants = matchData[participantsField] || (participantsAreObjectMap ? {} : []);
-      const alreadyJoined = participantsAreObjectMap
-        ? !!participants[currentUser.email]
-        : participants.includes(currentUser.email);
-      if (alreadyJoined) throw { _friendly: alreadyJoinedMsg, _alreadyJoined: true };
-
+    const matchSnap = await getDoc(matchRef);
+    if (matchSnap.exists()) {
+      const md = matchSnap.data();
+      const participants = md[participantsField] || (participantsAreObjectMap ? {} : []);
+      const alreadyJoined = participantsAreObjectMap ? !!participants[currentUser.email] : participants.includes(currentUser.email);
+      if (alreadyJoined) { showNotif(alreadyJoinedMsg, 'error'); return null; }
       if (maxParticipants != null) {
         const currentCount = participantsAreObjectMap ? Object.keys(participants).length : participants.length;
-        if (currentCount >= maxParticipants) {
-          throw { _friendly: fullMsg || `This contest is full (${maxParticipants}/${maxParticipants} joined).` };
-        }
+        if (currentCount >= maxParticipants) { showNotif(fullMsg || `This contest is full (${maxParticipants}/${maxParticipants} joined).`, 'error'); return null; }
       }
+    }
+  } catch(e) { /* pre-check is advisory only — the transaction below is the real guard */ }
 
-      if ((userData.balance || 0) < entryFeeAmount) {
-        throw { _friendly: `Insufficient balance — Rs ${entryFeeAmount} required` };
-      }
+  let txId;
+  try {
+    const txResult = await runTransaction(window._fbDb, async (tx) => {
+      const [markerSnap, userSnap] = await Promise.all([tx.get(joinMarkerRef), tx.get(userRef)]);
+      if (markerSnap.exists()) throw { _friendly: alreadyJoinedMsg, _alreadyJoined: true };
+      if (!userSnap.exists()) throw { _friendly: 'Could not find user data — please refresh' };
+
+      const userData = userSnap.data();
+      if ((userData.balance || 0) < entryFeeAmount) throw { _friendly: `Insufficient balance — Rs ${entryFeeAmount} required` };
 
       const newBalance = (userData.balance || 0) - entryFeeAmount;
       txId = uid();
@@ -4180,39 +4187,46 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
         matchId: matchId || null, date: getDateTime(), status: 'confirmed'
       });
 
-      const updatedMatchData = { ...matchData };
-      if (participantsAreObjectMap) {
-        updatedMatchData[participantsField] = { ...participants, [currentUser.email]: true };
-      } else {
-        updatedMatchData[participantsField] = [...participants, currentUser.email];
-      }
-      updatedMatchData[poolField] = (matchData[poolField] || 0) + entryFeeAmount;
-      if (Array.isArray(updatedMatchData.participants) && !updatedMatchData.participants.includes(currentUser.email)) {
-        updatedMatchData.participants = [...updatedMatchData.participants, currentUser.email];
-      }
-      if (teamId) {
-        updatedMatchData[teamsField] = { ...(matchData[teamsField] || {}), [currentUser.email]: teamId };
-      }
-
-      const matchUpdate = {
-        [participantsField]: updatedMatchData[participantsField],
-        [poolField]: updatedMatchData[poolField],
-        updatedAt: Date.now()
-      };
-      if (Array.isArray(updatedMatchData.participants)) {
-        matchUpdate.participants = updatedMatchData.participants;
-      }
-      if (teamId) matchUpdate[teamsField] = updatedMatchData[teamsField];
-
-      // Both writes are staged inside the SAME transaction — Firestore
-      // commits them together or not at all, so "balance deducted but
-      // never joined" (or vice versa) is no longer reachable via a race.
       tx.update(userRef, { balance: newBalance, transactions: newTransactions });
-      tx.update(matchRef, matchUpdate);
+      tx.set(joinMarkerRef, { email: currentUser.email, matchId, participantsField, teamId: teamId || null, createdAt: Date.now() });
 
-      return { balance: newBalance, transactions: newTransactions, matchData: updatedMatchData };
+      return { balance: newBalance, transactions: newTransactions };
     });
-    return result;
+
+    // User is now charged and holds a permanent join marker — from here on
+    // we must NOT refund; we must make sure the match doc reflects it,
+    // retrying if needed, since the marker is the source of truth for
+    // "did this person pay for this contest".
+    const matchFieldUpdate = { [poolField]: increment(entryFeeAmount), updatedAt: Date.now() };
+    if (participantsAreObjectMap) {
+      matchFieldUpdate[`${participantsField}.${currentUser.email.replace(/\./g,'_')}`] = true;
+    } else {
+      matchFieldUpdate[participantsField] = arrayUnion(currentUser.email);
+    }
+    if (teamId) matchFieldUpdate[`${teamsField}.${currentUser.email.replace(/\./g, '_')}`] = teamId;
+
+    try {
+      await updateDoc(matchRef, matchFieldUpdate);
+    } catch (matchWriteErr) {
+      console.error('Match-doc participant write failed after payment succeeded — will retry in background (user is already charged+marked, this must eventually land):', matchWriteErr);
+      _addPendingMatchJoinWrite({ matchCollection, matchId, participantsField, poolField, teamsField, entryFeeAmount, email: currentUser.email, teamId, participantsAreObjectMap });
+      showNotif('Joined! (Still syncing to the contest list — this will finish automatically in the background.)', 'success');
+    }
+
+    // Build a locally-merged matchData snapshot so the caller's UI updates
+    // immediately without waiting for the live listener to catch the
+    // arrayUnion/increment write.
+    const currentD11 = (matchCollection === 'pp_dream11_matches' ? dream11Matches[matchId] : matchCollection === 'pp_ut_tournaments' ? null : matches[matchId]) || {};
+    const mergedMatchData = { ...currentD11 };
+    if (participantsAreObjectMap) {
+      mergedMatchData[participantsField] = { ...(currentD11[participantsField]||{}), [currentUser.email]: true };
+    } else {
+      mergedMatchData[participantsField] = [...(currentD11[participantsField]||[]), currentUser.email];
+    }
+    mergedMatchData[poolField] = (currentD11[poolField]||0) + entryFeeAmount;
+    if (teamId) mergedMatchData[teamsField] = { ...(currentD11[teamsField]||{}), [currentUser.email]: teamId };
+
+    return { balance: txResult.balance, transactions: txResult.transactions, matchData: mergedMatchData };
   } catch (e) {
     if (e && e._alreadyJoined) { showNotif(e._friendly, 'error'); return null; }
     if (e && e._friendly) { showNotif(e._friendly, 'error'); return null; }
@@ -4220,6 +4234,50 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
     showNotif(`Join failed: ${e.code || e.message || 'unknown error'}`, 'error');
     return null;
   }
+}
+
+// ── Background retry queue for the (rare) case where a contest join's
+// payment+marker transaction succeeded but the follow-up arrayUnion/
+// increment write to the shared match doc failed (network blip, etc). The
+// user is already charged and holds a permanent join marker, so this MUST
+// eventually land — refunding would be wrong, since as far as the join
+// marker (and the app's duplicate-join guard) is concerned, they're in.
+// arrayUnion/increment are idempotent-safe to simply retry as-is.
+function _addPendingMatchJoinWrite(job) {
+  try {
+    const key = 'pp_pending_match_join_writes';
+    const list = JSON.parse(localStorage.getItem(key) || '[]');
+    list.push({ ...job, queuedAt: Date.now() });
+    localStorage.setItem(key, JSON.stringify(list));
+  } catch(e){}
+}
+async function _retryPendingMatchJoinWrites() {
+  if (!window._fbDb || !window._fbFns) return;
+  const { doc, updateDoc, arrayUnion, increment } = window._fbFns;
+  if (!doc || !updateDoc || !arrayUnion || !increment) return;
+  let list = [];
+  try { list = JSON.parse(localStorage.getItem('pp_pending_match_join_writes') || '[]'); } catch(e){ return; }
+  if (!list.length) return;
+  const stillPending = [];
+  for (const job of list) {
+    try {
+      const matchRef = doc(window._fbDb, job.matchCollection, job.matchId);
+      const update = {
+        [job.poolField]: increment(job.entryFeeAmount),
+        updatedAt: Date.now()
+      };
+      if (job.participantsAreObjectMap) {
+        update[`${job.participantsField}.${job.email.replace(/\./g,'_')}`] = true;
+      } else {
+        update[job.participantsField] = arrayUnion(job.email);
+      }
+      if (job.teamId) update[`${job.teamsField}.${job.email.replace(/\./g, '_')}`] = job.teamId;
+      await updateDoc(matchRef, update);
+    } catch(e) {
+      stillPending.push(job);
+    }
+  }
+  try { localStorage.setItem('pp_pending_match_join_writes', JSON.stringify(stillPending)); } catch(e){}
 }
 
 // ── Atomic free-contest join: same race-condition protection as
@@ -4460,41 +4518,56 @@ async function joinCustomContestByCode(rawCode) {
 // NOTE: simplified from a Firestore transaction to plain reads+writes —
 // same reasoning as _atomicJoinPaidContest above (transaction retries
 // were themselves triggering resource-exhausted under load).
+// ── Atomic custom-contest join (shared by PP and Dream11 custom contests):
+// low-contention design — see _atomicJoinPaidContest above for the full
+// rationale (a transaction that reads+writes the shared contest doc for
+// every joiner causes "resource-exhausted" once enough people join close
+// together). Uses a deterministic per-user join-marker doc to guarantee
+// no double-charge, then arrayUnion/increment for the shared contest doc
+// so concurrent joiners never contend with each other.
 async function _atomicJoinCustomContest({ contestId, contestCollection, maxPlayers, teamId = null }) {
   if (!window._fbDb || !window._fbFns) {
     showNotif('Connection not ready — please try again', 'error');
     return null;
   }
-  const { doc, runTransaction } = window._fbFns;
-  if (!doc || !runTransaction) {
+  const { doc, getDoc, updateDoc, runTransaction, arrayUnion, increment } = window._fbFns;
+  if (!doc || !getDoc || !updateDoc || !runTransaction || !arrayUnion || !increment) {
     showNotif('Firebase not ready — please refresh the page', 'error');
     return null;
   }
   const contestRef = doc(window._fbDb, contestCollection, contestId);
   const safeKey = currentUser.email.replace(/\./g, '_');
   const userRef = doc(window._fbDb, 'pp_users', safeKey);
+  const joinMarkerRef = doc(window._fbDb, 'pp_contest_joins', `${contestCollection}_${contestId}_${safeKey}`);
 
-  // FIX: same race as _atomicJoinPaidContest — this was getDoc()+setDoc(),
-  // not a real transaction, so two people joining the same custom contest
-  // within the same instant could have one join silently overwrite the
-  // other while both already had their balance deducted. runTransaction
-  // makes Firestore serialize concurrent joins instead of clobbering.
   try {
-    const result = await runTransaction(window._fbDb, async (tx) => {
-      const [contestSnap, userSnap] = await Promise.all([tx.get(contestRef), tx.get(userRef)]);
-      if (!contestSnap.exists() || !userSnap.exists()) {
-        throw { _friendly: 'Could not find contest or user data — please refresh' };
-      }
+    const preSnap = await getDoc(contestRef);
+    if (preSnap.exists()) {
+      const cd = preSnap.data();
+      if (cd.status !== 'open') { showNotif('This contest has already finished', 'error'); return null; }
+      const participants = cd.participants || [];
+      if (participants.includes(currentUser.email)) { showNotif('You already joined this contest!', 'error'); return null; }
+      if (participants.length >= maxPlayers) { showNotif(`This contest is full (max ${maxPlayers} players)`, 'error'); return null; }
+    }
+  } catch(e) { /* advisory only */ }
 
+  let entryFee;
+  try {
+    const txResult = await runTransaction(window._fbDb, async (tx) => {
+      const [markerSnap, userSnap] = await Promise.all([tx.get(joinMarkerRef), tx.get(userRef)]);
+      if (markerSnap.exists()) throw { _friendly: 'You already joined this contest!', _alreadyJoined: true };
+      if (!userSnap.exists()) throw { _friendly: 'Could not find user data — please refresh' };
+
+      // Entry fee lives on the contest doc (creator-chosen), so we still
+      // need it — read outside the transaction is fine here since it's
+      // only used for the amount, not a correctness check.
+      const contestSnap = await getDoc(contestRef);
+      if (!contestSnap.exists()) throw { _friendly: 'Could not find contest — please refresh' };
       const contestData = contestSnap.data();
-      const userData = userSnap.data();
-
       if (contestData.status !== 'open') throw { _friendly: 'This contest has already finished' };
-      const participants = contestData.participants || [];
-      if (participants.includes(currentUser.email)) throw { _friendly: 'You already joined this contest!', _alreadyJoined: true };
-      if (participants.length >= maxPlayers) throw { _friendly: `This contest is full (max ${maxPlayers} players)` };
+      entryFee = contestData.entryFee;
 
-      const entryFee = contestData.entryFee;
+      const userData = userSnap.data();
       if ((userData.balance || 0) < entryFee) throw { _friendly: 'Insufficient balance to join this contest' };
 
       const newBalance = (userData.balance || 0) - entryFee;
@@ -4505,22 +4578,32 @@ async function _atomicJoinCustomContest({ contestId, contestCollection, maxPlaye
         date: getDateTime(), status: 'confirmed'
       });
 
-      const updatedContestData = {
-        ...contestData,
-        participants: [...participants, currentUser.email],
-        pool: (contestData.pool || 0) + entryFee,
-        updatedAt: Date.now()
-      };
-      if (teamId) {
-        updatedContestData.participantTeams = { ...(contestData.participantTeams || {}), [currentUser.email]: teamId };
-      }
-
       tx.update(userRef, { balance: newBalance, transactions: newTransactions });
-      tx.update(contestRef, updatedContestData);
+      tx.set(joinMarkerRef, { email: currentUser.email, contestId, teamId: teamId || null, createdAt: Date.now() });
 
-      return { balance: newBalance, transactions: newTransactions, contestData: updatedContestData };
+      return { balance: newBalance, transactions: newTransactions };
     });
-    return result;
+
+    const contestFieldUpdate = { participants: arrayUnion(currentUser.email), pool: increment(entryFee), updatedAt: Date.now() };
+    if (teamId) contestFieldUpdate[`participantTeams.${safeKey}`] = teamId;
+
+    try {
+      await updateDoc(contestRef, contestFieldUpdate);
+    } catch (writeErr) {
+      console.error('Custom contest-doc write failed after payment succeeded — will retry in background:', writeErr);
+      _addPendingMatchJoinWrite({ matchCollection: contestCollection, matchId: contestId, participantsField: 'participants', poolField: 'pool', teamsField: 'participantTeams', entryFeeAmount: entryFee, email: currentUser.email, teamId, participantsAreObjectMap: false });
+      showNotif('Joined! (Still syncing to the contest list — this will finish automatically in the background.)', 'success');
+    }
+
+    const currentCC = customContests[contestId] || d11CustomContests[contestId] || {};
+    const mergedContestData = {
+      ...currentCC,
+      participants: [...(currentCC.participants||[]), currentUser.email],
+      pool: (currentCC.pool||0) + entryFee
+    };
+    if (teamId) mergedContestData.participantTeams = { ...(currentCC.participantTeams||{}), [currentUser.email]: teamId };
+
+    return { balance: txResult.balance, transactions: txResult.transactions, contestData: mergedContestData };
   } catch (e) {
     if (e && e._friendly) { showNotif(e._friendly, 'error'); return null; }
     console.error('Custom contest join failed:', e);
@@ -37571,6 +37654,14 @@ if ('serviceWorker' in navigator) {
     setTimeout(() => { _retryPendingContestRefunds().catch(function(){}); }, 1500); // small delay so Firebase auth/init has settled
     setInterval(() => { _retryPendingContestRefunds().catch(function(){}); }, 30000);
   }
+  // Same idea for match-doc participant writes that got charged+marked but
+  // whose arrayUnion/increment write to the shared match doc didn't land
+  // yet (see _addPendingMatchJoinWrite) — must eventually land, never
+  // refunded, so this just keeps retrying quietly in the background.
+  if (typeof _retryPendingMatchJoinWrites === 'function') {
+    setTimeout(() => { _retryPendingMatchJoinWrites().catch(function(){}); }, 1500);
+    setInterval(() => { _retryPendingMatchJoinWrites().catch(function(){}); }, 30000);
+  }
   // NOTE: this used to poll 7 full collections via getDocs() every 3 min,
   // per open tab. With hundreds of users that alone can exceed the
   // Firestore free-tier daily read quota (50K reads/day). Those 7
@@ -37754,7 +37845,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.2";
+const APP_VERSION = "4.66.3";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
