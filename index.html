@@ -4050,6 +4050,18 @@ function _removePendingRefund(id) {
     deleteDoc(doc(window._fbDb, 'pp_pending_refunds', id)).catch(() => {});
   }
 }
+// Used by the preemptive marker (written before a join attempt starts) to
+// clean itself up once the join actually succeeds — looked up by txId since
+// the caller at that point doesn't have the marker's own generated id handy.
+function _removePendingRefundByTxId(txId) {
+  const list = _loadPendingRefunds();
+  const match = list.find(r => r.txId === txId);
+  _savePendingRefunds(list.filter(r => r.txId !== txId));
+  if (match && window._fbDb && window._fbFns) {
+    const { doc, deleteDoc } = window._fbFns;
+    deleteDoc(doc(window._fbDb, 'pp_pending_refunds', match.id)).catch(() => {});
+  }
+}
 
 // Attempts one refund (balance += amount, remove the failed-join
 // transaction record if still present). Returns true on success.
@@ -4089,6 +4101,35 @@ async function _retryPendingContestRefunds() {
   const pending = _loadPendingRefunds();
   if (pending.length === 0) return;
   for (const refund of pending) {
+    // Markers written preemptively (before the join attempt) need one extra
+    // check here: has the join actually gone through since then? If yes,
+    // this is a stale marker from a join that actually succeeded (e.g. the
+    // match-write succeeded but the app died before we reached
+    // _removePendingRefundByTxId) — refunding it would wrongly give the
+    // user their money back for a contest they're really in. Skip refund
+    // and just clean up the marker in that case.
+    if (refund._preemptive && refund.matchId && window._fbDb && window._fbFns) {
+      try {
+        const { doc, getDoc } = window._fbFns;
+        const mColl = (refund.contestType||'').startsWith('d11_') ? 'pp_dream11_matches' : 'pp_matches';
+        const mSnap = await getDoc(doc(window._fbDb, mColl, refund.matchId));
+        if (mSnap.exists()) {
+          const md = mSnap.data();
+          const txns = users[currentUser.email]?.transactions || [];
+          const stillHasTx = txns.some(t => t.id === refund.txId);
+          const joinedFields = Object.keys(md).filter(k => /Participants$/i.test(k));
+          const isJoined = joinedFields.some(f => {
+            const p = md[f];
+            return Array.isArray(p) ? p.includes(currentUser.email) : (p && p[currentUser.email]);
+          });
+          if (isJoined && stillHasTx) {
+            // Join succeeded, transaction record is legitimate — nothing to refund.
+            _removePendingRefund(refund.id);
+            continue;
+          }
+        }
+      } catch (e) { /* can't verify right now — fall through and try refund path below */ }
+    }
     const ok = await _attemptRefund(refund.amount, refund.txId).catch(() => false);
     if (ok) {
       _removePendingRefund(refund.id);
@@ -4186,8 +4227,26 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
     }
     if (teamId) matchUpdate[teamsField] = updatedMatchData[teamsField];
 
-    // Balance deducted first. If the match-doc write below fails, we MUST
-    // end up in one of two states — refunded, or joined — never neither.
+    // FIX: pending-refund marker is now written BEFORE the balance is even
+    // deducted — not inside the match-write's catch block. Root cause of
+    // the "charged but not joined, and no auto-refund happened" bug: the
+    // old code only recorded a pending refund INSIDE `catch(matchWriteErr)`,
+    // which only runs if updateDoc() actually throws. In real mobile usage
+    // the far more common failure is the app getting backgrounded/killed or
+    // losing network mid-`await` — execution just stops, nothing throws, so
+    // that catch block (and therefore _addPendingRefund) never ran at all.
+    // Balance was deducted, match was never joined, and NOTHING was ever
+    // persisted to self-heal it — the user only got fixed because an admin
+    // happened to run the manual "Find & Fix Orphaned Contest Entries" scan.
+    // Now: write the pending-refund record FIRST (marked as unconfirmed —
+    // it's a "might need this" marker, not a committed refund yet), then
+    // deduct balance, then join. If everything succeeds we delete the
+    // marker at the end. If execution dies anywhere in between, the marker
+    // is already sitting in Firestore (pp_pending_refunds) and localStorage,
+    // and _retryPendingContestRefunds() picks it up automatically next time
+    // the app opens — no admin intervention needed.
+    _addPendingRefund({ amount: entryFeeAmount, txId, matchId, contestType: txType, _preemptive: true });
+
     await updateDoc(userRef, { balance: newBalance, transactions: newTransactions });
     try {
       await updateDoc(matchRef, matchUpdate);
@@ -4198,14 +4257,17 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
         showNotif('Join failed — your balance was refunded automatically. Please try again.', 'error');
       } else {
         // Immediate refund attempt also failed (same bad connection,
-        // most likely). Persist it so it keeps retrying in the
-        // background — see _retryPendingContestRefunds — instead of
-        // silently leaving the user charged with nothing to show for it.
-        _addPendingRefund({ amount: entryFeeAmount, txId });
+        // most likely). The pre-written marker above already covers this —
+        // background retry loop will keep trying until it succeeds.
         showNotif('Join failed. Your refund is being processed automatically and will complete shortly — no action needed.', 'error');
       }
       return null;
     }
+
+    // Join fully succeeded — the pre-written pending-refund marker is now
+    // stale (user IS correctly joined, nothing to refund). Remove it so the
+    // background retry loop doesn't later try to refund a successful join.
+    _removePendingRefundByTxId(txId);
 
     return { balance: newBalance, transactions: newTransactions, matchData: updatedMatchData };
   } catch (e) {
@@ -33901,7 +33963,7 @@ function findOrphanedContestEntries() {
       if (!isMember) {
         orphans.push({
           email, txId: tx.id, matchId: tx.matchId, amount: tx.amount || 0,
-          label: rule.label, date: tx.date,
+          label: rule.label, date: tx.date, txType: tx.type,
           matchLabel: matches[tx.matchId] ? `${matches[tx.matchId].teamA||'?'} vs ${matches[tx.matchId].teamB||'?'}` : '(match no longer exists)'
         });
       }
@@ -33923,6 +33985,74 @@ async function fixOrphanedContestEntry(email, txId, amount, label) {
   await _saveUserToFirestore(email, u);
   showNotif(`✅ Refunded Rs ${amount} to ${u.name}`);
   render();
+}
+// ── Alternative fix for an orphaned entry: instead of refunding the money,
+// actually complete the join the user already paid for — add them to the
+// contest's participants list (and, for Dream11 contests, record which of
+// their submitted teams goes with it) using their EXISTING charge
+// transaction. No new balance deduction happens here — they already paid
+// when the original charge went through; this just finishes what should
+// have completed automatically at the time. ──
+async function fixOrphanedContestEntryByJoining(email, txId, matchId, txType) {
+  const u = users[email];
+  if (!u) { showNotif('User not found', 'error'); return; }
+  const rule = ORPHAN_CHECK_TX_TYPES[txType];
+  if (!rule) { showNotif('Unknown contest type for this entry', 'error'); return; }
+
+  const isD11 = rule.collection === 'dream11Matches';
+  const store = isD11 ? dream11Matches : matches;
+  const record = store[matchId];
+  if (!record) { showNotif('Match no longer exists — use Refund instead', 'error'); return; }
+
+  let teamId = null;
+  if (isD11) {
+    const team = d11GetUserTeam(matchId, email);
+    if (!team) {
+      showNotif(`${u.name} has no submitted Dream11 team for this match — can't join them in. Use Refund instead.`, 'error');
+      return;
+    }
+    teamId = team.id;
+  }
+
+  if (!confirm(`Add ${u.name} into this ${rule.label} now (using their existing charge — no new deduction)?`)) return;
+
+  try {
+    const { doc, getDoc, updateDoc } = window._fbFns;
+    const matchRef = doc(window._fbDb, isD11 ? 'pp_dream11_matches' : 'pp_matches', matchId);
+    const matchSnap = await getDoc(matchRef);
+    if (!matchSnap.exists()) { showNotif('Match no longer exists in Firestore — use Refund instead', 'error'); return; }
+    const matchData = matchSnap.data();
+    const participants = matchData[rule.participantsField] || [];
+    if (Array.isArray(participants) ? participants.includes(email) : !!participants[email]) {
+      showNotif(`${u.name} is already in this contest — nothing to fix.`, 'info');
+      render();
+      return;
+    }
+    const update = {
+      [rule.participantsField]: Array.isArray(participants) ? [...participants, email] : { ...participants, [email]: true },
+      updatedAt: Date.now()
+    };
+    // Only bump the pool if this contest tracks one — mega/miniMega do via
+    // a *Pool field matching the participants field's prefix.
+    const poolField = rule.participantsField.replace(/Participants$/, 'Pool');
+    if (typeof matchData[poolField] === 'number') {
+      update[poolField] = matchData[poolField] + 0; // pool already counted this fee at original charge time — do NOT add again
+    }
+    if (teamId) {
+      const teamsField = rule.participantsField + 'Teams';
+      update[teamsField] = { ...(matchData[teamsField] || {}), [email]: teamId };
+    }
+    await updateDoc(matchRef, update);
+    store[matchId] = { ...record, ...update };
+    try {
+      localStorage.setItem(isD11 ? 'pp_dream11_matches_cache' : 'pp_matches_cache', JSON.stringify(store));
+    } catch(e){}
+    showNotif(`✅ ${u.name} has been added to the ${rule.label} — no refund needed.`);
+    render();
+  } catch (e) {
+    console.error('Join-fix failed:', e);
+    showNotif(`Failed to join ${u.name} in: ${e.code || e.message || 'unknown error'}`, 'error');
+  }
 }
 async function fixAllOrphanedContestEntries() {
   const orphans = findOrphanedContestEntries();
@@ -33950,16 +34080,19 @@ function renderAdminOrphanTool() {
       <div style="font-weight:700;font-size:13px">🔎 Orphaned Contest Entries</div>
       <button class="btn-secondary" style="width:auto;padding:5px 10px;font-size:10.5px" onclick="adminShowOrphanTool=false;render()">✕ Close</button>
     </div>
-    <div style="font-size:11px;color:var(--dim);margin-bottom:10px">Entries where money was charged for a contest but the person never actually got added to it (a bug that's now fixed for new joins — this only catches cases from before the fix).</div>
+    <div style="font-size:11px;color:var(--dim);margin-bottom:10px">Entries where money was charged for a contest but the person never actually got added to it (a bug that's now fixed for new joins — this only catches cases from before the fix). Use ✅ Join to actually add them to the contest using their existing charge (no new deduction), or Refund to give the money back instead.</div>
     ${orphans.length === 0 ? `<div class="empty-state" style="padding:16px">✅ None found — everything checks out.</div>` : `
     <button class="btn-primary btn-block mb10" style="background:linear-gradient(135deg,#dc2626,#b91c1c)" onclick="fixAllOrphanedContestEntries()">💸 Refund All ${orphans.length} (Rs ${orphans.reduce((s,o)=>s+o.amount,0)})</button>
     ${orphans.map(o => `
-      <div style="display:flex;justify-content:space-between;align-items:center;background:var(--input-bg);border-radius:8px;padding:8px 10px;margin-bottom:6px">
-        <div style="font-size:11px">
+      <div style="display:flex;justify-content:space-between;align-items:center;background:var(--input-bg);border-radius:8px;padding:8px 10px;margin-bottom:6px;gap:8px">
+        <div style="font-size:11px;flex:1;min-width:0">
           <div style="font-weight:700">${users[o.email]?.name || o.email}</div>
           <div style="color:var(--dim);font-size:10px">${o.label} · ${o.matchLabel} · ${o.date||''}</div>
         </div>
-        <button class="btn-secondary" style="width:auto;padding:6px 10px;font-size:10.5px;color:#f87171;border-color:rgba(248,113,113,0.3)" onclick="fixOrphanedContestEntry('${o.email}','${o.txId}',${o.amount},'${o.label}')">Refund Rs ${o.amount}</button>
+        <div style="display:flex;gap:6px;flex-shrink:0">
+          <button class="btn-secondary" style="width:auto;padding:6px 8px;font-size:10.5px;color:#4ade80;border-color:rgba(74,222,128,0.35)" onclick="fixOrphanedContestEntryByJoining('${o.email}','${o.txId}','${o.matchId}','${o.txType}')">✅ Join</button>
+          <button class="btn-secondary" style="width:auto;padding:6px 8px;font-size:10.5px;color:#f87171;border-color:rgba(248,113,113,0.3)" onclick="fixOrphanedContestEntry('${o.email}','${o.txId}',${o.amount},'${o.label}')">Refund Rs ${o.amount}</button>
+        </div>
       </div>
     `).join('')}
     `}
@@ -37287,8 +37420,22 @@ async function initApp() {
   try {
     const _cachedMatches = localStorage.getItem('pp_matches_cache');
     const _cachedD11Matches = localStorage.getItem('pp_dream11_matches_cache');
+    // FIX: dream11Teams (used for the admin panel's per-match "X teams"
+    // count) was NEVER restored from cache here — only pp_matches_cache and
+    // pp_dream11_matches_cache were. dream11Teams stayed an empty {} object
+    // from app boot until the real Firestore round-trip in
+    // _loadAllDream11TeamsFromFirestore() finished, which is why the panel
+    // always showed "0 teams" / "1 team" for a few seconds (or longer on a
+    // slow connection) on every fresh app open, even though the cache file
+    // (pp_dream11_teams_cache) was being written correctly all along — it
+    // just was never being read back. Restoring it here means the panel
+    // paints the last-known-good team counts instantly, same as matches
+    // already did, and the live sync below still silently repaints with
+    // fresh counts the moment the real read lands.
+    const _cachedD11Teams = localStorage.getItem('pp_dream11_teams_cache');
     if (_cachedMatches) matches = JSON.parse(_cachedMatches);
     if (_cachedD11Matches) dream11Matches = JSON.parse(_cachedD11Matches);
+    if (_cachedD11Teams) dream11Teams = JSON.parse(_cachedD11Teams);
     window._homeDataSyncDone = !!(_cachedMatches || _cachedD11Matches);
   } catch(e) {
     window._homeDataSyncDone = false;
@@ -37750,7 +37897,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.1";
+const APP_VERSION = "4.66.4";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
