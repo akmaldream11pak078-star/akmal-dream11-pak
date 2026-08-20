@@ -10289,13 +10289,71 @@ function d11ToggleDupPick(playerId) {
   if (i === -1) d11DupCleanupSelected.push(playerId); else d11DupCleanupSelected.splice(i, 1);
   render();
 }
-function d11ConfirmDupCleanup() {
+async function d11ConfirmDupCleanup() {
   const d11m = dream11Matches[d11DupCleanupMatchId];
   if (!d11m || d11DupCleanupSelected.length === 0) { d11CloseDupCleanup(); return; }
   const removedCount = d11DupCleanupSelected.length;
+
+  // FIX: this used to just delete the selected duplicate player rows from
+  // the pool and stop there. But by the time an admin runs this cleanup,
+  // real users may have already submitted teams that picked the removed
+  // copy specifically (e.g. one user picked "Joe Root", another picked
+  // "Joe Root (C)" — two different player IDs pointing at the same real
+  // person). Deleting the duplicate's ID with no further action leaves
+  // every team that picked it holding a dangling reference to a player
+  // that no longer exists in the pool — that pick silently drops out of
+  // scoring (0 points forever), exactly what was reported: one user's
+  // team scores normally, the other user's team (which picked the
+  // now-deleted duplicate) never gets any points for that player again.
+  // Fix: for every removed duplicate ID, find which ID is being KEPT in
+  // its group, then rewrite every submitted team's picks/backups/
+  // originalPicks/captain/viceCaptain/replacements so any reference to the
+  // removed ID now points at the kept ID instead. This preserves every
+  // user's actual selection — same real player, same points — while still
+  // removing the duplicate pool entry as intended.
+  const idRemap = {}; // removedPlayerId -> keptPlayerId
+  d11DupCleanupGroups.forEach(group => {
+    const removedInGroup = group.filter(p => d11DupCleanupSelected.includes(p.id));
+    const kept = group.find(p => !d11DupCleanupSelected.includes(p.id));
+    if (!kept) return; // shouldn't happen (UI prevents removing every copy), but guard anyway
+    removedInGroup.forEach(p => { idRemap[p.id] = kept.id; });
+  });
+
   d11m.players = d11m.players.filter(p => !d11DupCleanupSelected.includes(p.id));
-  _saveDream11MatchToFirestore(d11DupCleanupMatchId, d11m);
-  showNotif(`🧹 Removed ${removedCount} duplicate entr${removedCount===1?'y':'ies'} from the pool.`);
+  await _saveDream11MatchToFirestore(d11DupCleanupMatchId, d11m);
+
+  let teamsFixed = 0;
+  const affectedTeams = Object.values(dream11Teams).filter(t => t.matchId === d11DupCleanupMatchId);
+  for (const team of affectedTeams) {
+    let changed = false;
+    const remapArray = (arr) => {
+      if (!Array.isArray(arr)) return arr;
+      const mapped = arr.map(pid => idRemap[pid] || pid);
+      if (JSON.stringify(mapped) !== JSON.stringify(arr)) changed = true;
+      return mapped;
+    };
+    team.picks = remapArray(team.picks);
+    team.originalPicks = remapArray(team.originalPicks);
+    team.backups = remapArray(team.backups);
+    if (team.captain && idRemap[team.captain]) { team.captain = idRemap[team.captain]; changed = true; }
+    if (team.viceCaptain && idRemap[team.viceCaptain]) { team.viceCaptain = idRemap[team.viceCaptain]; changed = true; }
+    if (team.replacements && typeof team.replacements === 'object') {
+      const newReplacements = {};
+      Object.entries(team.replacements).forEach(([origId, backupId]) => {
+        const newOrig = idRemap[origId] || origId;
+        const newBackup = idRemap[backupId] || backupId;
+        newReplacements[newOrig] = newBackup;
+        if (newOrig !== origId || newBackup !== backupId) changed = true;
+      });
+      team.replacements = newReplacements;
+    }
+    if (changed) {
+      teamsFixed++;
+      try { await _saveDream11TeamToFirestore(team.id, team); } catch (e) { console.error('Failed to remap team after dup cleanup:', team.id, e); }
+    }
+  }
+
+  showNotif(`🧹 Removed ${removedCount} duplicate entr${removedCount===1?'y':'ies'} from the pool` + (teamsFixed > 0 ? `, and fixed ${teamsFixed} submitted team${teamsFixed===1?'':'s'} that had picked a removed duplicate — their points are preserved.` : '.'));
   d11CloseDupCleanup();
 }
 function renderD11DupCleanupModal() {
@@ -10662,15 +10720,22 @@ function d11ParseSquadText(text, teamAName, teamBName) {
   return parsed;
 }
 // Loosely normalizes a player name for fuzzy duplicate-matching: lowercases,
-// strips punctuation/diacritics-ish noise, collapses whitespace. Used only as
+// strips punctuation/diacritics-ish noise, collapses whitespace. Used as
 // a fallback when an exact (case-insensitive) name match fails, so pastes
 // with slightly different spacing/punctuation ("Mohammad Rizwan" vs
 // "Mohammad  Rizwan.") don't create duplicate player rows in the pool.
+// FIX: previously stripped only punctuation characters, which turns
+// "Joe Root (C)" into "joe root c" — NOT the same string as "joe root", so
+// this fallback never actually caught the very common Advance Live Line
+// duplicate case (captain's squad entry has "(C)" baked into the name).
+// Now strips the captain/VC/WK marker as a whole word first, same as
+// d11NormalizePlayerName, before the generic punctuation strip.
 function _d11NormalizeNameForMatch(name) {
   return (name || '')
     .toLowerCase()
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // strip accents
-    .replace(/[^a-z0-9\s]/g, '') // strip punctuation
+    .replace(/\(\s*(?:c|vc|wk)\s*\)/gi, '') // drop "(c)"/"(vc)"/"(wk)" as a whole marker, not just the parens
+    .replace(/[^a-z0-9\s]/g, '') // strip remaining punctuation
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -14156,19 +14221,19 @@ async function d11FetchSquadFromSbx(matchId) {
     d11SyncTeamFlag(m.teamA, match.teams?.team1?.logo);
     d11SyncTeamFlag(m.teamB, match.teams?.team2?.logo);
 
-    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    const existingNamesLower = new Set((d11m.players || []).map(p => d11NormalizePlayerName(p.name)));
     let addedCount = 0;
     const addSide = (list, side, isXI) => {
       list.forEach(p => {
-        const name = (p.name || '').trim();
-        if (!name || existingNamesLower.has(name.toLowerCase())) return;
+        const name = d11StripCaptainMarkerFromName((p.name || '').trim());
+        if (!name || existingNamesLower.has(d11NormalizePlayerName(name))) return;
         const role = _d11MapSbxRole(p.role, p.isWicketKeeper);
         const photo = (p.logo || '').trim() || null;
         const player = newDream11Player(name, role, side, { photo });
         if (isXI && xiIsGenuinelyAnnounced) player.isPlayingXI = true;
         d11m.players.push(player);
         d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
-        existingNamesLower.add(name.toLowerCase());
+        existingNamesLower.add(d11NormalizePlayerName(name));
         addedCount++;
       });
     };
@@ -15026,7 +15091,7 @@ async function d11FetchSquadFromAll(matchId) {
     // grounds we deliberately don't do it: this squad import comes in
     // without photos, matching how a fresh manually-typed squad looks.
 
-    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    const existingNamesLower = new Set((d11m.players || []).map(p => d11NormalizePlayerName(p.name)));
     let addedCount = 0;
     let backfilledCount = 0;
     // BUGFIX: matches linked/squad-fetched before this fix has players
@@ -15038,9 +15103,9 @@ async function d11FetchSquadFromAll(matchId) {
     const backfillPid = (squadObj) => {
       if (!squadObj) return;
       (squadObj.players || []).forEach(p => {
-        const name = (p.title || p.short_name || '').trim();
+        const name = d11StripCaptainMarkerFromName((p.title || p.short_name || '').trim());
         if (!name || !p.player_id) return;
-        const existing = (d11m.players || []).find(dp => dp.name.toLowerCase().trim() === name.toLowerCase());
+        const existing = (d11m.players || []).find(dp => d11NormalizePlayerName(dp.name) === d11NormalizePlayerName(name));
         if (existing && !existing.allPid) { existing.allPid = p.player_id; backfilledCount++; }
       });
     };
@@ -15049,8 +15114,8 @@ async function d11FetchSquadFromAll(matchId) {
     const addSide = (squadObj, side) => {
       if (!squadObj) return;
       (squadObj.players || []).forEach(p => {
-        const name = (p.title || p.short_name || '').trim();
-        if (!name || existingNamesLower.has(name.toLowerCase())) return;
+        const name = d11StripCaptainMarkerFromName((p.title || p.short_name || '').trim());
+        if (!name || existingNamesLower.has(d11NormalizePlayerName(name))) return;
         const roleText = p.playing_role || p.fielding_position || '';
         const isKeeper = /keeper|wk/i.test(roleText);
         const role = _d11MapCricbuzzRole(roleText, isKeeper);
@@ -15059,7 +15124,7 @@ async function d11FetchSquadFromAll(matchId) {
         const player = newDream11Player(name, role, side, { photo, allPid: p.player_id || null });
         d11m.players.push(player);
         d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
-        existingNamesLower.add(name.toLowerCase());
+        existingNamesLower.add(d11NormalizePlayerName(name));
         addedCount++;
       });
     };
@@ -16044,7 +16109,7 @@ async function d11FetchSquadFromAll2(matchId) {
     // grounds we deliberately don't do it: this squad import comes in
     // without photos, matching how a fresh manually-typed squad looks.
 
-    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    const existingNamesLower = new Set((d11m.players || []).map(p => d11NormalizePlayerName(p.name)));
     let addedCount = 0;
     let backfilledCount = 0;
     // BUGFIX: matches linked/squad-fetched before this fix has players
@@ -16056,9 +16121,9 @@ async function d11FetchSquadFromAll2(matchId) {
     const backfillPid = (squadObj) => {
       if (!squadObj) return;
       (squadObj.players || []).forEach(p => {
-        const name = (p.title || p.short_name || '').trim();
+        const name = d11StripCaptainMarkerFromName((p.title || p.short_name || '').trim());
         if (!name || !p.player_id) return;
-        const existing = (d11m.players || []).find(dp => dp.name.toLowerCase().trim() === name.toLowerCase());
+        const existing = (d11m.players || []).find(dp => d11NormalizePlayerName(dp.name) === d11NormalizePlayerName(name));
         if (existing && !existing.all2Pid) { existing.all2Pid = p.player_id; backfilledCount++; }
       });
     };
@@ -16067,8 +16132,8 @@ async function d11FetchSquadFromAll2(matchId) {
     const addSide = (squadObj, side) => {
       if (!squadObj) return;
       (squadObj.players || []).forEach(p => {
-        const name = (p.title || p.short_name || '').trim();
-        if (!name || existingNamesLower.has(name.toLowerCase())) return;
+        const name = d11StripCaptainMarkerFromName((p.title || p.short_name || '').trim());
+        if (!name || existingNamesLower.has(d11NormalizePlayerName(name))) return;
         const roleText = p.playing_role || p.fielding_position || '';
         const isKeeper = /keeper|wk/i.test(roleText);
         const role = _d11MapCricbuzzRole(roleText, isKeeper);
@@ -16077,7 +16142,7 @@ async function d11FetchSquadFromAll2(matchId) {
         const player = newDream11Player(name, role, side, { photo, all2Pid: p.player_id || null });
         d11m.players.push(player);
         d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
-        existingNamesLower.add(name.toLowerCase());
+        existingNamesLower.add(d11NormalizePlayerName(name));
         addedCount++;
       });
     };
@@ -17123,7 +17188,7 @@ async function d11FetchSquadFromCb2(matchId) {
             }
             (squadDetail?.player || []).forEach(p => {
               if (p.isHeader) return; // "BATTERS"/"ALL ROUNDERS"/etc section labels, not real players
-              const name = (p.name || '').trim();
+              const name = d11StripCaptainMarkerFromName((p.name || '').trim());
               if (!name || existingNamesLowerSeries.has(name.toLowerCase())) return;
               const isKeeper = /wk|keeper/i.test(p.role || '');
               const role = _d11MapCricbuzzRole(p.role, isKeeper);
@@ -17165,7 +17230,7 @@ async function d11FetchSquadFromCb2(matchId) {
       throw (isEmptySquad ? new Error('Squad not published yet on Cricbuzz No 2 (tried both match-level and series-level squads) — try again closer to match time, or fetch from a different linked provider instead.') : cb2SquadErr);
     }
 
-    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    const existingNamesLower = new Set((d11m.players || []).map(p => d11NormalizePlayerName(p.name)));
     let addedCount = 0;
     const addTeamObj = (teamObj, side) => {
       (teamObj.players || []).forEach(group => {
@@ -17180,8 +17245,8 @@ async function d11FetchSquadFromCb2(matchId) {
         const cat = (group.category || '').toLowerCase();
         if (cat.includes('support') || cat.includes('coach') || cat.includes('staff') || cat.includes('official')) return;
         (group.player || []).forEach(p => {
-          const name = (p.name || '').trim();
-          if (!name || existingNamesLower.has(name.toLowerCase())) return;
+          const name = d11StripCaptainMarkerFromName((p.name || '').trim());
+          if (!name || existingNamesLower.has(d11NormalizePlayerName(name))) return;
           const role = _d11MapCricbuzzRole(p.role, p.keeper);
           // Cricbuzz No 2's squad response gives a faceimageid (not
           // imageId — that field is usually 0/absent on this endpoint).
@@ -17193,7 +17258,7 @@ async function d11FetchSquadFromCb2(matchId) {
           if (p.faceimageid) player.photo = cb2FaceImageUrl(p.faceimageid);
           d11m.players.push(player);
           d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
-          existingNamesLower.add(name.toLowerCase());
+          existingNamesLower.add(d11NormalizePlayerName(name));
           addedCount++;
         });
       });
@@ -17646,12 +17711,12 @@ async function d11FetchSquadFromCll(matchId) {
     d11SyncTeamFlag(m.teamA, teamA.flag);
     d11SyncTeamFlag(m.teamB, teamB.flag);
 
-    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    const existingNamesLower = new Set((d11m.players || []).map(p => d11NormalizePlayerName(p.name)));
     let addedCount = 0;
     const addSide = (teamObj, side) => {
       (teamObj.player || []).forEach(p => {
-        const name = (p.name || '').trim();
-        if (!name || existingNamesLower.has(name.toLowerCase())) return;
+        const name = d11StripCaptainMarkerFromName((p.name || '').trim());
+        if (!name || existingNamesLower.has(d11NormalizePlayerName(name))) return;
         const roleText = p.play_role || '';
         const isKeeper = /keeper/i.test(roleText);
         const role = _d11MapCricbuzzRole(roleText, isKeeper);
@@ -17663,7 +17728,7 @@ async function d11FetchSquadFromCll(matchId) {
         const player = newDream11Player(name, role, side, { photo });
         d11m.players.push(player);
         d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
-        existingNamesLower.add(name.toLowerCase());
+        existingNamesLower.add(d11NormalizePlayerName(name));
         addedCount++;
       });
     };
@@ -17969,12 +18034,12 @@ async function d11FetchSquadFromLl2(matchId) {
     d11SyncTeamFlag(m.teamA, teamA.flag);
     d11SyncTeamFlag(m.teamB, teamB.flag);
 
-    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    const existingNamesLower = new Set((d11m.players || []).map(p => d11NormalizePlayerName(p.name)));
     let addedCount = 0;
     const addSide = (teamObj, side) => {
       (teamObj.player || []).forEach(p => {
-        const name = (p.name || '').trim();
-        if (!name || existingNamesLower.has(name.toLowerCase())) return;
+        const name = d11StripCaptainMarkerFromName((p.name || '').trim());
+        if (!name || existingNamesLower.has(d11NormalizePlayerName(name))) return;
         const roleText = p.play_role || '';
         const isKeeper = /keeper/i.test(roleText);
         const role = _d11MapCricbuzzRole(roleText, isKeeper);
@@ -17982,7 +18047,7 @@ async function d11FetchSquadFromLl2(matchId) {
         const player = newDream11Player(name, role, side, { photo });
         d11m.players.push(player);
         d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
-        existingNamesLower.add(name.toLowerCase());
+        existingNamesLower.add(d11NormalizePlayerName(name));
         addedCount++;
       });
     };
@@ -18895,12 +18960,12 @@ async function d11FetchSquadFromLl3(matchId) {
     d11SyncTeamFlag(m.teamA, teamA.flag);
     d11SyncTeamFlag(m.teamB, teamB.flag);
 
-    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    const existingNamesLower = new Set((d11m.players || []).map(p => d11NormalizePlayerName(p.name)));
     let addedCount = 0;
     const addSide = (teamObj, side) => {
       (teamObj.player || []).forEach(p => {
-        const name = (p.name || '').trim();
-        if (!name || existingNamesLower.has(name.toLowerCase())) return;
+        const name = d11StripCaptainMarkerFromName((p.name || '').trim());
+        if (!name || existingNamesLower.has(d11NormalizePlayerName(name))) return;
         const roleText = p.play_role || '';
         const isKeeper = /keeper/i.test(roleText);
         const role = _d11MapCricbuzzRole(roleText, isKeeper);
@@ -18908,7 +18973,7 @@ async function d11FetchSquadFromLl3(matchId) {
         const player = newDream11Player(name, role, side, { photo });
         d11m.players.push(player);
         d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
-        existingNamesLower.add(name.toLowerCase());
+        existingNamesLower.add(d11NormalizePlayerName(name));
         addedCount++;
       });
     };
@@ -19852,12 +19917,12 @@ async function d11FetchSquadFromLl4(matchId) {
     d11SyncTeamFlag(m.teamA, teamA.flag);
     d11SyncTeamFlag(m.teamB, teamB.flag);
 
-    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    const existingNamesLower = new Set((d11m.players || []).map(p => d11NormalizePlayerName(p.name)));
     let addedCount = 0;
     const addSide = (teamObj, side) => {
       (teamObj.player || []).forEach(p => {
-        const name = (p.name || '').trim();
-        if (!name || existingNamesLower.has(name.toLowerCase())) return;
+        const name = d11StripCaptainMarkerFromName((p.name || '').trim());
+        if (!name || existingNamesLower.has(d11NormalizePlayerName(name))) return;
         const roleText = p.play_role || '';
         const isKeeper = /keeper/i.test(roleText);
         const role = _d11MapCricbuzzRole(roleText, isKeeper);
@@ -19865,7 +19930,7 @@ async function d11FetchSquadFromLl4(matchId) {
         const player = newDream11Player(name, role, side, { photo });
         d11m.players.push(player);
         d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
-        existingNamesLower.add(name.toLowerCase());
+        existingNamesLower.add(d11NormalizePlayerName(name));
         addedCount++;
       });
     };
@@ -20804,12 +20869,12 @@ async function d11FetchSquadFromLl5(matchId) {
     d11SyncTeamFlag(m.teamA, teamA.flag);
     d11SyncTeamFlag(m.teamB, teamB.flag);
 
-    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    const existingNamesLower = new Set((d11m.players || []).map(p => d11NormalizePlayerName(p.name)));
     let addedCount = 0;
     const addSide = (teamObj, side) => {
       (teamObj.player || []).forEach(p => {
-        const name = (p.name || '').trim();
-        if (!name || existingNamesLower.has(name.toLowerCase())) return;
+        const name = d11StripCaptainMarkerFromName((p.name || '').trim());
+        if (!name || existingNamesLower.has(d11NormalizePlayerName(name))) return;
         const roleText = p.play_role || '';
         const isKeeper = /keeper/i.test(roleText);
         const role = _d11MapCricbuzzRole(roleText, isKeeper);
@@ -20817,7 +20882,7 @@ async function d11FetchSquadFromLl5(matchId) {
         const player = newDream11Player(name, role, side, { photo });
         d11m.players.push(player);
         d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
-        existingNamesLower.add(name.toLowerCase());
+        existingNamesLower.add(d11NormalizePlayerName(name));
         addedCount++;
       });
     };
@@ -21856,14 +21921,14 @@ async function d11FetchSquadFromCricbuzz(matchId) {
     // Remove this once the squad-shape issue is confirmed/fixed.
     _d11SquadDebugData = { team1: team1Data, team2: team2Data, team1Id: m.cricbuzzTeam1Id, team2Id: m.cricbuzzTeam2Id };
 
-    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    const existingNamesLower = new Set((d11m.players || []).map(p => d11NormalizePlayerName(p.name)));
     let addedCount = 0;
 
     [{ data: team1Data, side: 'A' }, { data: team2Data, side: 'B' }].forEach(({ data, side }) => {
       const { combined, playingXI } = flattenSquadPlayers(data);
       combined.forEach(p => {
-        const name = (p.fullName || p.name || '').trim();
-        if (!name || existingNamesLower.has(name.toLowerCase())) return;
+        const name = d11StripCaptainMarkerFromName((p.fullName || p.name || '').trim());
+        if (!name || existingNamesLower.has(d11NormalizePlayerName(name))) return;
         const roleTextL = (p.role || '').toLowerCase();
         if (roleTextL.includes('coach') || roleTextL.includes('physio') || roleTextL.includes('manager') || roleTextL.includes('trainer') || roleTextL.includes('support staff')) return; // safety net — coaches/support staff sometimes lack a category tag
         const role = _d11MapCricbuzzRole(p.role, p.keeper);
@@ -21878,7 +21943,7 @@ async function d11FetchSquadFromCricbuzz(matchId) {
         if (playingXI.includes(p)) player.isPlayingXI = true;
         d11m.players.push(player);
         d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
-        existingNamesLower.add(name.toLowerCase());
+        existingNamesLower.add(d11NormalizePlayerName(name));
         addedCount++;
       });
     });
@@ -22046,12 +22111,12 @@ async function d11FetchSquadFromEspn(matchId) {
       return;
     }
 
-    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    const existingNamesLower = new Set((d11m.players || []).map(p => d11NormalizePlayerName(p.name)));
     let addedCount = 0;
     squadEntries.forEach(entry => {
       const p = entry.player;
-      const name = (p.longName || p.name || '').trim();
-      if (!name || existingNamesLower.has(name.toLowerCase())) return;
+      const name = d11StripCaptainMarkerFromName((p.longName || p.name || '').trim());
+      if (!name || existingNamesLower.has(d11NormalizePlayerName(name))) return;
       const side = teamIdToSide[p.countryTeamId] || (squadEntries.indexOf(entry) < squadEntries.length / 2 ? 'A' : 'B');
       // playingRoles is an array like ["batsman"], ["bowler"], ["allrounder"],
       // ["wicketkeeper"] — take the first entry as the role text.
@@ -22061,7 +22126,7 @@ async function d11FetchSquadFromEspn(matchId) {
       const player = newDream11Player(name, role, side);
       d11m.players.push(player);
       d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
-      existingNamesLower.add(name.toLowerCase());
+      existingNamesLower.add(d11NormalizePlayerName(name));
       addedCount++;
     });
 
@@ -22543,13 +22608,13 @@ async function d11CheckPlayingXIAnnounced(matchId, silent) {
       return;
     }
 
-    const existingNamesLower = new Set((d11m.players || []).map(p => p.name.toLowerCase().trim()));
+    const existingNamesLower = new Set((d11m.players || []).map(p => d11NormalizePlayerName(p.name)));
     let confirmedCount = 0, addedCount = 0, unconfirmedCount = 0;
     const namesInLatestXI = new Set();
 
     [{ list: xi1, bench: team1Data?.players?.bench || [], side: 'A' }, { list: xi2, bench: team2Data?.players?.bench || [], side: 'B' }].forEach(({ list, bench, side }) => {
       list.forEach(p => {
-        const name = (p.fullName || p.name || '').trim();
+        const name = d11StripCaptainMarkerFromName((p.fullName || p.name || '').trim());
         if (!name) return;
         const nameLower = name.toLowerCase();
         namesInLatestXI.add(nameLower);
@@ -22571,12 +22636,12 @@ async function d11CheckPlayingXIAnnounced(matchId, silent) {
       // Bench players aren't in the XI, but still worth having in the pool
       // for completeness (e.g. admin wants to show them as unavailable).
       bench.forEach(p => {
-        const name = (p.fullName || p.name || '').trim();
-        if (!name || existingNamesLower.has(name.toLowerCase())) return;
+        const name = d11StripCaptainMarkerFromName((p.fullName || p.name || '').trim());
+        if (!name || existingNamesLower.has(d11NormalizePlayerName(name))) return;
         const role = _d11MapCricbuzzRole(p.role, p.keeper);
         d11m.players.push(newDream11Player(name, role, side));
         d11SyncPlayerToTeamSquad(side === 'A' ? m.teamA : m.teamB, name, role);
-        existingNamesLower.add(name.toLowerCase());
+        existingNamesLower.add(d11NormalizePlayerName(name));
         addedCount++;
       });
     });
@@ -30014,6 +30079,23 @@ function d11AutoParseScorecard(matchId) {
 // Matching is name-based (case-insensitive, ignores captain/wk/nickname
 // suffixes like "(c)", "(wk)"), so it works even if the scorecard's exact
 // spelling/spacing differs slightly from how admin typed the player pool.
+// Display-safe version of the above: strips a trailing/inline captain,
+// vice-captain, or wicketkeeper marker like "(c)", "(C)", "(vc)", "(wk)"
+// from a player's name WITHOUT lowercasing or stripping other punctuation —
+// used when actually STORING a player's name (not just comparing names),
+// so a provider that bakes "(C)" into the captain's squad entry (Advance
+// Live Line does this) doesn't end up creating a visibly different-looking
+// duplicate pool entry for the same real player. The app's own captain/VC
+// selection UI already renders its own "(C)"/"(VC)" badge based on who the
+// USER picked — see renderD11TeamPlayerRow-style code around line ~31529 —
+// so there's never a reason to keep a provider-supplied marker baked into
+// the stored name itself.
+function d11StripCaptainMarkerFromName(name) {
+  return (name || '')
+    .replace(/\s*\((?:c|vc|wk)\)\s*$/i, '')
+    .replace(/\s*\((?:c|vc|wk)\)\s*/gi, ' ')
+    .trim();
+}
 function d11NormalizePlayerName(name) {
   return (name || '')
     .toLowerCase()
@@ -37997,7 +38079,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.9";
+const APP_VERSION = "4.66.10";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
