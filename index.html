@@ -4092,22 +4092,30 @@ async function _attemptRefund(amount, txId) {
 }
 
 // Called every 5 min by the existing background loop (and once on app
-// load) — retries any refund that couldn't be completed immediately when
-// it was first needed. Keeps trying forever (each tick) until it succeeds;
-// there is no attempt cap, because giving up would recreate exactly the
-// "charged with no entry, no refund" bug this whole mechanism exists to
-// prevent.
+// load). IMPORTANT: this NO LONGER auto-refunds anything by itself.
+// Reasoning: this app now has the "🔎 Find & Fix Orphaned Contest Entries"
+// admin tool, which lets the admin choose — for each stuck entry — between
+// ✅ Join (actually complete the contest entry the user already paid for)
+// or Refund (give the money back). If this background loop kept silently
+// auto-refunding in the meantime, it would race the admin's own tool: by
+// the time the admin opens Orphan Tool, the entry may already be refunded
+// and gone, so the ✅ Join option — which the admin might have genuinely
+// wanted to use, since the user's team/contest slot is often still
+// perfectly fine to just complete — would never even be offered. The admin
+// would have their decision made for them without being asked.
+// So now this function's only job is housekeeping: if a preemptive marker
+// turns out to be stale (the join it was guarding against actually
+// succeeded), it cleans that marker up quietly. Everything else — every
+// genuinely stuck "charged but not joined" entry — is left in place for
+// the admin to see and resolve deliberately via Orphan Tool, which reads
+// the same underlying data (the charge transaction with no matching
+// participant) and now offers both a Join and a Refund path.
 async function _retryPendingContestRefunds() {
   const pending = _loadPendingRefunds();
   if (pending.length === 0) return;
   for (const refund of pending) {
-    // Markers written preemptively (before the join attempt) need one extra
-    // check here: has the join actually gone through since then? If yes,
-    // this is a stale marker from a join that actually succeeded (e.g. the
-    // match-write succeeded but the app died before we reached
-    // _removePendingRefundByTxId) — refunding it would wrongly give the
-    // user their money back for a contest they're really in. Skip refund
-    // and just clean up the marker in that case.
+    // Only ever auto-resolve the "actually turned out fine" case — a
+    // preemptive marker whose join in fact went through. Never auto-refund.
     if (refund._preemptive && refund.matchId && window._fbDb && window._fbFns) {
       try {
         const { doc, getDoc } = window._fbFns;
@@ -4123,18 +4131,17 @@ async function _retryPendingContestRefunds() {
             return Array.isArray(p) ? p.includes(currentUser.email) : (p && p[currentUser.email]);
           });
           if (isJoined && stillHasTx) {
-            // Join succeeded, transaction record is legitimate — nothing to refund.
+            // Join succeeded, transaction record is legitimate — nothing to
+            // fix. Clean up the now-stale marker and move on.
             _removePendingRefund(refund.id);
             continue;
           }
         }
-      } catch (e) { /* can't verify right now — fall through and try refund path below */ }
+      } catch (e) { /* can't verify right now — leave marker in place, try again next tick */ }
     }
-    const ok = await _attemptRefund(refund.amount, refund.txId).catch(() => false);
-    if (ok) {
-      _removePendingRefund(refund.id);
-      showNotif(`Rs ${refund.amount} refunded — a contest join earlier didn't go through.`, 'info');
-    }
+    // Genuinely still stuck (charged, not joined) — leave it. The admin
+    // resolves this deliberately via 🔎 Find & Fix Orphaned Contest
+    // Entries (Join or Refund), not silently in the background.
   }
 }
 
@@ -6327,9 +6334,12 @@ function _renderInner() {
     ${d11Ll5LinkPickerMatchId ? renderD11Ll5LinkPickerModal() : ''}
     ${_d11Ll5DebugData ? renderD11Ll5DebugModal() : ''}
     ${d11Ll5PlayerRankingPanelOpen ? renderD11Ll5PlayerRankingModal() : ''}
-    ${d11AllImportPanelOpen ? renderD11AllImportPanelModal() : ''}
-    ${d11AllLinkPickerMatchId ? renderD11AllLinkPickerModal() : ''}
-    ${_d11AllDebugData ? renderD11AllDebugModal() : ''}
+    ${d11AllImportPanelOpen ? renderD11AllImportPanelModal_ALL1() : ''}
+    ${d11All2ImportPanelOpen ? renderD11AllImportPanelModal() : ''}
+    ${d11AllLinkPickerMatchId ? renderD11AllLinkPickerModal_ALL1() : ''}
+    ${_d11AllDebugData ? renderD11AllDebugModal_ALL1() : ''}
+    ${d11All2LinkPickerMatchId ? renderD11AllLinkPickerModal() : ''}
+    ${_d11All2DebugData ? renderD11AllDebugModal() : ''}
     ${_d11SquadDebugData ? renderD11SquadDebugModal() : ''}
     ${_d11EspnDebugData ? renderD11EspnDebugModal() : ''}
     ${d11PlayerInfoTarget ? renderD11PlayerInfoModal() : ''}
@@ -14697,7 +14707,19 @@ function d11CloseAllImportPanel() {
   render();
 }
 
-function renderD11AllImportPanelModal() {
+// RENAMED from renderD11AllImportPanelModal — this was silently shadowed by
+// an identically-named function defined later for Advance Live Line 2
+// (function declarations in the same scope don't warn on duplicate names;
+// the second one just wins). Since JS hoists both declarations but only
+// the LAST one survives, every call site actually ran the ALL2 version —
+// meaning tapping "Import from Advance Live Line" (provider 1) set
+// d11AllImportPanelOpen = true and called d11FetchAllImportList(), but the
+// modal that's supposed to display it was checking d11All2ImportPanelOpen
+// instead, which was still false. Nothing ever rendered — the tap appeared
+// to do absolutely nothing, exactly as reported ("kuch be nhi hu raha
+// click krne pe"). Renamed this one and updated its one call site so both
+// providers' modals are independent functions again.
+function renderD11AllImportPanelModal_ALL1() {
   if (!d11AllImportPanelOpen) return '';
   return `<div style="position:fixed;inset:0;z-index:2000;background:rgba(5,10,20,0.82);backdrop-filter:blur(4px);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this) d11CloseAllImportPanel()">
     <div class="card" style="width:100%;max-width:600px;max-height:82vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:18px;margin:0" onclick="event.stopPropagation()">
@@ -14857,7 +14879,7 @@ function d11CloseAllLinkPicker() {
   render();
 }
 
-function renderD11AllLinkPickerModal() {
+function renderD11AllLinkPickerModal_ALL1() {
   if (!d11AllLinkPickerMatchId) return '';
   const m = matches[d11AllLinkPickerMatchId];
   if (!m) return '';
@@ -14893,7 +14915,7 @@ function d11OpenAllDebugModal() { render(); }
 
 function d11CloseAllDebugModal() { _d11AllDebugData = null; render(); }
 
-function renderD11AllDebugModal() {
+function renderD11AllDebugModal_ALL1() {
   if (!_d11AllDebugData) return '';
   const pretty = JSON.stringify(_d11AllDebugData, null, 2);
   return `<div style="position:fixed;inset:0;z-index:2100;background:rgba(5,10,20,0.9);display:flex;align-items:center;justify-content:center;padding:16px" onclick="if(event.target===this) d11CloseAllDebugModal()">
@@ -34080,7 +34102,7 @@ function renderAdminOrphanTool() {
       <div style="font-weight:700;font-size:13px">🔎 Orphaned Contest Entries</div>
       <button class="btn-secondary" style="width:auto;padding:5px 10px;font-size:10.5px" onclick="adminShowOrphanTool=false;render()">✕ Close</button>
     </div>
-    <div style="font-size:11px;color:var(--dim);margin-bottom:10px">Entries where money was charged for a contest but the person never actually got added to it (a bug that's now fixed for new joins — this only catches cases from before the fix). Use ✅ Join to actually add them to the contest using their existing charge (no new deduction), or Refund to give the money back instead.</div>
+    <div style="font-size:11px;color:var(--dim);margin-bottom:10px">Entries where money was charged for a contest but the person never actually got added to it (a bug that's now fixed for new joins — this only catches cases from before the fix, plus any rare case where the app closed mid-join). These are never auto-refunded in the background — every case waits here for you to choose ✅ Join (complete the entry using their existing charge, no new deduction) or Refund (give the money back).</div>
     ${orphans.length === 0 ? `<div class="empty-state" style="padding:16px">✅ None found — everything checks out.</div>` : `
     <button class="btn-primary btn-block mb10" style="background:linear-gradient(135deg,#dc2626,#b91c1c)" onclick="fixAllOrphanedContestEntries()">💸 Refund All ${orphans.length} (Rs ${orphans.reduce((s,o)=>s+o.amount,0)})</button>
     ${orphans.map(o => `
@@ -37623,7 +37645,21 @@ async function initApp() {
     _loadAllUsersFromFirestore(false),_homeMatchesReady,
     _loadAllH2HFromFirestore(false, true),_loadAllCustomContestsFromFirestore(false, true),
     _loadAllTeamSquadsFromFirestore(),
-    _loadAllDream11TeamsFromFirestore(false, true),_loadAllD11H2HFromFirestore(false, true),_loadAllD11TrioFromFirestore(false, true),
+    // FIX: teams count on the admin panel ("X teams" per match) was
+    // regularly stuck on stale cached numbers for 1-2+ minutes after every
+    // app open (e.g. showing 4 when Firestore already had 30) — worse than
+    // matches/scores, because dream11Teams tends to change the most
+    // frequently (every single contest join writes here) yet was being
+    // loaded with forceRefresh=false like everything else, so it only ever
+    // painted from localStorage cache and then waited on the onSnapshot
+    // listener's first delivery, which can genuinely take a while to land
+    // on a slow/reconnecting mobile connection. Every other collection here
+    // can safely wait for its listener since it changes less often and
+    // isn't the star of the panel's home screen — teams data specifically
+    // gets a forced one-time getDocs() read on every app open so the panel
+    // is correct within one round-trip instead of an indeterminate wait,
+    // while still keeping the listener attached afterwards for live updates.
+    _loadAllDream11TeamsFromFirestore(true, true),_loadAllD11H2HFromFirestore(false, true),_loadAllD11TrioFromFirestore(false, true),
     _loadAllD11CustomContestsFromFirestore(false, true),_loadAllD11TournamentsFromFirestore(),
     _loadAllUtTournamentsFromFirestore(),_loadAllUtTeamsFromFirestore(),
     _loadAllPlayerHistoryFromFirestore(false, true),
@@ -37897,7 +37933,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.4";
+const APP_VERSION = "4.66.7";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
