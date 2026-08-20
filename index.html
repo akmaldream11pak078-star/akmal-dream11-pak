@@ -14787,19 +14787,29 @@ async function d11SearchLiveMatchAll(matchId) {
   render();
   try {
     let pool = [];
-    for (let page = 1; page <= 4; page++) {
-      let raw;
-      try {
-        raw = await _allFetch('matches', { feature: 'Link Match Search', matchId: null }, { status: 1, per_paged: 50, paged: page });
-      } catch (pageErr) {
-        console.warn(`Advance Live Line search page ${page} failed (${pageErr.message}) — using ${pool.length} match(es) already collected`);
-        if (pool.length > 0) break;
-        throw pageErr;
+    // FIX: search only ever queried status=1 (Scheduled), so a match that
+    // had already gone live on Advance Live Line by the time the admin
+    // tried to link it here would never show up in results — the search
+    // would come back empty or miss it entirely, even though the match was
+    // right there and fetchable. Now also queries status=3 (Live) so
+    // already-started matches can still be found and linked, not just
+    // upcoming/scheduled ones.
+    for (const statusVal of [1, 3]) {
+      for (let page = 1; page <= 4; page++) {
+        let raw;
+        try {
+          raw = await _allFetch('matches', { feature: 'Link Match Search', matchId: null }, { status: statusVal, per_paged: 50, paged: page });
+        } catch (pageErr) {
+          console.warn(`Advance Live Line search page ${page} (status=${statusVal}) failed (${pageErr.message}) — using ${pool.length} match(es) already collected`);
+          if (pool.length > 0) break;
+          if (statusVal === 3) break; // don't let a failed live-status query wipe out scheduled results already gathered
+          throw pageErr;
+        }
+        const items = Array.isArray(raw?.response?.items) ? raw.response.items : [];
+        if (items.length === 0) break; // genuinely no more pages for this status — don't stop just because a page had <50 items
+        pool = pool.concat(items);
+        await new Promise(r => setTimeout(r, 350));
       }
-      const items = Array.isArray(raw?.response?.items) ? raw.response.items : [];
-      if (items.length === 0) break; // genuinely no more pages — don't stop just because a page had <50 items
-      pool = pool.concat(items);
-      if (page < 4) await new Promise(r => setTimeout(r, 350));
     }
     if (pool.length === 0) throw new Error('No matches returned from Advance Live Line right now');
 
@@ -15799,19 +15809,25 @@ async function d11SearchLiveMatchAll2(matchId) {
   render();
   try {
     let pool = [];
-    for (let page = 1; page <= 4; page++) {
-      let raw;
-      try {
-        raw = await _all2Fetch('matches', { feature: 'Link Match Search', matchId: null }, { status: 1, per_paged: 50, paged: page });
-      } catch (pageErr) {
-        console.warn(`Advance Live Line 2 search page ${page} failed (${pageErr.message}) — using ${pool.length} match(es) already collected`);
-        if (pool.length > 0) break;
-        throw pageErr;
+    // FIX: same fix as Advance Live Line's search — also query status=3
+    // (Live) so a match that's already started can still be found and
+    // linked, not only matches still in "Scheduled" status.
+    for (const statusVal of [1, 3]) {
+      for (let page = 1; page <= 4; page++) {
+        let raw;
+        try {
+          raw = await _all2Fetch('matches', { feature: 'Link Match Search', matchId: null }, { status: statusVal, per_paged: 50, paged: page });
+        } catch (pageErr) {
+          console.warn(`Advance Live Line 2 search page ${page} (status=${statusVal}) failed (${pageErr.message}) — using ${pool.length} match(es) already collected`);
+          if (pool.length > 0) break;
+          if (statusVal === 3) break;
+          throw pageErr;
+        }
+        const items = Array.isArray(raw?.response?.items) ? raw.response.items : [];
+        if (items.length === 0) break; // genuinely no more pages for this status — don't stop just because a page had <50 items
+        pool = pool.concat(items);
+        await new Promise(r => setTimeout(r, 350));
       }
-      const items = Array.isArray(raw?.response?.items) ? raw.response.items : [];
-      if (items.length === 0) break; // genuinely no more pages — don't stop just because a page had <50 items
-      pool = pool.concat(items);
-      if (page < 4) await new Promise(r => setTimeout(r, 350));
     }
     if (pool.length === 0) throw new Error('No matches returned from Advance Live Line 2 right now');
 
@@ -37981,7 +37997,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.8";
+const APP_VERSION = "4.66.9";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
