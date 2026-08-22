@@ -4823,7 +4823,20 @@ function getGlobalLeaderboard() {
     .filter(([e,u]) => !u.isAdmin)
     .map(([e,u]) => {
       const matchSet = new Set(u.matchesJoined||[]);
-      Object.values(dream11Teams||{}).forEach(t => { if (t.userEmail===e) matchSet.add(t.matchId); });
+      // FIX: this used to add EVERY team's matchId here regardless of
+      // teamSlot, while the points sum above only counts teamSlot 1. That
+      // mismatch is exactly why some users' "matches joined" count looked
+      // disproportionately high next to their points (e.g. 101 matches but
+      // only 75k points, vs someone else with 91 matches and a similar or
+      // higher score): a user who submitted Team 2/3/4 in a match but never
+      // a Team 1 there had that match counted toward their total here, yet
+      // contributed ZERO points for it above, since only Team 1 feeds
+      // d11PointsByEmail. The displayed match count and the points shown
+      // next to it were quietly measuring two different things. Now only
+      // teamSlot 1 (or unset, which defaults to 1 — same rule the points
+      // sum already uses) counts toward "matches joined", so the number
+      // shown always reflects matches that actually contributed points.
+      Object.values(dream11Teams||{}).forEach(t => { if (t.userEmail===e && (t.teamSlot||1)===1) matchSet.add(t.matchId); });
       return {
         email: e,
         name: u.name,
@@ -38164,7 +38177,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.13";
+const APP_VERSION = "4.66.14";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
