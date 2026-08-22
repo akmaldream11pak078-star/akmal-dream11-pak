@@ -2496,6 +2496,7 @@ async function _autoIncrementalRefresh(collectionName, targetSetter, cacheKey, o
 // both properties at once: cheap on reads, and instantly live for anyone
 // with the tab open.
 window._liveCollectionUnsubs = window._liveCollectionUnsubs || {};
+window._forceRefreshInFlight = window._forceRefreshInFlight || {};
 async function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKey, opts, forceRefresh, isAppOpen) {
   opts = opts || {};
 
@@ -2535,21 +2536,51 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
     // one's listener happened to be behind just never got corrected, no
     // matter how many times a refresh was triggered. Do a real one-time
     // getDocs() read here so an explicit forceRefresh is never a no-op.
-    try {
-      const { collection, getDocs } = window._fbFns;
-      const snap = await getDocs(collection(window._fbDb, collectionName));
-      const obj = {};
-      snap.forEach(d => { obj[d.id] = d.data(); });
-      targetSetter(obj);
-      try { localStorage.setItem(cacheKey, JSON.stringify(obj)); } catch(e){}
-      _updateSyncWatermark(collectionName, obj);
-      if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
-      if (opts.rerenderOnUpdate && typeof render === 'function') render();
-      return true;
-    } catch (e) {
-      console.error(collectionName + ' force-refresh read error:', e);
-      return true; // listener is still attached and will keep pushing updates; don't treat this as total failure
+    //
+    // FIX 2 (root cause of "Panel shows correct team counts, then a moment
+    // later drops to 0 by itself, no manual refresh involved"): there was
+    // no protection here against two forceRefresh calls for the SAME
+    // collection overlapping — which now genuinely happens, since
+    // initApp(), goTab('home'), and the visibilitychange foreground handler
+    // can all legitimately call this for 'pp_dream11_teams' within moments
+    // of each other (e.g. app reopens → foreground handler fires AND the
+    // panel re-navigates around the same time). Each call did its OWN
+    // independent getDocs() and then wholesale-replaced targetSetter(obj)
+    // with only what THAT call's snapshot returned. If one of those
+    // concurrent reads got interrupted or returned a partial/incomplete
+    // result (very possible right as a backgrounded tab resumes and the
+    // network connection is still re-establishing), it could still resolve
+    // and finish LAST, clobbering a perfectly good result an earlier,
+    // fully-successful call had just written — teams count correct one
+    // moment, wiped to 0 barely a second later, matching exactly what was
+    // reported. Now: if a forceRefresh for this collection is already
+    // in-flight, don't start a second independent read — just await and
+    // return the SAME in-flight promise, so concurrent callers share one
+    // real read instead of racing multiple against each other.
+    if (window._forceRefreshInFlight[collectionName]) {
+      return window._forceRefreshInFlight[collectionName];
     }
+    const refreshPromise = (async () => {
+      try {
+        const { collection, getDocs } = window._fbFns;
+        const snap = await getDocs(collection(window._fbDb, collectionName));
+        const obj = {};
+        snap.forEach(d => { obj[d.id] = d.data(); });
+        targetSetter(obj);
+        try { localStorage.setItem(cacheKey, JSON.stringify(obj)); } catch(e){}
+        _updateSyncWatermark(collectionName, obj);
+        if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
+        if (opts.rerenderOnUpdate && typeof render === 'function') render();
+        return true;
+      } catch (e) {
+        console.error(collectionName + ' force-refresh read error:', e);
+        return true; // listener is still attached and will keep pushing updates; don't treat this as total failure
+      } finally {
+        delete window._forceRefreshInFlight[collectionName];
+      }
+    })();
+    window._forceRefreshInFlight[collectionName] = refreshPromise;
+    return refreshPromise;
   }
 
   if (!window._fbFns.onSnapshot) {
@@ -25278,7 +25309,24 @@ function d11HasUserSubmittedTeam(matchId, email) {
   return Object.values(dream11Teams).some(t => t.matchId === matchId && t.userEmail === email);
 }
 function d11GetUserTeam(matchId, email) {
-  return Object.values(dream11Teams).find(t => t.matchId === matchId && t.userEmail === email);
+  // FIX (root cause of H2H Stats Compare / profile screens showing totally
+  // different "Total Points" than the Global Leaderboard for the same
+  // user): this used to be a plain .find() with no teamSlot preference —
+  // it returned whichever of a user's teams for this match happened to
+  // come first in Object.values(dream11Teams)'s iteration order, which is
+  // essentially arbitrary (Firestore load order), NOT necessarily Team 1.
+  // getGlobalLeaderboard() specifically sums only teamSlot 1 across every
+  // match (see its own fix note), so any user who has ever submitted
+  // multiple teams for the same match could easily have this function
+  // return their Team 2/3/4 instead — a different team with a different
+  // score — while the leaderboard was correctly using Team 1. That
+  // mismatch is exactly why the same user's total looked completely
+  // different on the H2H Stats Compare screen vs the Global Leaderboard.
+  // Now explicitly prefers teamSlot 1 (or unset, which has always defaulted
+  // to slot 1 — same rule the leaderboard uses), falling back to whatever
+  // team exists only if there's genuinely no Team 1 for this match.
+  const teams = Object.values(dream11Teams).filter(t => t.matchId === matchId && t.userEmail === email);
+  return teams.find(t => (t.teamSlot||1) === 1) || teams[0];
 }
 
 // ── Resolve which of a user's teams was entered into a SPECIFIC contest.
@@ -38353,7 +38401,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.18";
+const APP_VERSION = "4.66.20";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
