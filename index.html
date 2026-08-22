@@ -10306,6 +10306,72 @@ function d11ConfirmSquadPicker() {
 let d11DupCleanupMatchId = null;
 let d11DupCleanupSelected = [];
 let d11DupCleanupGroups = [];
+// ── Repair tool: scans every submitted team on a match for duplicate
+// entries in `picks` (the same real player appearing twice — normalized by
+// name, same fix as d11FindDuplicatePlayers uses — most commonly because a
+// user picked both "Joe Root" and "Joe Root (C)" back before the squad
+// dedupe fix existed, or because an earlier duplicate-player cleanup run
+// remapped two different picked IDs onto the same kept ID without removing
+// the resulting duplicate). A duplicated pick gets that player's points
+// counted twice (or 4x if the duplicate landed on the captain slot) when
+// calcDream11TeamPoints sums team.picks — this is what produces a team's
+// score suddenly looking wildly inflated for a single match (e.g. ~4000
+// points where a normal match score is a few hundred). This tool removes
+// the duplicate pick (keeping one copy), recomputes totalPoints correctly,
+// and reports exactly which teams/users were affected so the admin can see
+// what changed. ──
+async function d11RepairDuplicatePicksAllTeams(matchId) {
+  const d11m = dream11Matches[matchId];
+  if (!d11m) { showNotif('Match not found', 'error'); return; }
+  const teams = Object.values(dream11Teams).filter(t => t.matchId === matchId);
+  if (teams.length === 0) { showNotif('No submitted teams on this match.'); return; }
+
+  const playerNameById = {};
+  (d11m.players || []).forEach(p => { playerNameById[p.id] = _d11NormalizeNameForMatch(p.name); });
+
+  const affected = [];
+  for (const team of teams) {
+    if (!Array.isArray(team.picks) || team.picks.length === 0) continue;
+    const seenNames = new Set();
+    const dedupedPicks = [];
+    let hadDuplicate = false;
+    team.picks.forEach(pid => {
+      const normName = playerNameById[pid] || pid; // fall back to raw id if player no longer in pool
+      if (seenNames.has(normName)) { hadDuplicate = true; return; } // drop the duplicate entry
+      seenNames.add(normName);
+      dedupedPicks.push(pid);
+    });
+    if (!hadDuplicate) continue;
+
+    const oldPoints = team.totalPoints || 0;
+    team.picks = dedupedPicks;
+    // If a duplicate ID was also stored as captain/viceCaptain and got
+    // dropped from picks (kept copy was a different id), point
+    // captain/viceCaptain at whichever kept copy is still in picks for
+    // the same real player, so the multiplier doesn't silently vanish.
+    const fixRoleRef = (roleId) => {
+      if (!roleId || dedupedPicks.includes(roleId)) return roleId;
+      const wantedName = playerNameById[roleId];
+      const replacement = dedupedPicks.find(pid => playerNameById[pid] === wantedName);
+      return replacement || roleId;
+    };
+    team.captain = fixRoleRef(team.captain);
+    team.viceCaptain = fixRoleRef(team.viceCaptain);
+    team.totalPoints = calcDream11TeamPoints(team, d11m);
+
+    try { await _saveDream11TeamToFirestore(team.id, team); } catch (e) { console.error('Failed to save repaired team:', team.id, e); }
+    affected.push({ userEmail: team.userEmail, name: users[team.userEmail]?.name || team.userEmail, oldPoints, newPoints: team.totalPoints });
+  }
+
+  if (affected.length === 0) {
+    showNotif('✅ No duplicate picks found in any submitted team — points are clean.');
+  } else {
+    const summary = affected.map(a => `${a.name}: ${a.oldPoints} → ${a.newPoints} pts`).join('\n');
+    alert(`🩹 Fixed ${affected.length} team(s) with duplicate picks:\n\n${summary}`);
+    showNotif(`🩹 Fixed ${affected.length} team(s) — inflated points corrected.`);
+  }
+  render();
+}
 function d11FindDuplicatePlayers(matchId) {
   const d11m = dream11Matches[matchId];
   if (!d11m) return;
@@ -10380,8 +10446,22 @@ async function d11ConfirmDupCleanup() {
     const remapArray = (arr) => {
       if (!Array.isArray(arr)) return arr;
       const mapped = arr.map(pid => idRemap[pid] || pid);
-      if (JSON.stringify(mapped) !== JSON.stringify(arr)) changed = true;
-      return mapped;
+      // FIX (root cause of a team suddenly showing wildly inflated points,
+      // e.g. ~4000 for a single match): if a team had picked BOTH copies of
+      // a duplicate player (e.g. "Joe Root" AND "Joe Root (C)" — possible
+      // before the squad-fetch dedupe fix), remapping both IDs to the same
+      // kept ID left that kept ID appearing TWICE in team.picks.
+      // calcDream11TeamPoints() sums every id in picks with no duplicate
+      // check, so that real player's points got counted twice in this
+      // team's total — a normal few-hundred-point match score can easily
+      // look like several thousand once one player's points are doubled
+      // (worse still if that duplicate also happened to be the captain,
+      // effectively counting them 4x). Dedupe the array after remapping so
+      // every real player appears at most once, same as picks should
+      // always have been in the first place.
+      const deduped = [...new Set(mapped)];
+      if (JSON.stringify(mapped) !== JSON.stringify(arr) || deduped.length !== mapped.length) changed = true;
+      return deduped;
     };
     team.picks = remapArray(team.picks);
     team.originalPicks = remapArray(team.originalPicks);
@@ -29727,7 +29807,7 @@ function renderDream11AdminPool() {
     </div>
     <div style="text-align:center;font-size:11px;color:var(--dim)">👥 ${d11m.players.length} players · 🏏 ${xiCount} Playing XI confirmed · ${dLocked ? '🔒 Locked' : '🔓 Open for teams'}</div>
     ${m.cricketDataMatchId ? `<div style="text-align:center;margin-top:6px"><button class="btn-secondary" style="font-size:10.5px;padding:5px 10px;background:rgba(220,38,38,0.1);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11OpenCleanupPool('${d11ActiveMatchId}')">🧹 Remove Coaches / Support Staff</button></div>` : ''}
-    ${d11m.players.length > 0 ? `<div style="text-align:center;margin-top:6px"><button class="btn-secondary" style="font-size:10.5px;padding:5px 10px;background:rgba(234,179,8,0.1);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11FindDuplicatePlayers('${d11ActiveMatchId}')">🧹 Find Duplicate Players</button></div>` : ''}
+    ${d11m.players.length > 0 ? `<div style="text-align:center;margin-top:6px"><button class="btn-secondary" style="font-size:10.5px;padding:5px 10px;background:rgba(234,179,8,0.1);border-color:rgba(234,179,8,0.3);color:#facc15" onclick="d11FindDuplicatePlayers('${d11ActiveMatchId}')">🧹 Find Duplicate Players</button> <button class="btn-secondary" style="font-size:10.5px;padding:5px 10px;background:rgba(220,38,38,0.1);border-color:rgba(220,38,38,0.3);color:#f87171" onclick="d11RepairDuplicatePicksAllTeams('${d11ActiveMatchId}')">🩹 Fix Inflated Team Points</button></div>` : ''}
     <div style="text-align:center;font-size:11px;color:var(--orange);font-weight:600;margin-top:6px">⏰ Deadline: ${deadlineStr} ${dLocked && !d11m.locked ? '(passed — auto-locked)' : ''}</div>
     ${!dLocked && m.deadline ? `<div class="d11-countdown" data-deadline="${m.deadline}" style="text-align:center;font-size:12px;font-weight:700;color:var(--orange);margin-top:2px">${d11FormatCountdown(m.deadline - Date.now())}</div>` : ''}
     <div style="text-align:center;margin-top:8px">
@@ -38177,7 +38257,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.14";
+const APP_VERSION = "4.66.15";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
