@@ -6408,6 +6408,23 @@ function goTab(t) {
       _loadAllUsersFromFirestore(true)
     ]).then(() => render()).catch(() => {});
   }
+  // FIX (root cause of "0 teams shown on the admin Panel right after
+  // opening the app, but correct once manually refreshed"): the admin's
+  // home tab ('home') renders the Owner Control Panel, whose per-match
+  // "X teams" count reads straight from dream11Teams. The general app-boot
+  // sequence (initApp) already force-refreshes teams once matches/scores
+  // land, but it does so as part of one long Promise.all — on a slow
+  // connection, or if this is the very first tab paint before that chain
+  // resolves, the admin can land on the Panel screen while dream11Teams is
+  // still whatever a stale cache (or nothing at all, for a session with no
+  // cache yet) happened to hold at that instant. Since the admin's Panel is
+  // literally the 'home' tab (not a separate one), force a real, guaranteed
+  // fresh teams read specifically here too — so switching to (or already
+  // being on) Panel always shows correct counts, without relying on timing
+  // in the general bootstrap chain landing before the admin looks at it.
+  if (t === 'home' && typeof isAdmin === 'function' && isAdmin()) {
+    _loadAllDream11TeamsFromFirestore(true).then(() => render()).catch(() => {});
+  }
 }
 </script>
 
@@ -7265,6 +7282,10 @@ function renderGlobalLeaderboard() {
 
   return `
   <div class="section-title">🏅 Global Leaderboard</div>
+
+  ${(typeof isAdmin === 'function' && isAdmin()) ? `
+  <button class="btn-secondary btn-block mb14" style="background:rgba(220,38,38,0.1);border-color:rgba(220,38,38,0.3);color:#f87171;font-size:11.5px" onclick="d11RepairDuplicatePicksAcrossAllMatches()">🩹 Scan All Matches for Inflated Team Points</button>
+  ` : ''}
 
   <div class="card mb18" style="text-align:center;background:linear-gradient(135deg,rgba(251,191,36,0.1),rgba(249,115,22,0.06));border-color:rgba(251,191,36,0.25)">
     <div style="font-size:12px;color:var(--dim);font-weight:600">YOUR GLOBAL RANK</div>
@@ -10306,25 +10327,13 @@ function d11ConfirmSquadPicker() {
 let d11DupCleanupMatchId = null;
 let d11DupCleanupSelected = [];
 let d11DupCleanupGroups = [];
-// ── Repair tool: scans every submitted team on a match for duplicate
-// entries in `picks` (the same real player appearing twice — normalized by
-// name, same fix as d11FindDuplicatePlayers uses — most commonly because a
-// user picked both "Joe Root" and "Joe Root (C)" back before the squad
-// dedupe fix existed, or because an earlier duplicate-player cleanup run
-// remapped two different picked IDs onto the same kept ID without removing
-// the resulting duplicate). A duplicated pick gets that player's points
-// counted twice (or 4x if the duplicate landed on the captain slot) when
-// calcDream11TeamPoints sums team.picks — this is what produces a team's
-// score suddenly looking wildly inflated for a single match (e.g. ~4000
-// points where a normal match score is a few hundred). This tool removes
-// the duplicate pick (keeping one copy), recomputes totalPoints correctly,
-// and reports exactly which teams/users were affected so the admin can see
-// what changed. ──
-async function d11RepairDuplicatePicksAllTeams(matchId) {
+// Shared core: repairs duplicate-pick teams for ONE match, returns the list
+// of affected teams (does not render or notify — callers handle that).
+async function _d11RepairDuplicatePicksForOneMatch(matchId) {
   const d11m = dream11Matches[matchId];
-  if (!d11m) { showNotif('Match not found', 'error'); return; }
+  if (!d11m) return [];
   const teams = Object.values(dream11Teams).filter(t => t.matchId === matchId);
-  if (teams.length === 0) { showNotif('No submitted teams on this match.'); return; }
+  if (teams.length === 0) return [];
 
   const playerNameById = {};
   (d11m.players || []).forEach(p => { playerNameById[p.id] = _d11NormalizeNameForMatch(p.name); });
@@ -10345,10 +10354,6 @@ async function d11RepairDuplicatePicksAllTeams(matchId) {
 
     const oldPoints = team.totalPoints || 0;
     team.picks = dedupedPicks;
-    // If a duplicate ID was also stored as captain/viceCaptain and got
-    // dropped from picks (kept copy was a different id), point
-    // captain/viceCaptain at whichever kept copy is still in picks for
-    // the same real player, so the multiplier doesn't silently vanish.
     const fixRoleRef = (roleId) => {
       if (!roleId || dedupedPicks.includes(roleId)) return roleId;
       const wantedName = playerNameById[roleId];
@@ -10360,15 +10365,68 @@ async function d11RepairDuplicatePicksAllTeams(matchId) {
     team.totalPoints = calcDream11TeamPoints(team, d11m);
 
     try { await _saveDream11TeamToFirestore(team.id, team); } catch (e) { console.error('Failed to save repaired team:', team.id, e); }
-    affected.push({ userEmail: team.userEmail, name: users[team.userEmail]?.name || team.userEmail, oldPoints, newPoints: team.totalPoints });
+    affected.push({ userEmail: team.userEmail, name: users[team.userEmail]?.name || team.userEmail, matchLabel: `${d11m.teamA||'?'} vs ${d11m.teamB||'?'}`, oldPoints, newPoints: team.totalPoints });
   }
+  return affected;
+}
 
+// ── Repair tool: scans every submitted team on a match for duplicate
+// entries in `picks` (the same real player appearing twice — normalized by
+// name, same fix as d11FindDuplicatePlayers uses — most commonly because a
+// user picked both "Joe Root" and "Joe Root (C)" back before the squad
+// dedupe fix existed, or because an earlier duplicate-player cleanup run
+// remapped two different picked IDs onto the same kept ID without removing
+// the resulting duplicate). A duplicated pick gets that player's points
+// counted twice (or 4x if the duplicate landed on the captain slot) when
+// calcDream11TeamPoints sums team.picks — this is what produces a team's
+// score suddenly looking wildly inflated for a single match (e.g. ~4000
+// points where a normal match score is a few hundred). This tool removes
+// the duplicate pick (keeping one copy), recomputes totalPoints correctly,
+// and reports exactly which teams/users were affected so the admin can see
+// what changed. ──
+async function d11RepairDuplicatePicksAllTeams(matchId) {
+  const d11m = dream11Matches[matchId];
+  if (!d11m) { showNotif('Match not found', 'error'); return; }
+  const affected = await _d11RepairDuplicatePicksForOneMatch(matchId);
   if (affected.length === 0) {
     showNotif('✅ No duplicate picks found in any submitted team — points are clean.');
   } else {
     const summary = affected.map(a => `${a.name}: ${a.oldPoints} → ${a.newPoints} pts`).join('\n');
     alert(`🩹 Fixed ${affected.length} team(s) with duplicate picks:\n\n${summary}`);
     showNotif(`🩹 Fixed ${affected.length} team(s) — inflated points corrected.`);
+  }
+  render();
+}
+
+// ── Same repair, but across EVERY Dream11 match at once — for when the
+// admin knows some team, somewhere, has inflated points from duplicate
+// picks but doesn't know which specific match it's on (this is the normal
+// case: the symptom shows up on the Global Leaderboard, which sums points
+// across all matches, not on a single match's screen). Force-refreshes
+// teams first so this always works off current data, then loops every
+// match in dream11Matches and applies the same per-match repair. ──
+async function d11RepairDuplicatePicksAcrossAllMatches() {
+  if (!confirm('Scan EVERY Dream11 match for teams with duplicate picks (inflated points) and fix them? This may take a moment for a lot of matches.')) return;
+  showNotif('🔎 Scanning all matches for duplicate picks — this may take a moment...');
+  try { await _loadAllDream11TeamsFromFirestore(true); } catch (e) { console.warn('Teams refresh before global repair failed:', e.message); }
+
+  const matchIds = Object.keys(dream11Matches);
+  let allAffected = [];
+  for (const matchId of matchIds) {
+    try {
+      const affected = await _d11RepairDuplicatePicksForOneMatch(matchId);
+      allAffected = allAffected.concat(affected);
+    } catch (e) {
+      console.error(`Repair failed for match ${matchId}:`, e);
+    }
+  }
+
+  if (allAffected.length === 0) {
+    showNotif('✅ Scanned all matches — no duplicate picks found anywhere. Leaderboard points are clean.');
+  } else {
+    const summary = allAffected.map(a => `${a.name} (${a.matchLabel}): ${a.oldPoints} → ${a.newPoints} pts`).join('\n');
+    alert(`🩹 Fixed ${allAffected.length} team(s) across ${matchIds.length} matches:\n\n${summary}\n\nThe Global Leaderboard will reflect corrected totals now.`);
+    showNotif(`🩹 Fixed ${allAffected.length} team(s) with inflated points — leaderboard corrected.`);
   }
   render();
 }
@@ -37965,6 +38023,23 @@ async function initApp() {
     render();
   });
 
+  // FIX (root cause of "Panel shows 0 teams right after opening the app,
+  // correct only after a manual refresh"): the admin's home screen (Owner
+  // Control Panel) reads dream11Teams directly for its per-match "X teams"
+  // count, but the forced teams refresh further down is bundled inside the
+  // big 14-collection Promise.all — which only repaints once EVERY one of
+  // those has landed, including several the admin's Panel doesn't even
+  // need yet (H2H, custom contests, tournaments, player history...). On a
+  // slow connection the admin can easily be looking at the Panel well
+  // before that whole chain finishes, seeing whatever dream11Teams held at
+  // that instant. Race a dedicated, guaranteed-fresh teams read alongside
+  // _homeMatchesReady instead of waiting on the full chain — for an admin
+  // session this repaints the Panel's team counts as early as the matches
+  // themselves, not whenever the slowest of 14 unrelated reads finishes.
+  if (typeof isAdmin === 'function' && isAdmin()) {
+    _loadAllDream11TeamsFromFirestore(true).then(() => render()).catch(() => {});
+  }
+
   Promise.all([
     _loadAllUsersFromFirestore(false),_homeMatchesReady,
     _loadAllH2HFromFirestore(false, true),_loadAllCustomContestsFromFirestore(false, true),
@@ -38257,7 +38332,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.15";
+const APP_VERSION = "4.66.17";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
