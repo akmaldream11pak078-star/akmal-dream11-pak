@@ -2301,6 +2301,27 @@ function _installVisibilityGuard() {
         const spec = _liveCollectionSpecs[name];
         _autoIncrementalRefresh(name, spec.targetSetter, spec.cacheKey, spec.opts);
       });
+      // FIX (root cause of "admin closes and reopens the app, Panel briefly
+      // shows 0 teams, then corrects itself ~30s later on its own"): on
+      // mobile, "closing and reopening the app" is very often NOT a real
+      // process kill/fresh page load (which would re-run initApp() and its
+      // dedicated forced-teams-refresh) — it's the WebView/PWA being
+      // backgrounded and foregrounded, which only fires this
+      // visibilitychange handler. The incremental refresh above is
+      // deliberately cheap (only docs newer than the last-seen watermark)
+      // so it's fine for the general case, but for the admin's Panel
+      // specifically — the same "teams data is the star of this screen and
+      // changes constantly" reasoning as initApp's fix — that's not always
+      // fast enough: it can legitimately take a while for Firestore's
+      // response to land and for _updateSyncWatermark/render to fire,
+      // which lines up with the ~30 second delay reported. Force a
+      // genuine, guaranteed-fresh one-time teams read for admins right
+      // here too, same as initApp and goTab('home') already do, so
+      // foregrounding the app is never slower to show correct team counts
+      // than a full app relaunch would have been.
+      if (typeof isAdmin === 'function' && isAdmin() && typeof _loadAllDream11TeamsFromFirestore === 'function') {
+        _loadAllDream11TeamsFromFirestore(true).then(() => { try { render(); } catch(e){} }).catch(() => {});
+      }
     }
   });
   // Any real user interaction resets the idle clock and reattaches if needed
@@ -38332,7 +38353,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.17";
+const APP_VERSION = "4.66.18";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
