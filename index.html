@@ -6371,6 +6371,30 @@ function goTab(t) {
   if (t === 'dream11') {
     _loadAllDream11MatchesFromFirestore(true).then(() => render()).catch(() => {});
   }
+  // FIX (root cause of "leaderboard shows different ranks/points to
+  // different users at the same time"): getGlobalLeaderboard() is a pure
+  // function over whatever's currently sitting in the in-memory
+  // dream11Teams/users objects — it never fetches anything itself. Under
+  // normal use that's fine, since the onSnapshot listeners keep both
+  // collections live-synced in the background. But a session that's been
+  // idle for a while (listener auto-detaches after 30 min — see
+  // _detachAllLiveCollections) or that just reopened the app will
+  // legitimately show a STALE cached snapshot for the first several
+  // seconds until the listener reattaches and catches up — and if the
+  // person taps straight into the Rank tab during that window, they see
+  // whatever numbers happened to be cached, not what's actually current.
+  // Two people opening the app at slightly different times/network
+  // conditions can easily land on two different "stale windows",
+  // producing exactly the inconsistent ranks users were reporting. Force
+  // a real one-time re-read of both collections specifically when
+  // entering the leaderboard tab, so the numbers shown are always
+  // guaranteed current rather than "whatever was cached a moment ago".
+  if (t === 'leaderboard') {
+    Promise.all([
+      _loadAllDream11TeamsFromFirestore(true),
+      _loadAllUsersFromFirestore(true)
+    ]).then(() => render()).catch(() => {});
+  }
 }
 </script>
 
@@ -38140,7 +38164,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.12";
+const APP_VERSION = "4.66.13";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
