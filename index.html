@@ -2507,43 +2507,56 @@ window._forceRefreshInFlight = window._forceRefreshInFlight || {};
 async function _liveLoadCollection(collectionName, targetGetter, targetSetter, cacheKey, opts, forceRefresh, isAppOpen) {
   opts = opts || {};
 
-  // Instant paint from cache first (0 reads), same as before — this makes
-  // the very first render of the app feel instant regardless of what
-  // happens with the listener below.
-  // FIX (root cause of "fresh data was showing, then app reopened and
-  // reverted straight back to old cached data"): on app open, TWO calls
-  // for the same collection can legitimately run close together — e.g. the
-  // regular forceRefresh=false bootstrap call (which paints synchronously
-  // from cache right here, THEN asynchronously attaches a listener) and an
-  // admin-only forceRefresh=true call added elsewhere (which does its own
-  // fresh getDocs() and correctly writes the NEW data to this same
-  // cacheKey). If the forceRefresh=true call's fresh write to localStorage
-  // happens to land BEFORE this cache-read runs (e.g. call ordering
-  // differs by a beat), that's fine — this reads the fresh value. But if
-  // this cache-read runs first (reading the OLD value still sitting in
-  // localStorage from the previous session) and paints it into
-  // dream11Matches, then the listener that gets attached below merges
-  // Firestore's true state into THAT same now-stale-seeded object — for a
-  // collection like this with 90+ docs, an in-place merge of new fields
-  // per existing key doesn't remove keys that no longer belong, if the
-  // merge logic's "seenIds" tracking was ever built from a stale prior
-  // paint. Skip this synchronous stale-cache paint entirely when we know a
-  // guaranteed-fresh forced read for this exact collection is already
-  // in-flight — let that be the one and only source of truth for this
-  // collection on this app open, instead of two different ages of data
-  // racing to paint first.
-  if (!forceRefresh && !window._forceRefreshInFlight[collectionName]) {
-    try {
-      const cached = localStorage.getItem(cacheKey);
-      if (cached) {
-        const obj = JSON.parse(cached);
-        targetSetter(obj);
-        if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
-      }
-    } catch(e){}
-  }
+  // Instant paint from cache first (0 reads) — this makes the very first
+  // render of the app feel instant regardless of what happens with the
+  // listener/forced-refresh below. Safe to always do this now: the
+  // listener-attach lock further down (window._listenerAttachInFlight)
+  // guarantees only ONE listener/forced-read ever runs per collection per
+  // session, so there's no longer a race where this stale paint could
+  // "win" over a guaranteed-fresh read that follows — the fresh read
+  // always lands after and correctly overwrites whatever was painted here.
+  // Runs even when forceRefresh is true, so an admin's guaranteed-fresh
+  // call still shows the last-known-good cached data INSTANTLY on app
+  // open, then quietly repaints with the real current data the moment the
+  // forced read lands (typically well under 30s) — no blank/zero/loading
+  // flash while waiting on the network.
+  try {
+    const cached = localStorage.getItem(cacheKey);
+    if (cached) {
+      const obj = JSON.parse(cached);
+      targetSetter(obj);
+      if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
+    }
+  } catch(e){}
 
   if (!window._fbDb || !window._fbFns || !window._fbFns.getDocs || !window._fbFns.collection) return false;
+
+  // FIX (root cause of "5 correct active matches shown, then a few seconds
+  // later reverted back to 97 stale ones — no manual refresh, same app
+  // session, same minute"): on a fresh app boot, NEITHER the admin-only
+  // forceRefresh=true call nor the regular forceRefresh=false call has a
+  // listener attached yet for this collection (window._liveCollectionUnsubs
+  // is empty for it), so BOTH calls fell through past the two branches
+  // below into the "attach a fresh listener" logic further down — with no
+  // guard against that happening twice concurrently. Two independent
+  // onSnapshot listeners ended up attached to the same collection; each one
+  // resolves and calls targetSetter() on its own timeline, and there was no
+  // rule for which one's data should "win" — whichever listener's first
+  // delivery happened to land LAST simply overwrote whatever the other had
+  // just written, with no correctness guarantee either way. This is why
+  // the correct 5-match data appeared first (the admin's forced getDocs()
+  // read, which is what actually ran first) and then got silently replaced
+  // moments later (the regular call's independently-attached listener
+  // delivering its own — likely stale-seeded — snapshot). Add a proper
+  // attach-in-progress lock here: only the FIRST caller for a given
+  // collection actually attaches a listener; any concurrent caller instead
+  // awaits that same attach attempt, so there is only ever one listener,
+  // one source of truth, per collection.
+  if (window._listenerAttachInFlight && window._listenerAttachInFlight[collectionName] && !window._liveCollectionUnsubs[collectionName]) {
+    await window._listenerAttachInFlight[collectionName];
+    // Fall through below: the listener is now attached (or attach failed),
+    // so re-check the normal branches with up-to-date state.
+  }
 
   // Attach the live listener once per collection per session. If it's
   // already attached, we're done — the cache paint above (or whatever's
@@ -2629,7 +2642,8 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
     }
   }
 
-  return new Promise((resolve) => {
+  window._listenerAttachInFlight = window._listenerAttachInFlight || {};
+  const attachPromise = new Promise((resolve) => {
     let resolved = false;
     try {
       const { collection, onSnapshot } = window._fbFns;
@@ -2681,7 +2695,7 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
         // via its `if (!watermark) return;` guard.
         _updateSyncWatermark(collectionName, obj);
         if (opts.onUpdate) { try { opts.onUpdate(obj); } catch(e){} }
-        if (!resolved) { resolved = true; resolve(true); }
+        if (!resolved) { resolved = true; delete window._listenerAttachInFlight[collectionName]; resolve(true); }
         else if (opts.rerenderOnUpdate !== false) {
           // FIX: was an unconditional render() on every later snapshot —
           // meaning ANY background auto-sync write to ANY match (from the
@@ -2699,7 +2713,7 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
         }
       }, err => {
         console.error(collectionName + ' live-sync error:', err);
-        if (!resolved) { resolved = true; resolve(false); }
+        if (!resolved) { resolved = true; delete window._listenerAttachInFlight[collectionName]; resolve(false); }
       });
       window._liveCollectionUnsubs[collectionName] = unsub;
       // Register with the existing idle-detach/reattach system (see
@@ -2711,9 +2725,11 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
       _liveCollectionSpecs[collectionName] = { targetSetter, cacheKey, opts };
     } catch(e) {
       console.error('Failed to attach live listener for ' + collectionName + ':', e);
-      if (!resolved) { resolved = true; resolve(false); }
+      if (!resolved) { resolved = true; delete window._listenerAttachInFlight[collectionName]; resolve(false); }
     }
   });
+  window._listenerAttachInFlight[collectionName] = attachPromise;
+  return attachPromise;
 }
 
 // ── Fast 15-second poll for Upcoming/Live/Today's-Completed match data ──
@@ -38487,7 +38503,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.23";
+const APP_VERSION = "4.66.25";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
