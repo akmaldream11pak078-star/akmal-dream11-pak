@@ -2510,7 +2510,29 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
   // Instant paint from cache first (0 reads), same as before — this makes
   // the very first render of the app feel instant regardless of what
   // happens with the listener below.
-  if (!forceRefresh) {
+  // FIX (root cause of "fresh data was showing, then app reopened and
+  // reverted straight back to old cached data"): on app open, TWO calls
+  // for the same collection can legitimately run close together — e.g. the
+  // regular forceRefresh=false bootstrap call (which paints synchronously
+  // from cache right here, THEN asynchronously attaches a listener) and an
+  // admin-only forceRefresh=true call added elsewhere (which does its own
+  // fresh getDocs() and correctly writes the NEW data to this same
+  // cacheKey). If the forceRefresh=true call's fresh write to localStorage
+  // happens to land BEFORE this cache-read runs (e.g. call ordering
+  // differs by a beat), that's fine — this reads the fresh value. But if
+  // this cache-read runs first (reading the OLD value still sitting in
+  // localStorage from the previous session) and paints it into
+  // dream11Matches, then the listener that gets attached below merges
+  // Firestore's true state into THAT same now-stale-seeded object — for a
+  // collection like this with 90+ docs, an in-place merge of new fields
+  // per existing key doesn't remove keys that no longer belong, if the
+  // merge logic's "seenIds" tracking was ever built from a stale prior
+  // paint. Skip this synchronous stale-cache paint entirely when we know a
+  // guaranteed-fresh forced read for this exact collection is already
+  // in-flight — let that be the one and only source of truth for this
+  // collection on this app open, instead of two different ages of data
+  // racing to paint first.
+  if (!forceRefresh && !window._forceRefreshInFlight[collectionName]) {
     try {
       const cached = localStorage.getItem(cacheKey);
       if (cached) {
@@ -38123,6 +38145,27 @@ async function initApp() {
   // cache yet — matching the cache-first design already documented above
   // (see _MANUAL_REFRESH_COOLDOWN_MS) where the 🔄 button is meant to be
   // the only thing that forces a real re-read.
+  // FIX (root cause of "old already-scored/stale matches reappearing right
+  // after closing and reopening the app, even though fresh correct data
+  // had been showing just before"): this admin-only forced-refresh block
+  // used to run AFTER _homeMatchesReady was already kicked off below. Since
+  // _liveLoadCollection's cache-paint runs synchronously up to its first
+  // `await`, the plain forceRefresh=false call in _homeMatchesReady had
+  // already read and painted the OLD cached dream11Matches into memory
+  // before this admin-only forced call even started — so for a brief but
+  // real window, and depending on exactly how the two calls' listener
+  // attachment/merge timing lined up, the stale cache-paint could still be
+  // what a subsequent read/merge cycle worked from. Moving this block
+  // BEFORE _homeMatchesReady means the guaranteed-fresh admin read claims
+  // the in-flight guard and starts its real getDocs() first, so the
+  // regular cache-paint path (further down) can see it's already in
+  // flight and skip painting stale data over it — see the
+  // window._forceRefreshInFlight check in _liveLoadCollection.
+  if (typeof isAdmin === 'function' && isAdmin()) {
+    _loadAllDream11TeamsFromFirestore(true).then(() => render()).catch(() => {});
+    _loadAllDream11MatchesFromFirestore(true).then(() => render()).catch(() => {});
+  }
+
   const _homeMatchesReady = Promise.all([
     _loadAllMatchesFromFirestore(false, true),
     _loadAllDream11MatchesFromFirestore(false, true),
@@ -38147,22 +38190,10 @@ async function initApp() {
   // _homeMatchesReady instead of waiting on the full chain — for an admin
   // session this repaints the Panel's team counts as early as the matches
   // themselves, not whenever the slowest of 14 unrelated reads finishes.
-  if (typeof isAdmin === 'function' && isAdmin()) {
-    _loadAllDream11TeamsFromFirestore(true).then(() => render()).catch(() => {});
-    // FIX (root cause of "old already-scored matches still showing as
-    // Active/OPEN in the admin Panel until manually refreshed"): the
-    // blanket forceRefresh=false above (see the quota-crisis note just
-    // above _homeMatchesReady) is correct for regular users, but it means
-    // an admin's dream11Matches can be a stale cached snapshot missing a
-    // `scored: true` flag that was actually set on another device/session
-    // — renderAdminD11MatchesList()'s Active filter is literally
-    // `!dream11Matches[m.id]?.scored`, so a stale miss there keeps a
-    // finished match looking Active/OPEN indefinitely. Same admin-only
-    // exception already made for teams just above — this doesn't affect
-    // the regular-user read-quota fix, since it only fires for the admin
-    // account, not every user on every app open.
-    _loadAllDream11MatchesFromFirestore(true).then(() => render()).catch(() => {});
-  }
+  //
+  // (The actual admin-only forced reads now happen ABOVE, before
+  // _homeMatchesReady — see the fix note there. This comment block stays
+  // for context on why the exception exists at all.)
 
   Promise.all([
     _loadAllUsersFromFirestore(false),_homeMatchesReady,
@@ -38456,7 +38487,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.22";
+const APP_VERSION = "4.66.23";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
