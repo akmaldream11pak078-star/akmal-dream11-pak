@@ -2299,7 +2299,7 @@ function _installVisibilityGuard() {
       // so if nothing changed it's a near-empty read per collection.
       Object.keys(_liveCollectionSpecs).forEach(name => {
         const spec = _liveCollectionSpecs[name];
-        _autoIncrementalRefresh(name, spec.targetSetter, spec.cacheKey, spec.opts);
+        _autoIncrementalRefresh(name, spec.targetSetter, spec.cacheKey, spec.opts, undefined, spec.targetGetter);
       });
       // FIX (root cause of "admin closes and reopens the app, Panel briefly
       // shows 0 teams, then corrects itself ~30s later on its own"): on
@@ -2441,7 +2441,7 @@ function _updateSyncWatermark(collectionName, obj) {
 // don't re-query Firestore more than once every couple of minutes.
 const AUTO_REFRESH_MIN_GAP_MS = 2 * 60 * 1000; // 2 minutes
 let _autoRefreshInFlight = {};
-async function _autoIncrementalRefresh(collectionName, targetSetter, cacheKey, opts, minGapMs) {
+async function _autoIncrementalRefresh(collectionName, targetSetter, cacheKey, opts, minGapMs, targetGetter) {
   if (!window._fbDb || !window._fbFns || !window._fbFns.query || !window._fbFns.where || !window._fbFns.getDocs) return;
   if (_autoRefreshInFlight[collectionName]) return; // already checking, don't stack duplicate queries
   const lastAuto = _getLastManualRefreshAt('auto_' + collectionName);
@@ -2456,8 +2456,31 @@ async function _autoIncrementalRefresh(collectionName, targetSetter, cacheKey, o
     const incQuery = query(collection(window._fbDb, collectionName), where('updatedAt', '>', watermark));
     const snap = await getDocs(incQuery);
     if (snap.empty) return; // nothing changed since last time — cache already reflects reality, no re-render needed
-    let existing = {};
-    try { existing = JSON.parse(localStorage.getItem(cacheKey) || '{}'); } catch(e){}
+    // FIX (root cause of "app showed correct fresh data, then reopening the
+    // app went straight back to old stale data read from cache"): this
+    // used to rebuild `existing` from whatever was CURRENTLY SITTING IN
+    // localStorage at the moment this function ran — not from the live
+    // in-memory object that every other part of the app was actually
+    // using. If localStorage's cached copy was ever behind the real
+    // in-memory state for any reason (e.g. a brief window during the
+    // listener-attach-race scenario fixed earlier, or simply this device
+    // having an older cache entry than what the current session's memory
+    // already corrected to), this function would take that STALE
+    // localStorage snapshot, merge a few newly-changed docs into it, and
+    // write the result back — permanently re-sealing the old, mostly-stale
+    // data into the cache file, overwriting whatever correct data had just
+    // been there. Since this runs on an 8-second repeating timer
+    // (D11_FAST_POLL_COLLECTIONS), it only had to catch that stale window
+    // once to lock in wrong data indefinitely, until a manual refresh (or
+    // another lucky full re-read) happened to overwrite it again. Now
+    // starts from the actual current in-memory object (targetGetter()) —
+    // the same live source of truth every other read in the app uses —
+    // so this can only ever ADD/update the specific incremental docs onto
+    // whatever's really live, never silently roll the whole cache back to
+    // an older snapshot.
+    const existing = (typeof targetGetter === 'function' ? targetGetter() : null) || (() => {
+      try { return JSON.parse(localStorage.getItem(cacheKey) || '{}'); } catch(e){ return {}; }
+    })();
     snap.forEach(d => { existing[d.id] = d.data(); });
     targetSetter(existing);
     try { localStorage.setItem(cacheKey, JSON.stringify(existing)); } catch(e){}
@@ -2722,7 +2745,7 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
       // when the tab goes hidden) and transparently reattached on the next
       // tap — instead of running forever in a backgrounded/idle tab.
       _liveCollections[collectionName] = unsub;
-      _liveCollectionSpecs[collectionName] = { targetSetter, cacheKey, opts };
+      _liveCollectionSpecs[collectionName] = { targetSetter, cacheKey, opts, targetGetter };
     } catch(e) {
       console.error('Failed to attach live listener for ' + collectionName + ':', e);
       if (!resolved) { resolved = true; delete window._listenerAttachInFlight[collectionName]; resolve(false); }
@@ -2756,7 +2779,7 @@ function _startD11FastPoll() {
     if (document.hidden) return; // tab genuinely backgrounded — no point polling a screen no one's looking at
     D11_FAST_POLL_COLLECTIONS.forEach(name => {
       const spec = _liveCollectionSpecs[name];
-      if (spec) _autoIncrementalRefresh(name, spec.targetSetter, spec.cacheKey, spec.opts, D11_FAST_POLL_MIN_GAP_MS);
+      if (spec) _autoIncrementalRefresh(name, spec.targetSetter, spec.cacheKey, spec.opts, D11_FAST_POLL_MIN_GAP_MS, spec.targetGetter);
     });
   }, D11_FAST_POLL_MS);
 }
@@ -38503,7 +38526,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.25";
+const APP_VERSION = "4.66.26";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
