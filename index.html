@@ -4868,6 +4868,21 @@ function getGlobalLeaderboard() {
   Object.values(dream11Teams||{}).forEach(t => {
     if (!t || !t.userEmail) return;
     if ((t.teamSlot||1) !== 1) return;
+    // FIX (root cause of Global Leaderboard showing a noticeably HIGHER
+    // total than H2H Stats Compare for the same user): this summed every
+    // Team-1 in dream11Teams with no check that the team's match still
+    // exists. getUserD11MatchHistoryStats() (which H2H Stats Compare's
+    // totals are built from) explicitly requires BOTH matches[mId] and
+    // dream11Matches[mId] to still exist before counting a team's points
+    // at all — so a team whose match was later deleted/archived by the
+    // admin (a normal cleanup action, not a bug in itself) silently
+    // dropped out of the Compare screen's total, while this function kept
+    // counting it forever, since it never checked whether the match was
+    // still there. That's exactly the several-thousand-point gap between
+    // the two screens for the same user. Now applies the same
+    // match-must-still-exist rule here, so both screens are always
+    // measuring the same thing.
+    if (!dream11Matches || !dream11Matches[t.matchId]) return;
     d11PointsByEmail[t.userEmail] = (d11PointsByEmail[t.userEmail]||0) + (t.totalPoints||0);
   });
 
@@ -4888,7 +4903,7 @@ function getGlobalLeaderboard() {
       // teamSlot 1 (or unset, which defaults to 1 — same rule the points
       // sum already uses) counts toward "matches joined", so the number
       // shown always reflects matches that actually contributed points.
-      Object.values(dream11Teams||{}).forEach(t => { if (t.userEmail===e && (t.teamSlot||1)===1) matchSet.add(t.matchId); });
+      Object.values(dream11Teams||{}).forEach(t => { if (t.userEmail===e && (t.teamSlot||1)===1 && dream11Matches && dream11Matches[t.matchId]) matchSet.add(t.matchId); });
       return {
         email: e,
         name: u.name,
@@ -38401,7 +38416,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.20";
+const APP_VERSION = "4.66.21";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
