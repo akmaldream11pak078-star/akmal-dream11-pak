@@ -1968,7 +1968,24 @@ async function _loadAllUsersFromFirestore(forceRefresh) {
     } catch(e){ return false; }
   }
 
-  return new Promise((resolve) => {
+  // FIX: same listener-attach race as the general _liveLoadCollection
+  // mechanism (see its own fix notes) — this function has its own
+  // SEPARATE listener-attach code path for 'pp_users' rather than going
+  // through _liveLoadCollection, and it had no protection against being
+  // called twice concurrently on a fresh app boot (e.g. the regular
+  // bootstrap call and a new admin-only forced-refresh call both running
+  // moments apart). Without a guard here, two independent onSnapshot
+  // listeners could attach to pp_users, racing to be the one whose
+  // snapshot delivery "wins" and gets written last — same failure mode
+  // that caused Total Users/Deposits/Withdrawn to look correct then
+  // silently revert. Reuse the same window._listenerAttachInFlight lock.
+  window._listenerAttachInFlight = window._listenerAttachInFlight || {};
+  if (window._listenerAttachInFlight['pp_users'] && !window._liveCollectionUnsubs['pp_users']) {
+    await window._listenerAttachInFlight['pp_users'];
+    if (window._liveCollectionUnsubs['pp_users'] && !forceRefresh) return true;
+  }
+
+  const attachPromise = new Promise((resolve) => {
     let resolved = false;
     try {
       const { collection, onSnapshot } = window._fbFns;
@@ -1986,11 +2003,11 @@ async function _loadAllUsersFromFirestore(forceRefresh) {
         if (currentUser && users[currentUser.email]) {
           currentUser = { ...users[currentUser.email], email: currentUser.email };
         }
-        if (!resolved) { resolved = true; resolve(true); }
+        if (!resolved) { resolved = true; delete window._listenerAttachInFlight['pp_users']; resolve(true); }
         else { try { render(); } catch(e){} }
       }, err => {
         console.error('pp_users live-sync error:', err);
-        if (!resolved) { resolved = true; resolve(false); }
+        if (!resolved) { resolved = true; delete window._listenerAttachInFlight['pp_users']; resolve(false); }
       });
       window._liveCollectionUnsubs = window._liveCollectionUnsubs || {};
       window._liveCollectionUnsubs['pp_users'] = unsub;
@@ -1998,9 +2015,11 @@ async function _loadAllUsersFromFirestore(forceRefresh) {
       _liveCollectionSpecs['pp_users'] = { targetSetter: null, cacheKey: 'pp_users_cache', opts: {} };
     } catch(e) {
       console.error('Failed to attach pp_users live listener:', e);
-      if (!resolved) { resolved = true; resolve(false); }
+      if (!resolved) { resolved = true; delete window._listenerAttachInFlight['pp_users']; resolve(false); }
     }
   });
+  window._listenerAttachInFlight['pp_users'] = attachPromise;
+  return attachPromise;
 }
 
 // ── Fetch ONE user by email directly (1 read), instead of downloading the
@@ -2328,6 +2347,11 @@ function _installVisibilityGuard() {
       // match that was actually already scored elsewhere.
       if (typeof isAdmin === 'function' && isAdmin() && typeof _loadAllDream11MatchesFromFirestore === 'function') {
         _loadAllDream11MatchesFromFirestore(true).then(() => { try { render(); } catch(e){} }).catch(() => {});
+      }
+      // Same fix again, for the Panel's Total Users/Deposits/Withdrawn
+      // stats (computed from the `users` object).
+      if (typeof isAdmin === 'function' && isAdmin() && typeof _loadAllUsersFromFirestore === 'function') {
+        _loadAllUsersFromFirestore(true).then(() => { try { render(); } catch(e){} }).catch(() => {});
       }
     }
   });
@@ -6579,6 +6603,9 @@ function goTab(t) {
     // never shows a stale "still Active" match that was actually scored
     // elsewhere.
     _loadAllDream11MatchesFromFirestore(true).then(() => render()).catch(() => {});
+    // Same reasoning again, for the Panel's Total Users/Deposits/Withdrawn
+    // stats, which are computed from the `users` object.
+    _loadAllUsersFromFirestore(true).then(() => render()).catch(() => {});
   }
 }
 </script>
@@ -38203,6 +38230,21 @@ async function initApp() {
   if (typeof isAdmin === 'function' && isAdmin()) {
     _loadAllDream11TeamsFromFirestore(true).then(() => render()).catch(() => {});
     _loadAllDream11MatchesFromFirestore(true).then(() => render()).catch(() => {});
+    // FIX (root cause of "Owner Control Panel stats — Total Users, Total
+    // Deposits, Total Withdrawn — showed correct numbers, then reverted to
+    // stale/zero values right after reopening the app"): _loadAllUsersFromFirestore
+    // has its own special-cased admin behavior (see the function itself) —
+    // for an admin with forceRefresh=false and any cached users already in
+    // memory, it returns immediately without ever attaching a fresh
+    // listener or reading Firestore, deferring entirely to whenever the
+    // admin happens to open the Users tab (_startAdminUsersLiveSync). Since
+    // initApp's regular bootstrap call passes forceRefresh=false (see the
+    // quota-crisis note below), the Panel's stats — which are computed
+    // directly from the `users` object — were stuck on whatever the last
+    // session's cache held until the admin manually refreshed or visited
+    // Users. Same admin-only forced-read exception already made for teams
+    // and matches above.
+    _loadAllUsersFromFirestore(true).then(() => render()).catch(() => {});
   }
 
   const _homeMatchesReady = Promise.all([
@@ -38526,7 +38568,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.26";
+const APP_VERSION = "4.66.27";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
