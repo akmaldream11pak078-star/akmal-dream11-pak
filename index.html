@@ -9352,13 +9352,49 @@ function d11ApplyBackupReplacements(matchId) {
       if (!currentlyInXI && !alreadyReplaced) {
         // Find first unused backup that's confirmed in Playing XI — role/
         // category no longer matters, any backup can cover any main pick.
-        const backupId = team.backups.find(bId => {
+        let backupId = team.backups.find(bId => {
           if (usedBackupIds.has(bId)) return false;
           if (team.picks.includes(bId)) return false; // shouldn't happen, safety check
           const bp = (d11m.players||[]).find(x => x.id === bId);
           return bp && bp.isPlayingXI;
         });
+        let reclaimedFrom = null;
+        // FIX (why re-running Sync Now didn't fix an existing team where a
+        // normal player had already claimed the only available backup
+        // before Captain/VC got covered — this happens on data saved
+        // before the sort-by-priority fix above existed): no *unused*
+        // backup was left to find above, since every backup is already
+        // sitting in team.replacements for some earlier-processed player.
+        // If the current slot needing a backup is Captain or Vice-Captain
+        // (the multiplier-bearing roles this whole priority order exists
+        // to protect), reclaim the backup currently covering a NORMAL
+        // (non-C/VC) player instead of leaving C/VC's 2x/1.5x multiplier
+        // scoring zero. The normal player who loses their backup reverts
+        // to their own original (non-playing) state — worse for them
+        // individually, but correct: a missed Captain/VC costs the whole
+        // team's score far more than one missed normal pick.
+        if (!backupId && (originalId === team.captain || originalId === team.viceCaptain)) {
+          const reclaimEntry = Object.entries(team.replacements || {}).find(([origId, bId]) => {
+            if (origId === team.captain || origId === team.viceCaptain) return false; // don't rob one multiplier role to pay another
+            const bp = (d11m.players||[]).find(x => x.id === bId);
+            return bp && bp.isPlayingXI; // only reclaim from a normal player whose backup is actually valid/in-XI
+          });
+          if (reclaimEntry) {
+            reclaimedFrom = reclaimEntry[0];
+            backupId = reclaimEntry[1];
+          }
+        }
         if (backupId) {
+          if (reclaimedFrom) {
+            // Put the normal player back in their own original slot before
+            // handing their backup over to Captain/VC — otherwise the
+            // backup would end up listed twice (once for its old original,
+            // once for the new one) and the normal player's slot would go
+            // missing from team.picks entirely.
+            const reclaimedSlotIdx = team.picks.indexOf(backupId);
+            if (reclaimedSlotIdx >= 0) team.picks[reclaimedSlotIdx] = reclaimedFrom;
+            delete team.replacements[reclaimedFrom];
+          }
           let slotIdx = team.picks.indexOf(originalId);
           // FIX: was `if (slotIdx >= 0) { ...swap... }` with no else — if
           // originalId had somehow already gone missing from team.picks
@@ -38643,7 +38679,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.29";
+const APP_VERSION = "4.66.30";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
