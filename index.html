@@ -9374,8 +9374,28 @@ function d11ApplyBackupReplacements(matchId) {
         // individually, but correct: a missed Captain/VC costs the whole
         // team's score far more than one missed normal pick.
         if (!backupId && (originalId === team.captain || originalId === team.viceCaptain)) {
+          // FIX (root cause of "VC badge just disappeared entirely,
+          // nowhere on the field or bench"): this exclusion only checked
+          // `origId === team.captain || origId === team.viceCaptain` —
+          // but origId here is always the ORIGINAL (non-playing) player's
+          // id, the key in team.replacements. Once Captain or VC has
+          // already been covered by a backup earlier in this same run (or
+          // in an earlier sync), team.captain/team.viceCaptain hold the
+          // BACKUP's id, not the original's — so this check could never
+          // actually recognize "this replacement entry is currently
+          // covering VC" once that had already happened. That let a later
+          // reclaim (e.g. Captain needing a backup) steal the exact backup
+          // that was quietly keeping Vice-Captain covered, without
+          // updating team.viceCaptain to point anywhere sensible — VC's
+          // badge then matched no id anywhere in team.picks, appearing to
+          // vanish completely. Now excludes an entry if EITHER its
+          // original id OR the backup id currently sitting in that slot
+          // is the team's captain/viceCaptain — covering both "this
+          // original player is C/VC" and "this backup is currently
+          // standing in for C/VC" cases.
           const reclaimEntry = Object.entries(team.replacements || {}).find(([origId, bId]) => {
-            if (origId === team.captain || origId === team.viceCaptain) return false; // don't rob one multiplier role to pay another
+            if (origId === team.captain || origId === team.viceCaptain) return false;
+            if (bId === team.captain || bId === team.viceCaptain) return false; // this backup IS currently covering C/VC — don't touch it
             const bp = (d11m.players||[]).find(x => x.id === bId);
             return bp && bp.isPlayingXI; // only reclaim from a normal player whose backup is actually valid/in-XI
           });
@@ -9432,6 +9452,36 @@ function d11ApplyBackupReplacements(matchId) {
       // through with no matching branch) so every combination of
       // currentlyInXI/alreadyReplaced is visibly accounted for.
     });
+
+    // Safety net: verify captain/viceCaptain still point at an ID that's
+    // actually in team.picks. This guards against any edge case in the
+    // reclaim/cascade logic above leaving one of these IDs orphaned (e.g.
+    // pointing at a player who got swapped out from under them without the
+    // designation being carried over) — which would make the C/VC badge
+    // silently disappear entirely, with the multiplier defaulting to 1x
+    // for whichever player secretly still held the role internally. If
+    // orphaned, try to recover via team.replacements (maybe the intended
+    // player IS covered by a backup, just not the one currently keyed to
+    // captain/viceCaptain); otherwise log it clearly so it's visible in
+    // the console rather than a silent, hard-to-diagnose scoring bug.
+    if (team.captain && !team.picks.includes(team.captain)) {
+      const coveredBy = team.replacements && team.replacements[team.captain];
+      if (coveredBy && team.picks.includes(coveredBy)) {
+        team.captain = coveredBy;
+        changed = true;
+      } else {
+        console.warn(`d11ApplyBackupReplacements: team ${team.id} captain ${team.captain} is not in picks and has no valid replacement — leaving as-is, please review manually`);
+      }
+    }
+    if (team.viceCaptain && !team.picks.includes(team.viceCaptain)) {
+      const coveredBy = team.replacements && team.replacements[team.viceCaptain];
+      if (coveredBy && team.picks.includes(coveredBy)) {
+        team.viceCaptain = coveredBy;
+        changed = true;
+      } else {
+        console.warn(`d11ApplyBackupReplacements: team ${team.id} viceCaptain ${team.viceCaptain} is not in picks and has no valid replacement — leaving as-is, please review manually`);
+      }
+    }
 
     if (changed) {
       team.totalPoints = calcDream11TeamPoints(team, d11m);
@@ -38764,7 +38814,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.31";
+const APP_VERSION = "4.66.32";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
