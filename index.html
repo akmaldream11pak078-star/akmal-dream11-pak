@@ -14782,12 +14782,27 @@ async function d11CheckPlayingXIAnnouncedSbx(matchId, silent) {
     });
     if (confirmedCount > 0 || unconfirmedCount > 0) {
       await _saveDream11MatchToFirestore(matchId, d11m);
-      d11ApplyBackupReplacements(matchId);
       notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
-      render();
     } else {
       notify('No changes — latest Playing XI matches what was already confirmed.', 'error');
     }
+    // FIX (root cause of "a backup that IS confirmed Playing XI, and IS
+    // still unused, sat on the bench forever instead of covering a
+    // non-playing main pick"): this call used to be INSIDE the
+    // confirmedCount/unconfirmedCount branch above — meaning it only ran
+    // when THIS specific sync pass changed at least one player's XI
+    // status. If a backup player (like Tim Pringle here) was confirmed
+    // Playing XI by an EARLIER sync, and this particular sync run happens
+    // to find zero new changes (everyone's status already matches), the
+    // whole backup-replacement pass got skipped entirely — even though
+    // main picks could still be sitting unreplaced with a perfectly valid,
+    // already-confirmed backup available. Backups needing to swap in isn't
+    // tied to "did a status change just now" — it only depends on current
+    // state (is this main pick out of the XI, is there an unused
+    // XI-confirmed backup), so this must run on every sync regardless of
+    // whether this pass itself changed anything.
+    d11ApplyBackupReplacements(matchId);
+    render();
   } catch (e) {
     console.error('Sportbex Playing XI check failed:', e);
     notify('Could not check Playing XI — ' + (e.message||'unknown error'), 'error');
@@ -15673,12 +15688,14 @@ async function d11CheckPlayingXIAnnouncedAll(matchId, silent) {
       // FIX: 'players' is regular-user-legal per the rules — narrow update
       // works for any user, not just admin/subAdminXI.
       await _updateDream11MatchScoringFields(matchId, { players: d11m.players });
-      d11ApplyBackupReplacements(matchId);
       notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
-      render();
     } else {
       notify('No changes — latest Playing XI matches what was already confirmed.', 'error');
     }
+    // See root-cause note above other d11ApplyBackupReplacements calls:
+    // must run every time, not only when this pass itself changed status.
+    d11ApplyBackupReplacements(matchId);
+    render();
   } catch (e) {
     console.error('Advance Live Line Playing XI check failed:', e);
     notify('Could not check Playing XI — ' + (e.message||'unknown error'), 'error');
@@ -16691,12 +16708,14 @@ async function d11CheckPlayingXIAnnouncedAll2(matchId, silent) {
       // FIX: 'players' is regular-user-legal per the rules — narrow update
       // works for any user, not just admin/subAdminXI.
       await _updateDream11MatchScoringFields(matchId, { players: d11m.players });
-      d11ApplyBackupReplacements(matchId);
       notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
-      render();
     } else {
       notify('No changes — latest Playing XI matches what was already confirmed.', 'error');
     }
+    // See root-cause note above other d11ApplyBackupReplacements calls:
+    // must run every time, not only when this pass itself changed status.
+    d11ApplyBackupReplacements(matchId);
+    render();
   } catch (e) {
     console.error('Advance Live Line 2 Playing XI check failed:', e);
     notify('Could not check Playing XI — ' + (e.message||'unknown error'), 'error');
@@ -17805,12 +17824,27 @@ async function d11CheckPlayingXIAnnouncedCb2(matchId, silent) {
     });
     if (confirmedCount > 0 || unconfirmedCount > 0) {
       await _saveDream11MatchToFirestore(matchId, d11m);
-      d11ApplyBackupReplacements(matchId);
       notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
-      render();
     } else {
       notify('No changes — latest Playing XI matches what was already confirmed.', 'error');
     }
+    // FIX (root cause of "a backup that IS confirmed Playing XI, and IS
+    // still unused, sat on the bench forever instead of covering a
+    // non-playing main pick"): this call used to be INSIDE the
+    // confirmedCount/unconfirmedCount branch above — meaning it only ran
+    // when THIS specific sync pass changed at least one player's XI
+    // status. If a backup player (like Tim Pringle here) was confirmed
+    // Playing XI by an EARLIER sync, and this particular sync run happens
+    // to find zero new changes (everyone's status already matches), the
+    // whole backup-replacement pass got skipped entirely — even though
+    // main picks could still be sitting unreplaced with a perfectly valid,
+    // already-confirmed backup available. Backups needing to swap in isn't
+    // tied to "did a status change just now" — it only depends on current
+    // state (is this main pick out of the XI, is there an unused
+    // XI-confirmed backup), so this must run on every sync regardless of
+    // whether this pass itself changed anything.
+    d11ApplyBackupReplacements(matchId);
+    render();
   } catch (e) {
     console.error('Cricbuzz No 2 Playing XI check failed:', e);
     notify('Could not check Playing XI — ' + (e.message||'unknown error'), 'error');
@@ -18260,12 +18294,27 @@ async function d11CheckPlayingXIAnnouncedCll(matchId, silent) {
     });
     if (confirmedCount > 0 || unconfirmedCount > 0) {
       await _saveDream11MatchToFirestore(matchId, d11m);
-      d11ApplyBackupReplacements(matchId);
       notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
-      render();
     } else {
       notify('No changes — latest Playing XI matches what was already confirmed.', 'error');
     }
+    // FIX (root cause of "a backup that IS confirmed Playing XI, and IS
+    // still unused, sat on the bench forever instead of covering a
+    // non-playing main pick"): this call used to be INSIDE the
+    // confirmedCount/unconfirmedCount branch above — meaning it only ran
+    // when THIS specific sync pass changed at least one player's XI
+    // status. If a backup player (like Tim Pringle here) was confirmed
+    // Playing XI by an EARLIER sync, and this particular sync run happens
+    // to find zero new changes (everyone's status already matches), the
+    // whole backup-replacement pass got skipped entirely — even though
+    // main picks could still be sitting unreplaced with a perfectly valid,
+    // already-confirmed backup available. Backups needing to swap in isn't
+    // tied to "did a status change just now" — it only depends on current
+    // state (is this main pick out of the XI, is there an unused
+    // XI-confirmed backup), so this must run on every sync regardless of
+    // whether this pass itself changed anything.
+    d11ApplyBackupReplacements(matchId);
+    render();
   } catch (e) {
     console.error('Cricket Live Line Playing XI check failed:', e);
     notify('Could not check Playing XI — ' + (e.message||'unknown error'), 'error');
@@ -18578,12 +18627,27 @@ async function d11CheckPlayingXIAnnouncedLl2(matchId, silent) {
     });
     if (confirmedCount > 0 || unconfirmedCount > 0) {
       await _saveDream11MatchToFirestore(matchId, d11m);
-      d11ApplyBackupReplacements(matchId);
       notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
-      render();
     } else {
       notify('No changes — latest Playing XI matches what was already confirmed.', 'error');
     }
+    // FIX (root cause of "a backup that IS confirmed Playing XI, and IS
+    // still unused, sat on the bench forever instead of covering a
+    // non-playing main pick"): this call used to be INSIDE the
+    // confirmedCount/unconfirmedCount branch above — meaning it only ran
+    // when THIS specific sync pass changed at least one player's XI
+    // status. If a backup player (like Tim Pringle here) was confirmed
+    // Playing XI by an EARLIER sync, and this particular sync run happens
+    // to find zero new changes (everyone's status already matches), the
+    // whole backup-replacement pass got skipped entirely — even though
+    // main picks could still be sitting unreplaced with a perfectly valid,
+    // already-confirmed backup available. Backups needing to swap in isn't
+    // tied to "did a status change just now" — it only depends on current
+    // state (is this main pick out of the XI, is there an unused
+    // XI-confirmed backup), so this must run on every sync regardless of
+    // whether this pass itself changed anything.
+    d11ApplyBackupReplacements(matchId);
+    render();
   } catch (e) {
     console.error('Cricket Live Line 2 Playing XI check failed:', e);
     notify('Could not check Playing XI — ' + (e.message||'unknown error'), 'error');
@@ -19505,12 +19569,14 @@ async function d11CheckPlayingXIAnnouncedLl3(matchId, silent) {
     if (confirmedCount > 0 || unconfirmedCount > 0) {
       // FIX: 'players' is regular-user-legal per the rules.
       await _updateDream11MatchScoringFields(matchId, { players: d11m.players });
-      d11ApplyBackupReplacements(matchId);
       notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
-      render();
     } else {
       notify('No changes — latest Playing XI matches what was already confirmed.', 'error');
     }
+    // See root-cause note above other d11ApplyBackupReplacements calls:
+    // must run every time, not only when this pass itself changed status.
+    d11ApplyBackupReplacements(matchId);
+    render();
   } catch (e) {
     console.error('Cricket Live Line 3 Playing XI check failed:', e);
     notify('Could not check Playing XI — ' + (e.message||'unknown error'), 'error');
@@ -20461,12 +20527,27 @@ async function d11CheckPlayingXIAnnouncedLl4(matchId, silent) {
     });
     if (confirmedCount > 0 || unconfirmedCount > 0) {
       await _saveDream11MatchToFirestore(matchId, d11m);
-      d11ApplyBackupReplacements(matchId);
       notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
-      render();
     } else {
       notify('No changes — latest Playing XI matches what was already confirmed.', 'error');
     }
+    // FIX (root cause of "a backup that IS confirmed Playing XI, and IS
+    // still unused, sat on the bench forever instead of covering a
+    // non-playing main pick"): this call used to be INSIDE the
+    // confirmedCount/unconfirmedCount branch above — meaning it only ran
+    // when THIS specific sync pass changed at least one player's XI
+    // status. If a backup player (like Tim Pringle here) was confirmed
+    // Playing XI by an EARLIER sync, and this particular sync run happens
+    // to find zero new changes (everyone's status already matches), the
+    // whole backup-replacement pass got skipped entirely — even though
+    // main picks could still be sitting unreplaced with a perfectly valid,
+    // already-confirmed backup available. Backups needing to swap in isn't
+    // tied to "did a status change just now" — it only depends on current
+    // state (is this main pick out of the XI, is there an unused
+    // XI-confirmed backup), so this must run on every sync regardless of
+    // whether this pass itself changed anything.
+    d11ApplyBackupReplacements(matchId);
+    render();
   } catch (e) {
     console.error('Cricket Live Line 4 Playing XI check failed:', e);
     notify('Could not check Playing XI — ' + (e.message||'unknown error'), 'error');
@@ -21584,12 +21665,14 @@ async function d11CheckPlayingXIAnnouncedLl5(matchId, silent) {
     if (confirmedCount > 0 || unconfirmedCount > 0) {
       // FIX: 'players' is regular-user-legal per the rules.
       await _updateDream11MatchScoringFields(matchId, { players: d11m.players });
-      d11ApplyBackupReplacements(matchId);
       notify(`🏏 Playing XI updated — ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅`);
-      render();
     } else {
       notify('No changes — latest Playing XI matches what was already confirmed.', 'error');
     }
+    // See root-cause note above other d11ApplyBackupReplacements calls:
+    // must run every time, not only when this pass itself changed status.
+    d11ApplyBackupReplacements(matchId);
+    render();
   } catch (e) {
     console.error('Cricket Live Line 5 Playing XI check failed:', e);
     notify('Could not check Playing XI — ' + (e.message||'unknown error'), 'error');
@@ -23141,10 +23224,12 @@ async function d11CheckPlayingXIAnnounced(matchId, silent) {
 
     if (confirmedCount > 0 || unconfirmedCount > 0) {
       await _saveDream11MatchToFirestore(matchId, d11m);
-      d11ApplyBackupReplacements(matchId);
       notify(`🏏 Playing XI updated! ${confirmedCount} confirmed${unconfirmedCount ? `, ${unconfirmedCount} removed` : ''} ✅${addedCount ? ` (${addedCount} new players added to pool)` : ''}`);
-      render();
     }
+    // See root-cause note above other d11ApplyBackupReplacements calls:
+    // must run every time, not only when this pass itself changed status.
+    d11ApplyBackupReplacements(matchId);
+    render();
   } catch (e) {
     console.error('Playing XI check failed:', e);
     notify('Could not check Playing XI — ' + (e.message||'unknown error'), 'error');
@@ -38679,7 +38764,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.30";
+const APP_VERSION = "4.66.31";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
