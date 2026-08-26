@@ -4334,6 +4334,64 @@ async function _atomicJoinPaidContest({ matchId, entryFeeAmount, matchCollection
       : participants.includes(currentUser.email);
     if (alreadyJoined) { showNotif(alreadyJoinedMsg, 'error'); return null; }
 
+    // FIX (root cause of "user got charged, contest never joined; they
+    // tried again and got charged a SECOND time before admin could fix
+    // it"): if this exact user already has an earlier, still-unresolved
+    // charge for this exact match+contest (same txType, same matchId, no
+    // matching participant entry, not already refunded/reversed by the
+    // orphan tool or match-level refund) sitting in their own transaction
+    // history, don't charge them again — that would be charging someone
+    // twice for the same contest entry, before the admin even had a
+    // chance to see and resolve the first one via 🔎 Find & Fix Orphaned
+    // Contest Entries. Instead, complete the join using that EXISTING
+    // charge (no new balance deduction) and let the admin's orphan-scan
+    // simply find nothing to fix for it later, since it's now resolved.
+    const alreadyRefundedOrReversedTxIds = new Set(
+      (userData.transactions || [])
+        .filter(t => (t.type === 'admin_refund' || t.type === 'admin_reversal') && typeof t.note === 'string')
+        .map(t => (t.note.match(/\(tx ([^)]+)\)/) || [])[1])
+        .filter(Boolean)
+    );
+    const priorOrphanTx = (userData.transactions || []).find(t =>
+      t.type === txType &&
+      t.matchId === matchId &&
+      t.status === 'confirmed' &&
+      !alreadyRefundedOrReversedTxIds.has(t.id)
+    );
+    if (priorOrphanTx) {
+      const updatedMatchData = { ...matchData };
+      if (participantsAreObjectMap) {
+        updatedMatchData[participantsField] = { ...participants, [currentUser.email]: true };
+      } else {
+        updatedMatchData[participantsField] = [...participants, currentUser.email];
+      }
+      updatedMatchData[poolField] = (matchData[poolField] || 0) + (Math.abs(priorOrphanTx.amount) || entryFeeAmount);
+      if (teamId) {
+        updatedMatchData[teamsField] = { ...(matchData[teamsField] || {}), [currentUser.email]: teamId };
+      }
+      const matchUpdate = {
+        [participantsField]: updatedMatchData[participantsField],
+        [poolField]: updatedMatchData[poolField],
+        updatedAt: Date.now()
+      };
+      if (Array.isArray(updatedMatchData.participants) && !updatedMatchData.participants.includes(currentUser.email)) {
+        updatedMatchData.participants = [...updatedMatchData.participants, currentUser.email];
+        matchUpdate.participants = updatedMatchData.participants;
+      }
+      if (teamId) matchUpdate[teamsField] = updatedMatchData[teamsField];
+      try {
+        await updateDoc(matchRef, matchUpdate);
+        showNotif('✅ Joined using your earlier payment for this contest — no new charge.', 'success');
+        return { balance: userData.balance || 0, transactions: userData.transactions || [], matchData: updatedMatchData, usedPriorCharge: true };
+      } catch (retryJoinErr) {
+        console.error('Retry-join using prior charge failed — falling back to normal join flow:', retryJoinErr);
+        // Fall through to the normal paid-join path below rather than
+        // leaving the user stuck — worst case here is the admin's orphan
+        // tool later finds two charges instead of one, which they can
+        // still resolve manually; better than blocking the retry entirely.
+      }
+    }
+
     // Slot-capped contests (e.g. Slot 20): checked against the doc as read
     // just now. Without a transaction this can't guarantee zero overshoot
     // if two people tap Join in the same instant, but that window is brief
@@ -9209,7 +9267,24 @@ function d11ApplyBackupReplacements(matchId) {
     // slot), but still needs to be checked here so the revert-back
     // (currentlyInXI && alreadyReplaced) and cascade-to-next-backup
     // (!currentlyInXI && alreadyReplaced) branches below can still find it.
-    const idsToCheck = new Set([...team.picks, ...Object.keys(team.replacements || {})]);
+    const idsToCheck = [...new Set([...team.picks, ...Object.keys(team.replacements || {})])];
+    // FIX (the actual bug reported): iteration order here used to be
+    // whatever order players happened to sit in team.picks — no priority
+    // for Captain/Vice-Captain at all. Since backups are a shared, limited
+    // pool (max 4) and this loop assigns "first unused backup that's
+    // confirmed in Playing XI" to whichever original pick it happens to
+    // reach first, a normal player earlier in `picks` could claim the last
+    // available backup before the loop ever got to the Captain or
+    // Vice-Captain slot — leaving C/VC sitting out of the Playing XI with
+    // NO backup covering them (and their 2x/1.5x multiplier scoring zero),
+    // while an ordinary player got covered instead. Sort so Captain is
+    // checked first, then Vice-Captain, then everyone else — guaranteeing
+    // that if backups are scarce, the multiplier-bearing roles are the
+    // ones that get covered first, exactly as they should be.
+    idsToCheck.sort((a, b) => {
+      const rank = (id) => id === team.captain ? 0 : id === team.viceCaptain ? 1 : 2;
+      return rank(a) - rank(b);
+    });
     idsToCheck.forEach(originalId => {
       // Skip IDs that are themselves a backup currently standing in for
       // someone else — e.g. once Hasan Ali has replaced Naseem Shah,
@@ -38568,7 +38643,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.27";
+const APP_VERSION = "4.66.29";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
