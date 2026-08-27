@@ -9520,44 +9520,73 @@ function d11ApplyBackupReplacements(matchId) {
     // leaving a stale duplicate pointer. Since only ONE badge renders per
     // player, VC's badge silently lost the tie-break to Captain's.
     if (team.captain && team.viceCaptain && team.captain === team.viceCaptain) {
-      // The stolen id is still sitting in team.captain/team.viceCaptain,
-      // but team.replacements still has the ORIGINAL entry from when this
-      // same backup was first assigned to cover VC (that entry's key IS
-      // VC's real original player — it was never deleted, only the
-      // captain/viceCaptain pointer got overwritten by the later reclaim).
-      // Recover VC's true original id from there, then look for ANY other
-      // still-unused, Playing-XI-confirmed backup to properly re-cover it
-      // — rather than just giving up and clearing VC to nothing, which is
-      // a worse outcome for the user than trying to actually fix it.
-      const stolenBackupId = team.captain; // == team.viceCaptain here
-      const originalVCEntry = Object.entries(team.replacements || {}).find(([origId, bId]) => bId === stolenBackupId && origId !== stolenBackupId);
-      const originalVCId = originalVCEntry ? originalVCEntry[0] : null;
-      let recoveredBackup = null;
-      if (originalVCId) {
-        recoveredBackup = team.backups.find(bId => {
-          if (bId === stolenBackupId) return false; // that one's now covering Captain, not available
+      // FIX (this exact case: VC was NOT itself a backup covering some
+      // other original player — VC was simply assigned directly to a
+      // player who ALSO happened to be serving as someone else's backup,
+      // e.g. Max O'Dowd was Vice-Captain in his own right AND was covering
+      // Mitchell Marsh's empty slot). The recovery below only knew how to
+      // handle "this id is a backup that was covering VC" (a reverse
+      // lookup through team.replacements) — it had no path for "this id
+      // simply IS Vice-Captain, full stop". When that reverse lookup found
+      // nothing (because there was nothing to find — VC was never anyone's
+      // replacement), the old code fell straight to clearing VC to null,
+      // even though VC's rightful holder was sitting right there in
+      // team.captain/team.viceCaptain the whole time. The real problem
+      // isn't "VC needs recovering" — it's "Captain STOLE VC's spot and
+      // needs a DIFFERENT backup for itself, giving VC's original id back
+      // its rightful designation". So: first try to find another
+      // available backup to serve as CAPTAIN's replacement instead (since
+      // the original Captain pick is presumably still not in the Playing
+      // XI) — if found, Captain gets that new backup and VC correctly
+      // keeps the id it already has. Only if the reverse-lookup case (a
+      // genuine "this backup used to cover a DIFFERENT original VC player")
+      // applies do we go through the original recovery path.
+      const stolenId = team.captain; // == team.viceCaptain here
+      const originalVCEntry = Object.entries(team.replacements || {}).find(([origId, bId]) => bId === stolenId && origId !== stolenId);
+      if (originalVCEntry) {
+        // Genuine "VC's backup got stolen" case — recover VC by assigning
+        // a fresh backup to cover its true original player.
+        const originalVCId = originalVCEntry[0];
+        const recoveredBackup = team.backups.find(bId => {
+          if (bId === stolenId) return false;
           if (usedBackupIds.has(bId)) return false;
           const bp = (d11m.players||[]).find(x => x.id === bId);
           return bp && bp.isPlayingXI;
         });
-      }
-      if (originalVCId && recoveredBackup) {
-        const slotIdx = team.picks.indexOf(originalVCId);
-        if (slotIdx >= 0) {
-          team.picks[slotIdx] = recoveredBackup;
+        if (recoveredBackup) {
+          const slotIdx = team.picks.indexOf(originalVCId);
+          if (slotIdx >= 0) team.picks[slotIdx] = recoveredBackup; else team.picks.push(recoveredBackup);
+          team.replacements[originalVCId] = recoveredBackup;
+          team.viceCaptain = recoveredBackup;
+          usedBackupIds.add(recoveredBackup);
+          console.warn(`d11ApplyBackupReplacements: team ${team.id} — Vice-Captain's backup (${stolenId}) had been reassigned to Captain. Recovered VC by assigning a different available backup (${recoveredBackup}) to cover the original Vice-Captain pick (${originalVCId}).`);
         } else {
-          team.picks.push(recoveredBackup);
+          console.warn(`d11ApplyBackupReplacements: team ${team.id} captain and viceCaptain collided on the same id (${team.captain}) and no other backup was available to recover Vice-Captain — clearing viceCaptain. Please review this team manually.`);
+          team.viceCaptain = null;
         }
-        team.replacements[originalVCId] = recoveredBackup;
-        team.viceCaptain = recoveredBackup;
-        usedBackupIds.add(recoveredBackup);
-        console.warn(`d11ApplyBackupReplacements: team ${team.id} — Vice-Captain's backup (${stolenBackupId}) had been reassigned to Captain. Recovered VC by assigning a different available backup (${recoveredBackup}) to cover the original Vice-Captain pick (${originalVCId}).`);
       } else {
-        // No other backup available to cover VC — nothing valid left to
-        // point viceCaptain at, so clear it rather than leave a confusing
-        // duplicate reference. Flagged clearly for manual review.
-        console.warn(`d11ApplyBackupReplacements: team ${team.id} captain and viceCaptain collided on the same id (${team.captain}) and no other backup was available to recover Vice-Captain — clearing viceCaptain. Please review this team manually (its original Vice-Captain pick is sitting unreplaced with no backup left).`);
-        team.viceCaptain = null;
+        // VC was directly assigned to this player (not standing in for
+        // anyone else) — find the ORIGINAL entry that made this player
+        // Captain's replacement instead, and give THAT a different backup,
+        // leaving viceCaptain untouched (it's already correct).
+        const captainOrigEntry = Object.entries(team.replacements || {}).find(([origId, bId]) => bId === stolenId);
+        const captainOrigId = captainOrigEntry ? captainOrigEntry[0] : null;
+        const recoveredBackup = captainOrigId ? team.backups.find(bId => {
+          if (bId === stolenId) return false;
+          if (usedBackupIds.has(bId)) return false;
+          const bp = (d11m.players||[]).find(x => x.id === bId);
+          return bp && bp.isPlayingXI;
+        }) : null;
+        if (captainOrigId && recoveredBackup) {
+          const slotIdx = team.picks.indexOf(captainOrigId);
+          if (slotIdx >= 0) team.picks[slotIdx] = recoveredBackup; else team.picks.push(recoveredBackup);
+          team.replacements[captainOrigId] = recoveredBackup;
+          team.captain = recoveredBackup;
+          usedBackupIds.add(recoveredBackup);
+          console.warn(`d11ApplyBackupReplacements: team ${team.id} — Captain and Vice-Captain had collided on ${stolenId} (who is directly Vice-Captain, not standing in for anyone). Gave Captain's original pick (${captainOrigId}) a different backup (${recoveredBackup}) instead, restoring Vice-Captain to its rightful holder.`);
+        } else {
+          console.warn(`d11ApplyBackupReplacements: team ${team.id} captain and viceCaptain collided on the same id (${team.captain}), which is directly Vice-Captain — no other backup was available to give Captain instead. Leaving as-is; please review this team manually (Captain's original pick is sitting unreplaced).`);
+        }
       }
       changed = true;
     }
@@ -38893,7 +38922,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.37";
+const APP_VERSION = "4.66.38";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
