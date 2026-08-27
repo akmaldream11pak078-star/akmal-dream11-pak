@@ -588,37 +588,43 @@ html[data-theme="light"] .i11-fair-play{border-top-color:rgba(15,23,42,0.06);}
 .i11-jersey-icon{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;background:rgba(220,38,38,0.1);flex-shrink:0;}
 
 /* Contest-join screen: orange gradient header, Instant11-style */
-.i11-contest-hero{background:linear-gradient(135deg,#f97316,#dc2626);border-radius:0 0 14px 14px;padding:10px 12px 12px;margin:-18px -16px 12px;}
+.i11-contest-hero{background:#fff;border:1px solid #ececec;border-radius:14px;padding:14px 14px 16px;margin:0 0 14px;box-shadow:0 1px 3px rgba(0,0,0,0.06);}
 .i11-contest-hero-top{display:flex;align-items:center;justify-content:space-between;}
-.i11-contest-hero-back{width:30px;height:30px;border-radius:50%;background:rgba(255,255,255,0.18);display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;border:none;cursor:pointer;flex-shrink:0;}
-.i11-contest-hero-title{text-align:center;color:#fff;font-weight:800;font-size:13px;flex:1;}
-.i11-contest-hero-sub{text-align:center;color:rgba(255,255,255,0.85);font-size:10px;margin-top:1px;}
-.i11-contest-hero-teams{display:flex;align-items:center;justify-content:space-between;background:rgba(0,0,0,0.15);border-radius:10px;padding:9px 12px;margin-top:9px;}
-.i11-contest-hero-team{color:#fff;font-weight:800;font-size:12px;}
-.i11-contest-hero-vs{width:24px;height:24px;border-radius:50%;background:rgba(0,0,0,0.25);color:#fff;font-weight:800;font-size:10px;display:flex;align-items:center;justify-content:center;}
-.i11-contest-hero-timer{display:flex;justify-content:center;margin-top:8px;}
-.i11-contest-hero-timer span{background:rgba(0,0,0,0.2);color:#fde68a;font-weight:700;font-size:10.5px;padding:4px 11px;border-radius:16px;}
-.i11-contest-tabs{display:flex;background:rgba(255,255,255,0.06);border-radius:10px;padding:2px;margin-bottom:8px;}
-html[data-theme="light"] .i11-contest-tabs{background:rgba(15,23,42,0.04);}
-.i11-contest-tab{flex:1;text-align:center;padding:6px 5px;font-size:10.5px;font-weight:700;border:none;background:transparent;border-radius:7px;cursor:pointer;color:var(--dim);}
-.i11-contest-tab.active{background:#dc2626;color:#fff;}
-.i11-prize-card{border-radius:14px;background:#161b2e;border:1px solid rgba(255,255,255,0.08);box-shadow:0 2px 10px rgba(0,0,0,0.2);padding:14px;margin-bottom:14px;}
-html[data-theme="light"] .i11-prize-card{background:#fff;border-color:rgba(15,23,42,0.08);box-shadow:0 2px 10px rgba(0,0,0,0.05);}
+.i11-contest-hero-back{width:30px;height:30px;border-radius:50%;background:#f2f2f2;display:flex;align-items:center;justify-content:center;color:#20232a;font-size:14px;border:none;cursor:pointer;flex-shrink:0;}
+.i11-contest-hero-title{text-align:center;color:#20232a;font-weight:800;font-size:14px;flex:1;}
+.i11-contest-hero-sub{text-align:center;color:#8a8f98;font-size:10.5px;margin-top:2px;}
+.i11-contest-hero-teams{display:flex;align-items:center;justify-content:space-between;background:#fff;border-radius:10px;padding:14px 4px 4px;margin-top:10px;}
+.i11-contest-hero-team{color:#20232a;font-weight:700;font-size:12.5px;}
+.i11-contest-hero-vs{width:26px;height:26px;border-radius:50%;background:#f2f2f2;color:#8a8f98;font-weight:800;font-size:10px;display:flex;align-items:center;justify-content:center;}
+.i11-contest-hero-timer{display:flex;justify-content:center;margin-top:10px;}
+.i11-contest-hero-timer span{background:#fdecea;color:#c0392b;font-weight:700;font-size:10.5px;padding:5px 13px;border-radius:16px;}
+.i11-contest-tabs{display:flex;background:#f5f5f5;border-radius:10px;padding:3px;margin-bottom:10px;}
+html[data-theme="light"] .i11-contest-tabs{background:#f5f5f5;}
+.i11-contest-tab{flex:1;text-align:center;padding:9px 5px;font-size:11px;font-weight:700;border:none;background:transparent;border-radius:7px;cursor:pointer;color:#8a8f98;}
+.i11-contest-tab.active{background:#e8332b;color:#fff;box-shadow:0 1px 4px rgba(232,51,43,0.35);}
+.i11-prize-card{border-radius:14px;background:#fff;border:1px solid #ececec;box-shadow:0 1px 6px rgba(0,0,0,0.06);padding:14px;margin-bottom:14px;}
+html[data-theme="light"] .i11-prize-card{background:#fff;border-color:#ececec;box-shadow:0 1px 6px rgba(0,0,0,0.06);}
 .i11-prize-card-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;}
-.i11-prize-label{font-size:11px;color:var(--dim);font-weight:600;}
-.i11-prize-value{font-size:22px;font-weight:900;color:var(--text);margin-top:2px;}
-.i11-prize-joinbtn{background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;font-weight:800;font-size:13px;padding:10px 20px;border-radius:10px;border:none;cursor:pointer;white-space:nowrap;}
+.i11-prize-label{font-size:11px;color:#8a8f98;font-weight:600;}
+.i11-prize-value{font-size:22px;font-weight:900;color:#20232a;margin-top:2px;}
+.i11-prize-joinbtn{background:#e8332b;color:#fff;font-weight:800;font-size:13px;padding:10px 20px;border-radius:10px;border:none;cursor:pointer;white-space:nowrap;}
 .i11-prize-joinbtn:disabled{opacity:0.6;cursor:default;}
-.i11-prize-joinbtn.joined{background:linear-gradient(135deg,#94a3b8,#64748b);}
-.i11-prize-bar-track{height:6px;border-radius:4px;background:rgba(255,255,255,0.08);overflow:hidden;margin-bottom:6px;}
-html[data-theme="light"] .i11-prize-bar-track{background:rgba(15,23,42,0.08);}
-.i11-prize-bar-fill{height:100%;background:linear-gradient(90deg,#f87171,#dc2626);border-radius:4px;}
-.i11-prize-spots-row{display:flex;justify-content:space-between;font-size:11px;color:#dc2626;font-weight:700;margin-bottom:10px;}
-.i11-prize-spots-row span:last-child{color:var(--dim);font-weight:600;}
-.i11-prize-meta-row{display:flex;align-items:center;gap:14px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.08);font-size:11px;color:var(--dim);flex-wrap:wrap;}
-html[data-theme="light"] .i11-prize-meta-row{border-top-color:rgba(15,23,42,0.06);}
+.i11-prize-joinbtn.joined{background:#b0b3b8;}
+.i11-prize-bar-track{height:6px;border-radius:4px;background:#f2f2f2;overflow:hidden;margin-bottom:6px;}
+html[data-theme="light"] .i11-prize-bar-track{background:#f2f2f2;}
+.i11-prize-bar-fill{height:100%;background:#e8332b;border-radius:4px;}
+.i11-prize-spots-row{display:flex;justify-content:space-between;font-size:11px;color:#e8332b;font-weight:700;margin-bottom:10px;}
+.i11-prize-spots-row span:last-child{color:#8a8f98;font-weight:600;}
+.i11-prize-meta-row{display:flex;align-items:center;gap:14px;padding-top:10px;border-top:1px solid #f2f2f2;font-size:11px;color:#8a8f98;flex-wrap:wrap;}
+html[data-theme="light"] .i11-prize-meta-row{border-top-color:#f2f2f2;}
 .i11-prize-meta-row .i11-flex{display:flex;align-items:center;gap:4px;}
 .i11-prize-meta-flexible{margin-left:auto;color:#16a34a;font-weight:800;display:flex;align-items:center;gap:4px;}
+/* Forces the real-Dream11 white/red look for match, contest, and team
+   screens specifically — independent of the app's own dark/light theme
+   setting, since these screens are meant to always match the reference
+   design regardless of what mode the rest of the app is in. */
+.d11-light-screen{background:#f7f7f8;margin:-18px -16px;padding:16px;min-height:100vh;color:#20232a;}
+.d11-light-screen .section-title{color:#20232a;}
 </style>
 </head>
 <body>
@@ -8461,26 +8467,30 @@ function renderD11StatsTab(matchId) {
   const sorted = [...d11m.players].sort((a, b) => (livePts.get(b.id)||0) - (livePts.get(a.id)||0));
 
   return `
-  <div style="font-size:11.5px;color:var(--dim);text-align:center;margin-bottom:12px">Showing Player Stats by Match</div>
-  <div style="display:flex;padding:10px 14px;background:rgba(220,38,38,0.06);border-radius:12px;margin-bottom:10px;font-size:11px;font-weight:700;color:#dc2626">
-    <div style="flex:1">Players</div>
-    <div style="width:70px;text-align:right">Points</div>
+  <div style="font-size:11.5px;color:#8a8f98;text-align:center;margin-bottom:12px">Showing Player Stats by Match</div>
+  <div style="display:flex;padding:10px 4px;border-bottom:1px solid #ececec;margin-bottom:2px;font-size:11px;font-weight:700;color:#8a8f98">
+    <div style="flex:1">PLAYERS</div>
+    <div style="width:60px;text-align:right">POINTS</div>
+    <div style="width:70px;text-align:right">SEL BY</div>
   </div>
   ${sorted.map(p => {
     const isMine = myPickIds.has(p.id);
     return `
-    <div style="display:flex;align-items:center;gap:12px;padding:12px 14px;background:${isMine?'rgba(220,38,38,0.06)':'var(--card)'};border:1px solid var(--card-b);border-radius:14px;margin-bottom:10px;cursor:pointer" onclick="openD11PlayerPointsBreakup('${matchId}','${p.id}')">
-      ${p.photo
-        ? `<img src="${p.photo}" style="width:44px;height:44px;border-radius:50%;object-fit:cover;flex-shrink:0" />`
-        : `<div style="width:44px;height:44px;border-radius:50%;background:var(--input-bg);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">👤</div>`}
-      <div style="flex:1;min-width:0">
-        <div style="font-weight:700;font-size:14.5px;display:flex;align-items:center;gap:6px">
-          <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name}</span>
-          ${isMine ? '<span style="color:#4ade80;font-size:12px;flex-shrink:0">✅</span>' : ''}
-        </div>
-        <div style="font-size:11.5px;color:var(--dim)">${p.side==='A'?m_teamNameForStats(matchId,'A'):m_teamNameForStats(matchId,'B')}-${(p.role||'').toLowerCase()}</div>
+    <div style="display:flex;align-items:center;gap:12px;padding:12px 4px;background:${isMine?'#fdecea':'#fff'};border-bottom:1px solid #f2f2f2;cursor:pointer" onclick="openD11PlayerPointsBreakup('${matchId}','${p.id}')">
+      <div style="position:relative;flex-shrink:0">
+        ${p.photo
+          ? `<img src="${p.photo}" style="width:44px;height:44px;border-radius:50%;object-fit:cover;border:${isMine?'2px solid #e8332b':'1px solid #ececec'}" />`
+          : `<div style="width:44px;height:44px;border-radius:50%;background:#f2f2f2;display:flex;align-items:center;justify-content:center;font-size:18px;border:${isMine?'2px solid #e8332b':'1px solid #ececec'}">👤</div>`}
+        <span style="position:absolute;bottom:-3px;left:50%;transform:translateX(-50%);background:${p.side==='A'?'#1d4ed8':'#e8332b'};color:#fff;font-size:8.5px;font-weight:800;padding:1px 5px;border-radius:5px;white-space:nowrap">${p.side==='A'?(m_teamNameForStats(matchId,'A')||'A').slice(0,3).toUpperCase():(m_teamNameForStats(matchId,'B')||'B').slice(0,3).toUpperCase()}</span>
       </div>
-      <div style="font-weight:800;font-size:19px;text-align:right;min-width:60px">${livePts.get(p.id)||0}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;font-size:14.5px;color:${isMine?'#e8332b':'#20232a'};display:flex;align-items:center;gap:6px">
+          <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name}</span>
+          ${isMine ? '<span style="background:#e8332b;color:#fff;font-size:9px;font-weight:700;padding:2px 7px;border-radius:5px;flex-shrink:0">In Team</span>' : ''}
+        </div>
+      </div>
+      <div style="font-weight:800;font-size:16px;text-align:right;min-width:50px;color:${isMine?'#e8332b':'#20232a'}">${livePts.get(p.id)||0}</div>
+      <div style="width:70px;text-align:right;font-size:12px;font-weight:600;color:#8a8f98">${p.selByPct != null ? p.selByPct.toFixed(2)+'%' : '—'}</div>
     </div>`;
   }).join('')}
 
@@ -9302,8 +9312,8 @@ function d11ApplyBackupReplacements(matchId) {
       // this the original player that C/VC's current backup is covering
       // for" — and ranks it the same as the live role itself.
       const rank = (id) => {
-        if (id === team.captain) return 0;
-        if (id === team.viceCaptain) return 1;
+        if (id === team.captain || id === team.captainOriginalId) return 0;
+        if (id === team.viceCaptain || id === team.viceCaptainOriginalId) return 1;
         const coveringId = team.replacements && team.replacements[id];
         if (coveringId && coveringId === team.captain) return 0;
         if (coveringId && coveringId === team.viceCaptain) return 1;
@@ -9332,8 +9342,8 @@ function d11ApplyBackupReplacements(matchId) {
         // Give the captain/VC designation back to the original player if
         // the backup was standing in for them — otherwise the badge and
         // 2x/1.5x scoring multiplier would stay stuck on a bench player.
-        if (team.captain === backupId) team.captain = originalId;
-        if (team.viceCaptain === backupId) team.viceCaptain = originalId;
+        if (team.captain === backupId) { team.captain = originalId; team.captainOriginalId = null; }
+        if (team.viceCaptain === backupId) { team.viceCaptain = originalId; team.viceCaptainOriginalId = null; }
         delete team.replacements[originalId];
         usedBackupIds.delete(backupId);
         changed = true;
@@ -9422,6 +9432,18 @@ function d11ApplyBackupReplacements(matchId) {
           const reclaimEntry = Object.entries(team.replacements || {}).find(([origId, bId]) => {
             if (origId === team.captain || origId === team.viceCaptain) return false;
             if (bId === team.captain || bId === team.viceCaptain) return false; // this backup IS currently covering C/VC — don't touch it
+            // FIX: also check against the stable *OriginalId fields (see
+            // where they're set above) — these never change once a
+            // replacement first happens, unlike team.captain/viceCaptain
+            // which get overwritten to whatever the CURRENT backup is.
+            // Without this, `origId === team.viceCaptain` compares the
+            // original non-playing VC player's id against the CURRENT
+            // backup's id and can never match once VC has already been
+            // covered once — letting this exact entry (VC's real,
+            // still-active covering backup) look like fair game to steal
+            // for Captain instead.
+            if (origId === team.captainOriginalId || origId === team.viceCaptainOriginalId) return false;
+            if (bId === team.captainOriginalId || bId === team.viceCaptainOriginalId) return false;
             const bp = (d11m.players||[]).find(x => x.id === bId);
             return bp && bp.isPlayingXI; // only reclaim from a normal player whose backup is actually valid/in-XI
           });
@@ -9465,8 +9487,27 @@ function d11ApplyBackupReplacements(matchId) {
           // spot — otherwise the C/VC badge (and 2x/1.5x points
           // multiplier) silently vanishes since it was keyed to a
           // player ID that's no longer in `picks`.
-          if (team.captain === originalId) team.captain = backupId;
-          if (team.viceCaptain === originalId) team.viceCaptain = backupId;
+          // FIX (root cause of "VC's covering backup got stolen for
+          // Captain, and this exact team's original VC link was
+          // permanently lost, not recoverable even by the collision
+          // recovery logic further below"): team.captain/team.viceCaptain
+          // get overwritten to the BACKUP's id the moment a replacement
+          // happens — so any later check like `origId === team.viceCaptain`
+          // (used by the reclaim-exclusion logic to protect C/VC's backup
+          // from being stolen) compares the ORIGINAL non-playing player's
+          // id against the CURRENT backup id, which can never match. That
+          // let a later Captain-side reclaim steal a backup that was
+          // quietly still covering Vice-Captain, and the original VC
+          // player's own id (the only thing that could have reverse-traced
+          // this) got wiped via `delete team.replacements[reclaimedFrom]`
+          // in that reclaim, with no trace left anywhere. Fix at the
+          // source: persist the ORIGINAL player's id in a separate,
+          // never-overwritten field the moment Captain/VC is first
+          // replaced, so every later check has a stable original identity
+          // to compare against no matter how many times the covering
+          // backup itself changes.
+          if (team.captain === originalId) { team.captain = backupId; if (!team.captainOriginalId) team.captainOriginalId = originalId; }
+          if (team.viceCaptain === originalId) { team.viceCaptain = backupId; if (!team.viceCaptainOriginalId) team.viceCaptainOriginalId = originalId; }
           usedBackupIds.add(backupId);
           changed = true;
         }
@@ -9542,11 +9583,17 @@ function d11ApplyBackupReplacements(matchId) {
       // genuine "this backup used to cover a DIFFERENT original VC player")
       // applies do we go through the original recovery path.
       const stolenId = team.captain; // == team.viceCaptain here
-      const originalVCEntry = Object.entries(team.replacements || {}).find(([origId, bId]) => bId === stolenId && origId !== stolenId);
-      if (originalVCEntry) {
+      // Prefer the stable original-id fields if this team already has them
+      // (set by the source-of-truth fix above on any run after this
+      // version) — only fall back to the reverse-lookup guess for teams
+      // whose corruption predates that field existing at all.
+      const originalVCId = team.viceCaptainOriginalId || (() => {
+        const entry = Object.entries(team.replacements || {}).find(([origId, bId]) => bId === stolenId && origId !== stolenId);
+        return entry ? entry[0] : null;
+      })();
+      if (originalVCId) {
         // Genuine "VC's backup got stolen" case — recover VC by assigning
         // a fresh backup to cover its true original player.
-        const originalVCId = originalVCEntry[0];
         const recoveredBackup = team.backups.find(bId => {
           if (bId === stolenId) return false;
           if (usedBackupIds.has(bId)) return false;
@@ -9558,6 +9605,7 @@ function d11ApplyBackupReplacements(matchId) {
           if (slotIdx >= 0) team.picks[slotIdx] = recoveredBackup; else team.picks.push(recoveredBackup);
           team.replacements[originalVCId] = recoveredBackup;
           team.viceCaptain = recoveredBackup;
+          team.viceCaptainOriginalId = originalVCId;
           usedBackupIds.add(recoveredBackup);
           console.warn(`d11ApplyBackupReplacements: team ${team.id} — Vice-Captain's backup (${stolenId}) had been reassigned to Captain. Recovered VC by assigning a different available backup (${recoveredBackup}) to cover the original Vice-Captain pick (${originalVCId}).`);
         } else {
@@ -9569,8 +9617,10 @@ function d11ApplyBackupReplacements(matchId) {
         // anyone else) — find the ORIGINAL entry that made this player
         // Captain's replacement instead, and give THAT a different backup,
         // leaving viceCaptain untouched (it's already correct).
-        const captainOrigEntry = Object.entries(team.replacements || {}).find(([origId, bId]) => bId === stolenId);
-        const captainOrigId = captainOrigEntry ? captainOrigEntry[0] : null;
+        const captainOrigId = team.captainOriginalId || (() => {
+          const entry = Object.entries(team.replacements || {}).find(([origId, bId]) => bId === stolenId);
+          return entry ? entry[0] : null;
+        })();
         const recoveredBackup = captainOrigId ? team.backups.find(bId => {
           if (bId === stolenId) return false;
           if (usedBackupIds.has(bId)) return false;
@@ -9582,6 +9632,7 @@ function d11ApplyBackupReplacements(matchId) {
           if (slotIdx >= 0) team.picks[slotIdx] = recoveredBackup; else team.picks.push(recoveredBackup);
           team.replacements[captainOrigId] = recoveredBackup;
           team.captain = recoveredBackup;
+          team.captainOriginalId = captainOrigId;
           usedBackupIds.add(recoveredBackup);
           console.warn(`d11ApplyBackupReplacements: team ${team.id} — Captain and Vice-Captain had collided on ${stolenId} (who is directly Vice-Captain, not standing in for anyone). Gave Captain's original pick (${captainOrigId}) a different backup (${recoveredBackup}) instead, restoring Vice-Captain to its rightful holder.`);
         } else {
@@ -28707,9 +28758,9 @@ function renderD11JoinContest() {
   const activeContestTab = window._d11ContestSubTab || 'all';
 
   return `
-  <div style="padding-bottom:70px">
+  <div class="d11-light-screen" style="padding-bottom:70px">
 
-  <!-- Instant11-style orange gradient hero header -->
+  <!-- Dream11-style white hero card: team badges, score, status pill -->
   <div class="i11-contest-hero">
     <div class="i11-contest-hero-top">
       <button class="i11-contest-hero-back" onclick="goDream11Hub()">←</button>
@@ -28719,33 +28770,33 @@ function renderD11JoinContest() {
     <div class="i11-contest-hero-sub">${m.seriesName || 'Dream11 Contest'}${d11m.scored ? ' — Completed' : (m.scoreA || m.scoreB) ? ' — Live' : ''}</div>
     <div class="i11-contest-hero-teams">
       <div style="text-align:center;flex:1">
-        <div style="font-size:22px;line-height:1">${d11RenderTeamFlag(flagA)}</div>
-        <div class="i11-contest-hero-team" style="margin-top:4px">${m.teamA||'TBD'}</div>
-        ${m.scoreA ? `<div style="font-weight:800;font-size:15px;color:#fff;margin-top:4px">${m.scoreA}</div>` : ''}
+        <div style="font-size:26px;line-height:1">${d11RenderTeamFlag(flagA)}</div>
+        <div class="i11-contest-hero-team" style="margin-top:6px">${m.teamA||'TBD'}</div>
+        ${m.scoreA ? `<div style="font-weight:800;font-size:15px;color:#20232a;margin-top:4px">${m.scoreA}</div>` : ''}
       </div>
       <div class="i11-contest-hero-vs">VS</div>
       <div style="text-align:center;flex:1">
-        <div style="font-size:22px;line-height:1">${d11RenderTeamFlag(flagB)}</div>
-        <div class="i11-contest-hero-team" style="margin-top:4px">${m.teamB||'TBD'}</div>
-        ${m.scoreB ? `<div style="font-weight:800;font-size:15px;color:#fff;margin-top:4px">${m.scoreB}</div>` : ''}
+        <div style="font-size:26px;line-height:1">${d11RenderTeamFlag(flagB)}</div>
+        <div class="i11-contest-hero-team" style="margin-top:6px">${m.teamB||'TBD'}</div>
+        ${m.scoreB ? `<div style="font-weight:800;font-size:15px;color:#20232a;margin-top:4px">${m.scoreB}</div>` : ''}
       </div>
     </div>
-    ${m.resultText ? `<div style="text-align:center;margin-top:10px"><span style="display:inline-flex;align-items:center;gap:6px;background:rgba(74,222,128,0.18);color:#bbf7d0;font-weight:700;font-size:12.5px;padding:7px 14px;border-radius:20px">✅ ${m.resultText}</span></div>`
-      : m.liveStatusText ? `<div style="text-align:center;margin-top:10px"><span style="display:inline-flex;align-items:center;gap:6px;background:rgba(220,38,38,0.18);color:#fecaca;font-weight:700;font-size:12.5px;padding:7px 14px;border-radius:20px">🔴 ${m.liveStatusText}</span></div>`
+    ${m.resultText ? `<div style="text-align:center;margin-top:10px"><span style="display:inline-flex;align-items:center;gap:6px;background:#e9f7ef;color:#15803d;font-weight:700;font-size:12.5px;padding:7px 14px;border-radius:20px">✅ ${m.resultText}</span></div>`
+      : m.liveStatusText ? `<div style="text-align:center;margin-top:10px"><span style="display:inline-flex;align-items:center;gap:6px;background:#fdecea;color:#c0392b;font-weight:700;font-size:12.5px;padding:7px 14px;border-radius:20px">🔴 ${m.liveStatusText}</span></div>`
       // Fallback for matches marked completed/locked where the live sync's
       // two-step "confirm" (see d11SyncLiveMatchSbx / d11SyncLiveMatchCb2 /
       // LL5 equivalents) never got its second Sync Now tap — resultText
       // stays empty forever even though the match clearly finished with
       // real scores (this is exactly what was happening for Trent Rockets
       // vs London Spirit and the earlier West Indies vs Pakistan cases).
-      : (d11m.scored && (m.scoreA || m.scoreB)) ? `<div style="text-align:center;margin-top:10px"><span style="display:inline-flex;align-items:center;gap:6px;background:rgba(74,222,128,0.18);color:#bbf7d0;font-weight:700;font-size:12.5px;padding:7px 14px;border-radius:20px">🏆 ${d11DeriveFallbackResultText(m)}</span></div>`
+      : (d11m.scored && (m.scoreA || m.scoreB)) ? `<div style="text-align:center;margin-top:10px"><span style="display:inline-flex;align-items:center;gap:6px;background:#e9f7ef;color:#15803d;font-weight:700;font-size:12.5px;padding:7px 14px;border-radius:20px">🏆 ${d11DeriveFallbackResultText(m)}</span></div>`
       : ''}
     <div class="i11-contest-hero-timer">
       ${locked
         ? `<span>🔒 Locked</span>`
         : countdownStr ? `<span class="d11-countdown" data-deadline="${m.deadline}">⏱ ${countdownStr} left</span>` : ''}
     </div>
-    ${deadlineClockStr ? `<div style="text-align:center;color:rgba(255,255,255,0.75);font-size:10.5px;margin-top:6px">${deadlineClockStr}</div>` : ''}
+    ${deadlineClockStr ? `<div style="text-align:center;color:#8a8f98;font-size:10.5px;margin-top:6px">${deadlineClockStr}</div>` : ''}
   </div>
 
   <!-- Sub-tabs row: All Contests / My Contests / My Team / Stats -->
@@ -32148,23 +32199,15 @@ function renderDream11ViewTeam() {
     // Recompute live rather than trusting stored p.points, which can lag
     // behind the latest synced stats — see renderD11StatsTab for the same fix.
     const finalPts = Math.round(calcDream11PlayerPoints(p.stats, t.matchId) * mult);
-    // Side-based color coding so users can tell at a glance which team a
-    // player belongs to — Team A (side 'A') gets a sky-blue name badge,
-    // Team B (side 'B') gets an amber/orange one. Points color still flags
-    // green/grey for scored/unscored, just tinted toward the team color.
-    const sideIsA = p.side === 'A';
-    const nameBg = sideIsA ? 'rgba(56,189,248,0.35)' : 'rgba(251,146,60,0.35)';
-    const nameBorder = sideIsA ? 'rgba(56,189,248,0.6)' : 'rgba(251,146,60,0.6)';
-    const ptsColor = finalPts > 0 ? (sideIsA ? '#38bdf8' : '#fb923c') : 'rgba(255,255,255,0.6)';
     return `
-    <div style="display:flex;flex-direction:column;align-items:center;width:60px">
+    <div style="display:flex;flex-direction:column;align-items:center;width:64px">
       <div style="position:relative">
-        ${p.photo ? `<img src="${p.photo}" style="width:38px;height:38px;border-radius:50%;object-fit:cover;border:1.5px solid rgba(255,255,255,0.5)" />` : `<div style="width:38px;height:38px;border-radius:50%;background:rgba(255,255,255,0.12);border:1.5px solid rgba(255,255,255,0.4);display:flex;align-items:center;justify-content:center;font-size:16px">👤</div>`}
-        ${isC ? `<div style="position:absolute;top:-3px;right:-3px;width:14px;height:14px;border-radius:50%;background:var(--gold);color:#000;font-size:8px;font-weight:800;display:flex;align-items:center;justify-content:center;border:1px solid rgba(0,0,0,0.3)">C</div>` : isVC ? `<div style="position:absolute;top:-3px;right:-3px;width:14px;height:14px;border-radius:50%;background:#60a5fa;color:#000;font-size:7px;font-weight:800;display:flex;align-items:center;justify-content:center;border:1px solid rgba(0,0,0,0.3)">VC</div>` : ''}
-        ${isSwappedIn ? `<div style="position:absolute;top:-3px;left:-3px;width:14px;height:14px;border-radius:50%;background:#2563eb;color:#fff;font-size:7px;font-weight:800;display:flex;align-items:center;justify-content:center;border:1px solid rgba(0,0,0,0.3)" title="Backup — swapped in for a player not in Playing XI">🔁</div>` : ''}
+        ${p.photo ? `<img src="${p.photo}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;border:1px solid #ececec" />` : `<div style="width:48px;height:48px;border-radius:50%;background:#f2f2f2;border:1px solid #ececec;display:flex;align-items:center;justify-content:center;font-size:20px">👤</div>`}
+        ${isC ? `<div style="position:absolute;top:-4px;right:-4px;width:20px;height:20px;border-radius:50%;background:#e8332b;color:#fff;font-size:9.5px;font-weight:800;display:flex;align-items:center;justify-content:center;border:2px solid #fff">C</div>` : isVC ? `<div style="position:absolute;top:-4px;right:-4px;width:20px;height:20px;border-radius:50%;background:#2563eb;color:#fff;font-size:8px;font-weight:800;display:flex;align-items:center;justify-content:center;border:2px solid #fff">VC</div>` : ''}
+        ${isSwappedIn ? `<div style="position:absolute;top:-3px;left:-3px;width:15px;height:15px;border-radius:50%;background:#fff;color:#e8332b;font-size:8px;font-weight:800;display:flex;align-items:center;justify-content:center;border:1px solid #e8332b" title="Backup — swapped in for a player not in Playing XI">🔁</div>` : ''}
       </div>
-      <div style="margin-top:3px;background:${nameBg};border:1px solid ${nameBorder};padding:1px 5px;border-radius:5px;font-size:9px;font-weight:700;color:#fff;white-space:nowrap;max-width:60px;overflow:hidden;text-overflow:ellipsis">${p.name}</div>
-      <div style="margin-top:1px;font-size:9px;font-weight:700;color:${ptsColor}">${finalPts} pts</div>
+      <div style="margin-top:5px;font-size:11px;font-weight:700;color:#20232a;white-space:nowrap;max-width:64px;overflow:hidden;text-overflow:ellipsis">${p.name}</div>
+      <div style="margin-top:1px;font-size:11px;font-weight:800;color:${finalPts>0?'#e8332b':'#8a8f98'}">${finalPts} pts</div>
     </div>`;
   };
 
@@ -32172,23 +32215,23 @@ function renderDream11ViewTeam() {
   const myContestBadges = [];
   if (t.matchId && t.userEmail) {
     if ((d11m?.freeParticipants||[]).includes(t.userEmail)) {
-      myContestBadges.push({ label: '🆓 Free Contest', color: '#4ade80', prize: null, contestType: 'free' });
+      myContestBadges.push({ label: '🆓 Free Contest', color: '#16a34a', prize: null, contestType: 'free' });
     }
     if ((d11m?.megaParticipants||[]).includes(t.userEmail)) {
       const prize = d11m?.megaPrizes?.[t.userEmail];
-      myContestBadges.push({ label: '🏆 Mega Contest', color: '#fbbf24', prize: prize || null, contestType: 'mega' });
+      myContestBadges.push({ label: '🏆 Mega Contest', color: '#b45309', prize: prize || null, contestType: 'mega' });
     }
     Object.values(d11CustomContests)
       .filter(cc => cc.matchId === t.matchId && (cc.participants||[]).includes(t.userEmail))
       .forEach(cc => {
         const prize = cc.prizes?.[t.userEmail];
-        myContestBadges.push({ label: `🛠️ Custom: ${cc.code}`, color: '#c084fc', prize: prize || null, ccId: cc.id });
+        myContestBadges.push({ label: `🛠️ Custom: ${cc.code}`, color: '#7e22ce', prize: prize || null, ccId: cc.id });
       });
   }
 
   const myContestsHtml = myContestBadges.length ? `
-  <div class="card mb10">
-    <div class="section-title" style="margin-bottom:7px">🎟️ My Contests Joined</div>
+  <div style="background:#fff;border:1px solid #ececec;border-radius:14px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+    <div style="font-size:12px;font-weight:800;color:#20232a;margin-bottom:8px">🎟️ My Contests Joined</div>
     <div style="display:flex;flex-direction:column;gap:6px">
       ${myContestBadges.map(b => {
         const clickAttr = b.ccId
@@ -32197,57 +32240,57 @@ function renderDream11ViewTeam() {
             ? `onclick="openD11ContestParticipants('${t.matchId}','${b.contestType}')"`
             : '';
         return `
-        <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.04);border:1px solid var(--card-b);border-radius:9px;padding:7px 10px;${clickAttr?'cursor:pointer':''}" ${clickAttr}>
-          <span style="font-size:11px;font-weight:700;color:${b.color}">${b.label} ›</span>
-          <span style="font-size:10.5px;font-weight:700;color:${b.prize?'#4ade80':'var(--dim)'}">${b.prize?'🎉 Rs '+b.prize+' won':'—'}</span>
+        <div style="display:flex;align-items:center;justify-content:space-between;background:#fafafa;border:1px solid #f2f2f2;border-radius:9px;padding:8px 10px;${clickAttr?'cursor:pointer':''}" ${clickAttr}>
+          <span style="font-size:11.5px;font-weight:700;color:${b.color}">${b.label} ›</span>
+          <span style="font-size:11px;font-weight:700;color:${b.prize?'#16a34a':'#8a8f98'}">${b.prize?'🎉 Rs '+b.prize+' won':'—'}</span>
         </div>
       `;}).join('')}
     </div>
   </div>` : '';
 
   return `
+  <div class="d11-light-screen">
   <div style="display:flex;gap:6px;margin-bottom:10px">
     <button class="btn-secondary" style="font-size:10.5px;padding:7px 10px;flex:1" onclick="goDream11Hub()">← Back to Dream11</button>
-    ${isOwnTeam && !isD11Locked(t.matchId) ? `<button class="btn-primary" style="font-size:10.5px;padding:7px 10px;background:linear-gradient(135deg,#f97316,#ea580c)" onclick="openDream11Match('${t.matchId}')">✏️ Edit Team</button>` : ''}
+    ${isOwnTeam && !isD11Locked(t.matchId) ? `<button class="btn-primary" style="font-size:10.5px;padding:7px 10px;background:#e8332b" onclick="openDream11Match('${t.matchId}')">✏️ Edit Team</button>` : ''}
   </div>
 
-  <div class="card mb10">
+  <div style="background:#fff;border:1px solid #ececec;border-radius:14px;padding:14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
     <div style="display:flex;align-items:center;justify-content:center;gap:14px;margin:0 0 4px">
       <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
-        ${flagA ? `<img src="${flagA}" style="width:30px;height:30px;border-radius:8px;object-fit:cover;border:1px solid var(--border)" />` : ''}
-        <span class="team-name" style="font-size:13px">${m?.teamA||'TBD'}</span>
+        ${flagA ? `<img src="${flagA}" style="width:30px;height:30px;border-radius:8px;object-fit:cover;border:1px solid #ececec" />` : ''}
+        <span style="font-size:13px;font-weight:700;color:#20232a">${m?.teamA||'TBD'}</span>
       </div>
-      <span class="vs-badge" style="font-size:9px;padding:2px 7px">VS</span>
+      <span style="font-size:9px;font-weight:800;color:#8a8f98;background:#f2f2f2;padding:2px 7px;border-radius:9px">VS</span>
       <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
-        ${flagB ? `<img src="${flagB}" style="width:30px;height:30px;border-radius:8px;object-fit:cover;border:1px solid var(--border)" />` : ''}
-        <span class="team-name" style="font-size:13px">${m?.teamB||'TBD'}</span>
+        ${flagB ? `<img src="${flagB}" style="width:30px;height:30px;border-radius:8px;object-fit:cover;border:1px solid #ececec" />` : ''}
+        <span style="font-size:13px;font-weight:700;color:#20232a">${m?.teamB||'TBD'}</span>
       </div>
     </div>
     <div style="text-align:center;margin-top:8px">
-      <div class="display" style="font-size:26px;color:var(--gold)">${t.totalPoints||0} pts</div>
-      ${!d11m?.scored && d11m?.lastLiveUpdateAt ? `<span class="match-status status-live" style="margin-top:4px;display:inline-block">🔴 LIVE</span>` : d11m?.scored ? `<span class="match-status status-completed" style="margin-top:4px;display:inline-block">🏁 FINAL</span>` : ''}
+      <div style="font-size:28px;font-weight:800;color:#e8332b">${t.totalPoints||0} pts</div>
+      ${!d11m?.scored && d11m?.lastLiveUpdateAt ? `<span style="margin-top:4px;display:inline-block;background:#fdecea;color:#c0392b;font-weight:700;font-size:11px;padding:4px 12px;border-radius:16px">🔴 LIVE</span>` : d11m?.scored ? `<span style="margin-top:4px;display:inline-block;background:#e9f7ef;color:#15803d;font-weight:700;font-size:11px;padding:4px 12px;border-radius:16px">🏁 FINAL</span>` : ''}
     </div>
   </div>
 
   ${myContestsHtml}
 
-  <div style="background:linear-gradient(180deg,#1d6b3a,#155a2f);border-radius:16px;padding:14px 6px;margin-bottom:14px;position:relative;overflow:hidden">
-    <div style="position:absolute;top:50%;left:50%;width:160%;height:55%;border:1.5px solid rgba(255,255,255,0.15);border-radius:50%;transform:translate(-50%,-50%)"></div>
-    <div style="position:absolute;top:8px;left:10px;z-index:1;font-size:9px;color:rgba(255,255,255,0.85);line-height:1.3">${u?.name||'Unknown Player'}${u?.idNumber?`<br/><span style="font-family:monospace;font-size:8px;color:rgba(255,255,255,0.55)">ID: ${u.idNumber}</span>`:''}</div>
-    <div style="position:absolute;top:8px;right:10px;z-index:1;font-size:8px;line-height:1.5;text-align:right">
-      <span style="display:inline-flex;align-items:center;gap:3px;color:#38bdf8"><span style="width:6px;height:6px;border-radius:50%;background:#38bdf8;display:inline-block"></span>${m?.teamA||'A'}: ${picked.filter(p=>p.side==='A').length}</span><br/>
-      <span style="display:inline-flex;align-items:center;gap:3px;color:#fb923c"><span style="width:6px;height:6px;border-radius:50%;background:#fb923c;display:inline-block"></span>${m?.teamB||'B'}: ${picked.filter(p=>p.side==='B').length}</span>
+  <div style="background:#fff;border:1px solid #ececec;border-radius:16px;padding:16px 6px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+    <div style="text-align:center;font-size:11px;color:#8a8f98;line-height:1.3;margin-bottom:8px">${u?.name||'Unknown Player'}${u?.idNumber?` &nbsp;·&nbsp; ID: ${u.idNumber}`:''}</div>
+    <div style="text-align:center;font-size:10px;color:#8a8f98;margin-bottom:10px">
+      <span style="display:inline-flex;align-items:center;gap:3px;margin-right:10px"><span style="width:6px;height:6px;border-radius:50%;background:#1d4ed8;display:inline-block"></span>${m?.teamA||'A'}: ${picked.filter(p=>p.side==='A').length}</span>
+      <span style="display:inline-flex;align-items:center;gap:3px"><span style="width:6px;height:6px;border-radius:50%;background:#e8332b;display:inline-block"></span>${m?.teamB||'B'}: ${picked.filter(p=>p.side==='B').length}</span>
     </div>
     ${roleOrder.map(r => byRole[r].length ? `
-    <div style="position:relative;margin-bottom:12px">
-      <div style="text-align:center;font-size:9.5px;font-weight:800;letter-spacing:0.5px;color:rgba(255,255,255,0.85);margin-bottom:8px">${roleLabels[r]}</div>
-      <div style="display:flex;justify-content:center;gap:6px;flex-wrap:wrap">
+    <div style="margin-bottom:14px">
+      <div style="text-align:center;font-size:10.5px;font-weight:800;letter-spacing:0.5px;color:#8a8f98;margin-bottom:10px">${roleLabels[r]}</div>
+      <div style="display:flex;justify-content:center;gap:8px;flex-wrap:wrap">
         ${byRole[r].map(fieldPlayerCard).join('')}
       </div>
     </div>` : '').join('')}
     ${(t.backups && t.backups.length) ? `
-    <div style="position:relative;margin-top:6px;padding-top:14px;border-top:1px dashed rgba(255,255,255,0.25)">
-      <div style="text-align:center;font-size:11px;font-weight:800;letter-spacing:0.5px;color:rgba(255,255,255,0.7);margin-bottom:12px">🔁 SUBSTITUTES (BENCH)</div>
+    <div style="margin-top:6px;padding-top:14px;border-top:1px dashed #ececec">
+      <div style="text-align:center;font-size:11px;font-weight:800;letter-spacing:0.5px;color:#8a8f98;margin-bottom:12px">🔁 SUBSTITUTES (BENCH)</div>
       <div style="display:flex;justify-content:center;gap:10px;flex-wrap:wrap">
         ${t.backups.map(bid => {
           const p = d11m?.players.find(x => x.id === bid);
@@ -32262,14 +32305,14 @@ function renderDream11ViewTeam() {
             if (originalPlayer) replacedName = originalPlayer.name;
           }
           return `
-          <div style="display:flex;flex-direction:column;align-items:center;width:84px;opacity:${isUsed?'1':'0.55'}">
+          <div style="display:flex;flex-direction:column;align-items:center;width:84px;opacity:${isUsed?'1':'0.6'}">
             <div style="position:relative">
-              ${p.photo ? `<img src="${p.photo}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;border:2px dashed rgba(255,255,255,0.5)" />` : `<div style="width:48px;height:48px;border-radius:50%;background:rgba(255,255,255,0.08);border:2px dashed rgba(255,255,255,0.4);display:flex;align-items:center;justify-content:center;font-size:18px">👤</div>`}
-              <div style="position:absolute;top:-4px;right:-4px;width:17px;height:17px;border-radius:50%;background:${isUsed?'#2563eb':'rgba(255,255,255,0.3)'};color:#fff;font-size:9px;font-weight:800;display:flex;align-items:center;justify-content:center;border:1px solid rgba(0,0,0,0.3)" title="${isUsed && replacedName ? 'In lineup — replacing ' + replacedName : isUsed ? 'In lineup now' : 'On the bench'}">🔁</div>
+              ${p.photo ? `<img src="${p.photo}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;border:2px dashed ${isUsed?'#e8332b':'#ccc'}" />` : `<div style="width:48px;height:48px;border-radius:50%;background:#f2f2f2;border:2px dashed ${isUsed?'#e8332b':'#ccc'};display:flex;align-items:center;justify-content:center;font-size:18px">👤</div>`}
+              <div style="position:absolute;top:-4px;right:-4px;width:17px;height:17px;border-radius:50%;background:${isUsed?'#e8332b':'#ccc'};color:#fff;font-size:9px;font-weight:800;display:flex;align-items:center;justify-content:center;border:2px solid #fff" title="${isUsed && replacedName ? 'In lineup — replacing ' + replacedName : isUsed ? 'In lineup now' : 'On the bench'}">🔁</div>
             </div>
-            <div style="margin-top:5px;background:rgba(0,0,0,0.4);padding:2px 8px;border-radius:6px;font-size:10.5px;font-weight:700;color:rgba(255,255,255,0.85);white-space:nowrap;max-width:84px;overflow:hidden;text-overflow:ellipsis">${p.name}</div>
-            <div style="margin-top:2px;font-size:9.5px;font-weight:700;color:${isUsed?'#60a5fa':'rgba(255,255,255,0.5)'}">${isUsed ? 'In lineup' : 'Standby'}</div>
-            ${isUsed && replacedName ? `<div style="font-size:8.5px;font-weight:600;color:rgba(255,255,255,0.5);white-space:nowrap;max-width:84px;overflow:hidden;text-overflow:ellipsis">for ${replacedName}</div>` : ''}
+            <div style="margin-top:5px;font-size:11px;font-weight:700;color:#20232a;white-space:nowrap;max-width:84px;overflow:hidden;text-overflow:ellipsis">${p.name}</div>
+            <div style="margin-top:2px;font-size:10px;font-weight:700;color:${isUsed?'#e8332b':'#8a8f98'}">${isUsed ? 'In lineup' : 'Standby'}</div>
+            ${isUsed && replacedName ? `<div style="font-size:9px;font-weight:600;color:#8a8f98;white-space:nowrap;max-width:84px;overflow:hidden;text-overflow:ellipsis">for ${replacedName}</div>` : ''}
           </div>`;
         }).join('')}
       </div>
@@ -32364,6 +32407,7 @@ function renderDream11ViewTeam() {
       </div>
     </div>`;
   }).join('')}
+  </div>
   `;
 }
 </script>
@@ -38922,7 +38966,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.38";
+const APP_VERSION = "4.67.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
