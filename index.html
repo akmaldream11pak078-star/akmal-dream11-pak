@@ -9483,24 +9483,56 @@ function d11ApplyBackupReplacements(matchId) {
       }
     }
     // FIX (root cause of "VC badge completely disappeared, Captain now
-    // shows on the player who used to be VC's backup"): the check above
-    // (`!team.picks.includes(...)`) can't catch this specific corruption,
-    // because BOTH team.captain and team.viceCaptain end up pointing at
-    // the exact same id — which IS in team.picks, so neither looked
-    // "orphaned" on its own. This happens when a backup was covering VC,
-    // then later got reassigned to Captain (the exact bug just fixed in
-    // the reclaim-exclusion logic above) without VC's own reference ever
-    // being cleared or reassigned — leaving a stale duplicate pointer.
-    // Since only ONE badge renders per player, VC's badge silently lost
-    // the tie-break to Captain's. Detect the collision here: if captain
-    // and viceCaptain are now the same id, viceCaptain has no real
-    // covering backup left (its original slot's replacement was stolen),
-    // so there's nothing left to display it as — clear it explicitly
-    // rather than leaving a confusing duplicate reference, and flag it
-    // clearly so this specific team is easy to find and review.
+    // FIX (root cause of "VC badge just disappeared entirely, nowhere on
+    // the field or bench"): the check above (`!team.picks.includes(...)`)
+    // can't catch this specific corruption, because BOTH team.captain and
+    // team.viceCaptain end up pointing at the exact same id — which IS in
+    // team.picks, so neither looked "orphaned" on its own. This happens
+    // when a backup was covering VC, then later got reassigned to Captain
+    // (the exact bug just fixed in the reclaim-exclusion logic above)
+    // without VC's own reference ever being cleared or reassigned —
+    // leaving a stale duplicate pointer. Since only ONE badge renders per
+    // player, VC's badge silently lost the tie-break to Captain's.
     if (team.captain && team.viceCaptain && team.captain === team.viceCaptain) {
-      console.warn(`d11ApplyBackupReplacements: team ${team.id} captain and viceCaptain collided on the same id (${team.captain}) — Vice-Captain's covering backup was reassigned to Captain with no replacement left for VC. Clearing viceCaptain since there's nothing valid left to point it at; please review this team manually (its original Vice-Captain pick is sitting unreplaced).`);
-      team.viceCaptain = null;
+      // The stolen id is still sitting in team.captain/team.viceCaptain,
+      // but team.replacements still has the ORIGINAL entry from when this
+      // same backup was first assigned to cover VC (that entry's key IS
+      // VC's real original player — it was never deleted, only the
+      // captain/viceCaptain pointer got overwritten by the later reclaim).
+      // Recover VC's true original id from there, then look for ANY other
+      // still-unused, Playing-XI-confirmed backup to properly re-cover it
+      // — rather than just giving up and clearing VC to nothing, which is
+      // a worse outcome for the user than trying to actually fix it.
+      const stolenBackupId = team.captain; // == team.viceCaptain here
+      const originalVCEntry = Object.entries(team.replacements || {}).find(([origId, bId]) => bId === stolenBackupId && origId !== stolenBackupId);
+      const originalVCId = originalVCEntry ? originalVCEntry[0] : null;
+      let recoveredBackup = null;
+      if (originalVCId) {
+        recoveredBackup = team.backups.find(bId => {
+          if (bId === stolenBackupId) return false; // that one's now covering Captain, not available
+          if (usedBackupIds.has(bId)) return false;
+          const bp = (d11m.players||[]).find(x => x.id === bId);
+          return bp && bp.isPlayingXI;
+        });
+      }
+      if (originalVCId && recoveredBackup) {
+        const slotIdx = team.picks.indexOf(originalVCId);
+        if (slotIdx >= 0) {
+          team.picks[slotIdx] = recoveredBackup;
+        } else {
+          team.picks.push(recoveredBackup);
+        }
+        team.replacements[originalVCId] = recoveredBackup;
+        team.viceCaptain = recoveredBackup;
+        usedBackupIds.add(recoveredBackup);
+        console.warn(`d11ApplyBackupReplacements: team ${team.id} — Vice-Captain's backup (${stolenBackupId}) had been reassigned to Captain. Recovered VC by assigning a different available backup (${recoveredBackup}) to cover the original Vice-Captain pick (${originalVCId}).`);
+      } else {
+        // No other backup available to cover VC — nothing valid left to
+        // point viceCaptain at, so clear it rather than leave a confusing
+        // duplicate reference. Flagged clearly for manual review.
+        console.warn(`d11ApplyBackupReplacements: team ${team.id} captain and viceCaptain collided on the same id (${team.captain}) and no other backup was available to recover Vice-Captain — clearing viceCaptain. Please review this team manually (its original Vice-Captain pick is sitting unreplaced with no backup left).`);
+        team.viceCaptain = null;
+      }
       changed = true;
     }
 
@@ -38835,7 +38867,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.66.33";
+const APP_VERSION = "4.66.34";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
