@@ -28816,16 +28816,13 @@ function renderD11JoinContest() {
     ${deadlineClockStr ? `<div style="text-align:center;color:var(--dim);font-size:10.5px;margin-top:6px">${deadlineClockStr}</div>` : ''}
   </div>
 
-  <!-- Sub-tabs row: matches the real Dream11 app's "My Contests / My Teams / Stats" pill row exactly -->
+  <!-- Sub-tabs row: "Contests / My Contests / My Team / Stats" — all 4 always visible in one row -->
   <div class="i11-contest-tabs">
+    <button class="i11-contest-tab ${activeContestTab==='all'?'active':''}" onclick="window._d11ContestSubTab='all';render()">Contests</button>
     <button class="i11-contest-tab ${activeContestTab==='mine'?'active':''}" onclick="window._d11ContestSubTab='mine';render()">My Contests (${myJoinedContestsCount})</button>
-    <button class="i11-contest-tab" onclick="tab='dream11TeamPicker';d11ActiveMatchId='${matchId}';render();window.scrollTo(0,0)">My Teams${myTeams.length?` (${myTeams.length})`:''}</button>
+    <button class="i11-contest-tab" onclick="tab='dream11TeamPicker';d11ActiveMatchId='${matchId}';render();window.scrollTo(0,0)">My Team${myTeams.length?` (${myTeams.length})`:''}</button>
     <button class="i11-contest-tab ${activeContestTab==='stats'?'active':''}" onclick="window._d11ContestSubTab='stats';render()">Stats</button>
   </div>
-  ${activeContestTab!=='mine' && activeContestTab!=='stats' ? `
-  <div class="i11-contest-tabs" style="margin-top:-4px">
-    <button class="i11-contest-tab ${activeContestTab==='all'?'active':''}" onclick="window._d11ContestSubTab='all';render()">All Contests</button>
-  </div>` : ''}
 
   ${activeContestTab==='stats' ? renderD11StatsTab(matchId) : ''}
 
