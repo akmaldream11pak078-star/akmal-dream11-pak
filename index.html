@@ -8492,7 +8492,7 @@ function renderD11StatsTab(matchId) {
   ${sorted.map(p => {
     const isMine = myPickIds.has(p.id);
     return `
-    <div style="display:flex;align-items:center;gap:12px;padding:12px 4px;background:${isMine?'#fdecea':'#fff'};border-bottom:1px solid var(--d11-card-border);cursor:pointer" onclick="openD11PlayerPointsBreakup('${matchId}','${p.id}')">
+    <div style="display:flex;align-items:center;gap:12px;padding:12px 4px;background:${isMine?'rgba(232,51,43,0.08)':'var(--d11-card-bg)'};border-bottom:1px solid var(--d11-card-border);cursor:pointer" onclick="openD11PlayerPointsBreakup('${matchId}','${p.id}')">
       <div style="position:relative;flex-shrink:0">
         ${p.photo
           ? `<img src="${p.photo}" style="width:44px;height:44px;border-radius:50%;object-fit:cover;border:${isMine?'2px solid var(--d11-accent)':'1px solid var(--d11-card-border)'}" />`
