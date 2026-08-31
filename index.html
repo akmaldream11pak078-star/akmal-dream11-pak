@@ -2361,7 +2361,19 @@ function _installVisibilityGuard() {
       // foregrounding the app is never slower to show correct team counts
       // than a full app relaunch would have been.
       if (typeof isAdmin === 'function' && isAdmin() && typeof _loadAllDream11TeamsFromFirestore === 'function') {
-        _loadAllDream11TeamsFromFirestore(true).then(() => { try { render(); } catch(e){} }).catch(() => {});
+        // Same race-protection as the goTab('home') fix: a forced getDocs()
+        // read here can land moments after a local team submission and
+        // wholesale-replace dream11Teams before that write is visible to
+        // this separate read, silently erasing the just-created team.
+        const _myTeamsBeforeFgRefresh = (typeof currentUser !== 'undefined' && currentUser)
+          ? Object.entries(dream11Teams).filter(([, t]) => t.userEmail === currentUser.email)
+          : [];
+        _loadAllDream11TeamsFromFirestore(true).then(() => {
+          _myTeamsBeforeFgRefresh.forEach(([tid, tdata]) => {
+            if (!dream11Teams[tid]) dream11Teams[tid] = tdata;
+          });
+          try { render(); } catch(e){}
+        }).catch(() => {});
       }
       // Same fix, same reasoning, for dream11Matches — foregrounding the
       // app is another moment (alongside a fresh app open and navigating
@@ -6676,7 +6688,31 @@ function goTab(t) {
   // being on) Panel always shows correct counts, without relying on timing
   // in the general bootstrap chain landing before the admin looks at it.
   if (t === 'home' && typeof isAdmin === 'function' && isAdmin()) {
-    _loadAllDream11TeamsFromFirestore(true).then(() => render()).catch(() => {});
+    // FIX (root cause of "user built team + joined a contest, went back to
+    // Home, and it showed 'Build My Team' again as if nothing was saved"):
+    // this force-refresh does a real getDocs() read and WHOLESALE replaces
+    // dream11Teams via targetSetter(obj) (see _liveLoadCollection). If this
+    // fires moments after d11SubmitTeam()'s setDoc() — e.g. exactly the
+    // submit → join contest → back to Home flow — the read can race the
+    // write and come back without the just-created team yet (Firestore
+    // getDocs() has no read-your-writes guarantee against a separate query
+    // like this). The stale/incomplete snapshot then clobbers the correct
+    // local copy d11SubmitTeam had already stored, and Home's myTeam lookup
+    // (which reads straight from dream11Teams) comes up empty — so the
+    // button flips back to "Build My Team" even though the team + contest
+    // join both genuinely succeeded and are sitting in Firestore. Snapshot
+    // any of the current user's teams before the refresh and re-merge them
+    // back in afterward if the fresh read is missing them, so a real local
+    // submission is never silently erased by a racing read.
+    const _myTeamsBeforeRefresh = currentUser
+      ? Object.entries(dream11Teams).filter(([, t]) => t.userEmail === currentUser.email)
+      : [];
+    _loadAllDream11TeamsFromFirestore(true).then(() => {
+      _myTeamsBeforeRefresh.forEach(([tid, tdata]) => {
+        if (!dream11Teams[tid]) dream11Teams[tid] = tdata;
+      });
+      render();
+    }).catch(() => {});
     // Same reasoning as the teams fix directly above, but for the Active
     // Matches list's "already scored?" check (dream11Matches[m.id]?.scored)
     // — force a genuine fresh read here too so navigating back to Panel
@@ -25538,8 +25574,15 @@ function d11AiAutoSelect() {
           .sort((a, b) => qualityScore(b) - qualityScore(a));
         const eligible = xiFirst.length ? xiFirst : rest;
         if (eligible.length === 0) break;
-        const topK = eligible.slice(0, Math.min(3, eligible.length));
-        const chosen = topK[Math.floor(nextRand() * topK.length)] || topK[0];
+        // Widen the random window: earlier this only shuffled the literal
+        // top-3, which for a role with a clear score gap meant every user
+        // landed on the exact same picks (the seed never had room to act).
+        // Scaling K to pool size + always keeping at least top-4 in play
+        // means different users' seeds actually produce different rosters,
+        // not just tie-break noise between near-identical scores.
+        const kWindow = Math.max(4, Math.ceil(eligible.length * 0.4));
+        const topK = eligible.slice(0, Math.min(kWindow, eligible.length));
+        const chosen = pickWeightedRandom(topK, topK.length) || topK[0];
         localAdd(chosen);
         filled++;
       }
@@ -25563,15 +25606,24 @@ function d11AiAutoSelect() {
   }
   best.picks.forEach(pid => addPlayer(players.find(p => p.id === pid)));
 
-  // Auto C & VC — top 2 by quality among selected
+  // Auto C & VC — picked from among the strongest players in the final XI,
+  // but with per-user variety: always taking the flat top-2 by score meant
+  // every user got the identical Captain/VC. A seeded weighted draw over
+  // the top few (capped so we never hand C/VC to a weak player) keeps the
+  // pick sensible while making it different per user, same as the XI itself.
   const pickedPlayers = picks
     .map(pid => d11m.players.find(x => x.id === pid))
     .filter(Boolean)
     .sort((a, b) => qualityScore(b) - qualityScore(a));
 
+  const capWindow = pickedPlayers.slice(0, Math.min(4, pickedPlayers.length));
+  const captainPick = pickWeightedRandom(capWindow, capWindow.length) || pickedPlayers[0];
+  const vcWindow = pickedPlayers.filter(p => p.id !== captainPick?.id).slice(0, Math.min(4, pickedPlayers.length - 1));
+  const vcPick = pickWeightedRandom(vcWindow, vcWindow.length) || pickedPlayers.find(p => p.id !== captainPick?.id);
+
   d11TeamDraft.picks = picks;
-  d11TeamDraft.captain = pickedPlayers[0]?.id || null;
-  d11TeamDraft.viceCaptain = pickedPlayers[1]?.id || null;
+  d11TeamDraft.captain = captainPick?.id || null;
+  d11TeamDraft.viceCaptain = vcPick?.id || null;
 
   // Auto-select 4 backups from the UNPICKED pool — best 4 by quality score,
   // any role (BAT/AR/BOWL/WK), per explicit request ("AI khud decide kare").
@@ -25582,8 +25634,8 @@ function d11AiAutoSelect() {
   d11TeamDraft.backups = backupPool.slice(0, D11_MAX_BACKUPS).map(p => p.id);
 
   render();
-  const capName = pickedPlayers[0]?.name || '';
-  const vcName = pickedPlayers[1]?.name || '';
+  const capName = captainPick?.name || '';
+  const vcName = vcPick?.name || '';
   const usedMix = mixSlots2 > 0 && best === attempt2AR;
   const compSummary = usedMix
     ? `${roleCounts.WK} WK · ${roleCounts.BAT} BAT · ${roleCounts.AR} AR · ${roleCounts.BOWL} BOWL (pool had too few AR, filled the rest with the best available WK/BAT/BOWL)`
