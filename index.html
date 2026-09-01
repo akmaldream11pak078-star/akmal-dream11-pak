@@ -1961,13 +1961,41 @@ async function _loadAllUsersFromFirestore(forceRefresh) {
   if (!window._fbDb || !window._fbFns) return false;
   const isAdminUser = typeof isAdmin === 'function' && isAdmin();
 
-  // Instant paint from cache first (0 reads) — unchanged.
-  if (!forceRefresh) {
-    try {
-      const cached = localStorage.getItem('pp_users_cache');
-      if (cached) { Object.assign(users, JSON.parse(cached)); }
-    } catch(e){}
-  }
+  // BUGFIX (root cause of "Total Users / Total Deposits / Total Withdrawn
+  // showing 1 / Rs 0 / Rs 0 right after reopening the app, instead of the
+  // last-known cached numbers, until the fresh Firestore read finally
+  // lands"): this cache-paint step used to be gated behind `!forceRefresh`
+  // — so on a fresh app boot, where the admin-only bootstrap path in
+  // initApp() always calls this with forceRefresh=true (to guarantee a
+  // real read instead of trusting a stale cache), the cache was skipped
+  // ENTIRELY. `users` stayed empty except for the admin's own record
+  // (added separately during auth) until the live listener's first
+  // delivery landed — which is what the person was seeing on screen in
+  // the meantime. Cache-paint should always run regardless of
+  // forceRefresh: it's just the fast, free, instant first paint — the
+  // `forceRefresh` flag should only ever control whether we ALSO go do a
+  // guaranteed-fresh Firestore read on top of it, never whether we're
+  // allowed to show the last-known numbers immediately.
+  try {
+    const cached = localStorage.getItem('pp_users_cache');
+    if (cached) {
+      const parsedCache = JSON.parse(cached);
+      // Don't let a slightly-stale cached copy of the CURRENTLY signed-in
+      // admin's own record overwrite what auth/onSnapshot already set for
+      // them moments ago (which is guaranteed at least as fresh) — only
+      // backfill users we don't already have an in-memory copy of.
+      let _cacheAddedAny = false;
+      Object.keys(parsedCache).forEach(k => {
+        if (!(k in users)) { users[k] = parsedCache[k]; _cacheAddedAny = true; }
+      });
+      // Paint immediately with the cache-restored numbers instead of
+      // waiting for this whole function (including the live-listener
+      // attach further down, which can take a real moment) to finish —
+      // this is the actual "instant paint" the Panel's Total
+      // Users/Deposits/Withdrawn stats are supposed to get on every open.
+      if (_cacheAddedAny) { try { render(); } catch(e){} }
+    }
+  } catch(e){}
 
   // Admin already gets a dedicated live listener while on the Users tab
   // (_startAdminUsersLiveSync) with its own attach/detach lifecycle tied to
@@ -39036,7 +39064,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.69.0";
+const APP_VERSION = "4.70.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
