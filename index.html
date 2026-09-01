@@ -1930,8 +1930,16 @@ async function _saveUserToFirestore(email, userData) {
   const { doc, setDoc } = window._fbFns;
   const safeKey = email.replace(/\./g, '_');
   const writeStartedAt = Date.now();
-  // Await save so user profile is confirmed in Firestore before continuing
-  await setDoc(doc(window._fbDb, 'pp_users', safeKey), userData)
+  // BUGFIX: this used to be a plain setDoc() with no merge option — a full
+  // document overwrite. Any caller that built userData from an incomplete
+  // or stale in-memory copy of the user (e.g. admin refund/delete flows
+  // spreading `users[email]` before it was fully loaded/synced) would
+  // silently wipe every field NOT present in that snapshot — deposit/
+  // withdraw history, other transactions, profile fields, etc. — showing
+  // up later as "undefined" name and missing transaction history for that
+  // user. { merge: true } makes this additive/patch-like instead, so a
+  // partial object can never delete data the caller didn't intend to touch.
+  await setDoc(doc(window._fbDb, 'pp_users', safeKey), userData, { merge: true })
     .catch(e => console.error('Firestore user save error:', e));
   // Record AFTER the write completes so any read that STARTED before this
   // point is treated as possibly-stale for this user.
@@ -2003,8 +2011,18 @@ async function _loadAllUsersFromFirestore(forceRefresh) {
   // silently revert. Reuse the same window._listenerAttachInFlight lock.
   window._listenerAttachInFlight = window._listenerAttachInFlight || {};
   if (window._listenerAttachInFlight['pp_users'] && !window._liveCollectionUnsubs['pp_users']) {
-    await window._listenerAttachInFlight['pp_users'];
+    // Safety net: if the in-flight promise never resolves (e.g. some other
+    // untracked detach path left this lock stuck without clearing it —
+    // see _detachAllLiveCollections' own fix for the known cause), don't
+    // hang this function — and therefore every future Panel render — forever.
+    await Promise.race([
+      window._listenerAttachInFlight['pp_users'],
+      new Promise(r => setTimeout(r, 8000))
+    ]);
     if (window._liveCollectionUnsubs['pp_users'] && !forceRefresh) return true;
+    // Still no live listener after waiting — clear the stale lock so the
+    // attach code below can proceed instead of being blocked by it again.
+    delete window._listenerAttachInFlight['pp_users'];
   }
 
   const attachPromise = new Promise((resolve) => {
@@ -2303,6 +2321,24 @@ function _detachAllLiveCollections() {
     try { _liveCollections[name](); } catch(e){}
     delete _liveCollections[name];
     if (window._liveCollectionUnsubs) delete window._liveCollectionUnsubs[name];
+    // BUGFIX (root cause of "Panel's Total Users/Total Deposits/Total
+    // Withdrawn showing stale/zero values after closing and reopening the
+    // app, never self-correcting until a manual 🔄"): if the app was
+    // backgrounded (tab hidden → this function runs) BEFORE a listener's
+    // very first onSnapshot delivery had landed — e.g. slow connection —
+    // that listener's own callback (the only place that ever deletes
+    // window._listenerAttachInFlight[name]) never got to run. The
+    // in-flight lock was left permanently stuck as truthy for the rest of
+    // the session. On the next foreground/reopen, _loadAllUsersFromFirestore
+    // (and the equivalent logic in _liveLoadCollection) sees that stuck
+    // lock plus a missing unsub — since we just deleted it above — and
+    // awaits a promise that will now NEVER resolve (nothing will ever call
+    // its resolve()), hanging forever and silently skipping every future
+    // render() that was supposed to show corrected data. Clearing the lock
+    // here, at the exact moment we tear the old listener down, guarantees
+    // the next attach attempt always starts clean instead of waiting on a
+    // promise from a listener that no longer exists.
+    if (window._listenerAttachInFlight) delete window._listenerAttachInFlight[name];
   });
 }
 function _reattachAllLiveCollectionsThrottled() {
@@ -2622,7 +2658,19 @@ async function _liveLoadCollection(collectionName, targetGetter, targetSetter, c
   // awaits that same attach attempt, so there is only ever one listener,
   // one source of truth, per collection.
   if (window._listenerAttachInFlight && window._listenerAttachInFlight[collectionName] && !window._liveCollectionUnsubs[collectionName]) {
-    await window._listenerAttachInFlight[collectionName];
+    // BUGFIX: same stuck-lock hang as _loadAllUsersFromFirestore (see its
+    // fix notes and _detachAllLiveCollections' own fix) — if the app was
+    // backgrounded before this collection's first onSnapshot delivery
+    // landed, nothing ever cleared this lock, and every future caller for
+    // this collection would await a promise that never resolves. Race
+    // against a timeout so this can never hang the whole sync chain again.
+    await Promise.race([
+      window._listenerAttachInFlight[collectionName],
+      new Promise(r => setTimeout(r, 8000))
+    ]);
+    if (!window._liveCollectionUnsubs[collectionName]) {
+      delete window._listenerAttachInFlight[collectionName];
+    }
     // Fall through below: the listener is now attached (or attach failed),
     // so re-check the normal branches with up-to-date state.
   }
@@ -8492,7 +8540,7 @@ function renderD11StatsTab(matchId) {
   ${sorted.map(p => {
     const isMine = myPickIds.has(p.id);
     return `
-    <div style="display:flex;align-items:center;gap:12px;padding:12px 4px;background:${isMine?'rgba(232,51,43,0.12)':'var(--d11-card-bg)'};border-bottom:1px solid var(--d11-card-border);cursor:pointer" onclick="openD11PlayerPointsBreakup('${matchId}','${p.id}')">
+    <div style="display:flex;align-items:center;gap:12px;padding:12px 4px;background:${isMine?'#fdecea':'#fff'};border-bottom:1px solid var(--d11-card-border);cursor:pointer" onclick="openD11PlayerPointsBreakup('${matchId}','${p.id}')">
       <div style="position:relative;flex-shrink:0">
         ${p.photo
           ? `<img src="${p.photo}" style="width:44px;height:44px;border-radius:50%;object-fit:cover;border:${isMine?'2px solid var(--d11-accent)':'1px solid var(--d11-card-border)'}" />`
@@ -25563,28 +25611,15 @@ function d11AiAutoSelect() {
   }
   best.picks.forEach(pid => addPlayer(players.find(p => p.id === pid)));
 
-  // Auto C & VC — weighted-random among the top few by quality among
-  // selected, using the same per-user seed as the pick selection above.
-  // FIX: previously this took a hard top-2 by qualityScore, which is
-  // identical for every user (quality depends only on player stats, not
-  // on the seed) — so every user got the exact same Captain/Vice-Captain
-  // even when their 11 picks differed. Now Captain/VC are drawn from a
-  // weighted pool of the best-rated selected players, so they vary by
-  // user just like the rest of the team, while still favoring top scorers.
+  // Auto C & VC — top 2 by quality among selected
   const pickedPlayers = picks
     .map(pid => d11m.players.find(x => x.id === pid))
     .filter(Boolean)
     .sort((a, b) => qualityScore(b) - qualityScore(a));
 
-  const captainPoolK = Math.min(4, pickedPlayers.length);
-  const captainObj = pickWeightedRandom(pickedPlayers, captainPoolK) || pickedPlayers[0] || null;
-  const vcCandidates = pickedPlayers.filter(p => p.id !== captainObj?.id);
-  const vcPoolK = Math.min(4, vcCandidates.length);
-  const vcObj = pickWeightedRandom(vcCandidates, vcPoolK) || vcCandidates[0] || null;
-
   d11TeamDraft.picks = picks;
-  d11TeamDraft.captain = captainObj?.id || null;
-  d11TeamDraft.viceCaptain = vcObj?.id || null;
+  d11TeamDraft.captain = pickedPlayers[0]?.id || null;
+  d11TeamDraft.viceCaptain = pickedPlayers[1]?.id || null;
 
   // Auto-select 4 backups from the UNPICKED pool — best 4 by quality score,
   // any role (BAT/AR/BOWL/WK), per explicit request ("AI khud decide kare").
@@ -25595,8 +25630,8 @@ function d11AiAutoSelect() {
   d11TeamDraft.backups = backupPool.slice(0, D11_MAX_BACKUPS).map(p => p.id);
 
   render();
-  const capName = captainObj?.name || '';
-  const vcName = vcObj?.name || '';
+  const capName = pickedPlayers[0]?.name || '';
+  const vcName = pickedPlayers[1]?.name || '';
   const usedMix = mixSlots2 > 0 && best === attempt2AR;
   const compSummary = usedMix
     ? `${roleCounts.WK} WK · ${roleCounts.BAT} BAT · ${roleCounts.AR} AR · ${roleCounts.BOWL} BOWL (pool had too few AR, filled the rest with the best available WK/BAT/BOWL)`
@@ -28829,18 +28864,16 @@ function renderD11JoinContest() {
     ${deadlineClockStr ? `<div style="text-align:center;color:var(--dim);font-size:10.5px;margin-top:6px">${deadlineClockStr}</div>` : ''}
   </div>
 
-  <!-- Sub-tabs row: Contests / My Contests / My Teams / Stats.
-       FIX: "All Contests" used to only render in a second row that was
-       itself hidden whenever activeContestTab wasn't already 'all' — so
-       there was no button in the main row to get back to it once you
-       clicked "My Contests" or "Stats", making the join/Contests section
-       unreachable. It's now a normal always-visible tab in the main row. -->
+  <!-- Sub-tabs row: matches the real Dream11 app's "My Contests / My Teams / Stats" pill row exactly -->
   <div class="i11-contest-tabs">
-    <button class="i11-contest-tab ${activeContestTab==='all'?'active':''}" onclick="window._d11ContestSubTab='all';render()">Contests</button>
     <button class="i11-contest-tab ${activeContestTab==='mine'?'active':''}" onclick="window._d11ContestSubTab='mine';render()">My Contests (${myJoinedContestsCount})</button>
     <button class="i11-contest-tab" onclick="tab='dream11TeamPicker';d11ActiveMatchId='${matchId}';render();window.scrollTo(0,0)">My Teams${myTeams.length?` (${myTeams.length})`:''}</button>
     <button class="i11-contest-tab ${activeContestTab==='stats'?'active':''}" onclick="window._d11ContestSubTab='stats';render()">Stats</button>
   </div>
+  ${activeContestTab!=='mine' && activeContestTab!=='stats' ? `
+  <div class="i11-contest-tabs" style="margin-top:-4px">
+    <button class="i11-contest-tab ${activeContestTab==='all'?'active':''}" onclick="window._d11ContestSubTab='all';render()">All Contests</button>
+  </div>` : ''}
 
   ${activeContestTab==='stats' ? renderD11StatsTab(matchId) : ''}
 
@@ -39003,7 +39036,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.68.0";
+const APP_VERSION = "4.69.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
