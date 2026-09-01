@@ -11290,7 +11290,7 @@ function d11UpdatePasteText(val) { d11PasteText = val; }
 const D11_ROLE_ALIASES = {
   WK:   ['wk','wicket keeper','wicket-keeper','wicketkeeper','keeper','w/k','wk-batsman','wk batsman','wicketkeeper-batsman','wicket-keeper batsman','wicketkeeper batsman'],
   BAT:  ['bat','batsman','batter','batsmen','batters','batting'],
-  AR:   ['ar','all rounder','all-rounder','allrounder','all round','batting allrounder','batting all-rounder','bowling allrounder','bowling all-rounder','all-round','allround'],
+  AR:   ['ar','all','all rounder','all-rounder','allrounder','all round','batting allrounder','batting all-rounder','bowling allrounder','bowling all-rounder','all-round','allround'],
   BOWL: ['bowl','bowler','bowlers','bowling']
 };
 
@@ -16013,7 +16013,25 @@ async function d11SyncLiveMatchAll(matchId, showToast) {
     // inning's own runs/wickets/overs for the team score line, same idea
     // as other providers' scorecard endpoints.
     const raw = await _allFetch(`matches/${m.allMatchId}/wagons`, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
-    _d11SetSyncDebugData({ matchId, fetchedAt: Date.now(), raw, source: 'Advance Live Line' });
+
+    // GET matches/{matchId}/advance — carries info.result / info.status_note,
+    // the provider's own authoritative result string (e.g. "Guyana Amazon
+    // Warriors won by 9 runs (DLS method)"), including margin adjustments
+    // (DLS, Super Over, etc.) that a naive runs-total comparison can't know
+    // about. Fetched alongside /wagons (not instead of) since /wagons remains
+    // the source for ball-by-ball batting/bowling rows that /advance doesn't
+    // provide. Best-effort: if this call fails, sync still proceeds on
+    // scores/points as before and falls back to the approx. guess.
+    let advanceRaw = null;
+    let advanceResultText = '';
+    try {
+      advanceRaw = await _allFetch(`matches/${m.allMatchId}/advance`, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
+      const advInfo = advanceRaw?.response?.items?.info;
+      advanceResultText = (advInfo?.result || advInfo?.status_note || '').trim();
+    } catch (advErr) {
+      console.error('Advance Live Line /advance fetch failed (non-fatal, continuing with /wagons only):', advErr);
+    }
+    _d11SetSyncDebugData({ matchId, fetchedAt: Date.now(), raw, advanceRaw, advanceResultText, source: 'Advance Live Line' });
 
     const innings = Array.isArray(raw?.response?.innings) ? raw.response.innings : [];
     if (innings.length === 0) {
@@ -16057,6 +16075,16 @@ async function d11SyncLiveMatchAll(matchId, showToast) {
 
     (d11m.players || []).forEach(p => { if (p.stats) p.points = calcDream11PlayerPoints(p.stats, matchId); });
     recalcDream11MatchPoints(d11m);
+
+    // Use the AUTHORITATIVE result text fetched from /advance above rather
+    // than guessing it from raw score totals via d11DeriveFallbackResultText
+    // (which just subtracts the two total-runs numbers — wrong for
+    // DLS/rain-affected matches, e.g. a genuine "won by 9 runs (DLS
+    // method)" was showing up as "won by 13 runs (approx.)").
+    if (advanceResultText) {
+      m.resultText = advanceResultText;
+      m.status = 'completed';
+    }
 
     // BUGFIX: "have to Sync Now 2-3 times before fresh data shows" — this
     // function captures `m`/`d11m` ONCE at the top, then does several
@@ -39149,7 +39177,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.71.3";
+const APP_VERSION = "4.71.4";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
