@@ -17132,6 +17132,30 @@ async function d11SyncLiveMatchAll2(matchId, showToast) {
 
     _d11All2LastSyncedAt[matchId] = Date.now();
     d11ApplyBackupReplacements(matchId);
+    // BUGFIX: the resultText write below used to happen AFTER three
+    // separate awaited Firestore calls (_updateDream11MatchScoringFields,
+    // _updateMatchScoreFields for scoreA/scoreB, d11RefreshLiveTeamPoints)
+    // — each of those `await`s is a window where Firestore's onSnapshot
+    // listener can deliver an echo of OUR OWN write and fully REPLACE the
+    // `matches[matchId]` object with a new one (see the comment above on
+    // `liveM`/`liveD11m` — that's exactly the race this re-anchoring
+    // pattern exists to guard against). By the time execution reached the
+    // resultText block, `liveM` could already be a detached, no-longer-
+    // current reference — so `liveM.resultText = advanceResultText` wrote
+    // to an object nobody was reading anymore, and the actual live
+    // `matches[matchId]` never got the corrected result. This is why
+    // tapping "Fetch Final Result" repeatedly never fixed an already-
+    // scored match's "(approx.)" text. Fix: re-read matches[matchId] fresh
+    // (not the possibly-stale `liveM` captured above) immediately before
+    // this specific write, and do it as the FIRST write after re-anchoring
+    // — before any other `await` gets a chance to let an echo land.
+    if (advanceResultText) {
+      const freshM = matches[matchId] || liveM;
+      if (freshM.resultText !== advanceResultText) {
+        freshM.resultText = advanceResultText;
+        await _updateMatchScoreFields(matchId, { resultText: advanceResultText });
+      }
+    }
     // OPTION A: Firestore rules now allow any signed-in user to write
     // pp_matches.scoreA/scoreB/status/resultText and
     // pp_dream11_matches.scored/colPasteText1/2 (not just admin/subAdminXI)
@@ -17148,23 +17172,6 @@ async function d11SyncLiveMatchAll2(matchId, showToast) {
       scoreB: liveM.scoreB,
     });
     await d11RefreshLiveTeamPoints(matchId);
-
-    // ADDED: if the real result string from /advance came back and it's
-    // different from what's currently saved, update it here — INDEPENDENT
-    // of the isFinished double-confirm gate below. Without this, an
-    // already-scored/published match (liveD11m.scored already true from a
-    // PAST sync — e.g. before this /advance fetch existed at all, or one
-    // that finalized via the plain "(approx.)" fallback) would never get
-    // its resultText corrected: the block below only writes resultText
-    // inside `if (isFinished)`, and isFinished can come back false for an
-    // already-completed match (the double-confirm pending-flag logic is
-    // keyed on fresh transitions, not "still finished"). This is what let
-    // admin tap "🏁 Fetch Final Result" on an already-SCORED match without
-    // the approx. result ever getting replaced by the authoritative one.
-    if (advanceResultText && liveM.resultText !== advanceResultText) {
-      liveM.resultText = advanceResultText;
-      await _updateMatchScoreFields(matchId, { resultText: advanceResultText });
-    }
 
     // Advance Live Line 2's own match-list endpoint carries the authoritative
     // "Completed" status (status_str) separately from the scorecard, so we
@@ -39142,7 +39149,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.71.2";
+const APP_VERSION = "4.71.3";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
