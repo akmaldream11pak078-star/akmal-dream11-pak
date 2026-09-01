@@ -8568,7 +8568,7 @@ function renderD11StatsTab(matchId) {
   ${sorted.map(p => {
     const isMine = myPickIds.has(p.id);
     return `
-    <div style="display:flex;align-items:center;gap:12px;padding:12px 4px;background:${isMine?'#fdecea':'#fff'};border-bottom:1px solid var(--d11-card-border);cursor:pointer" onclick="openD11PlayerPointsBreakup('${matchId}','${p.id}')">
+    <div style="display:flex;align-items:center;gap:12px;padding:12px 4px;background:${isMine?'rgba(232,51,43,0.12)':'var(--d11-card-bg)'};border-bottom:1px solid var(--d11-card-border);cursor:pointer" onclick="openD11PlayerPointsBreakup('${matchId}','${p.id}')">
       <div style="position:relative;flex-shrink:0">
         ${p.photo
           ? `<img src="${p.photo}" style="width:44px;height:44px;border-radius:50%;object-fit:cover;border:${isMine?'2px solid var(--d11-accent)':'1px solid var(--d11-card-border)'}" />`
@@ -17035,6 +17035,31 @@ async function d11SyncLiveMatchAll2(matchId, showToast) {
     const raw = await _all2Fetch(`matches/${m.all2MatchId}/wagons`, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
     _d11SetSyncDebugData({ matchId, fetchedAt: Date.now(), raw, source: 'Advance Live Line 2' });
 
+    // ADDED: GET matches/{matchId}/advance — carries info.result / info.
+    // status_note, the provider's own authoritative result string (e.g.
+    // "Guyana Amazon Warriors won by 9 runs (DLS method)"), including
+    // margin adjustments (DLS, Super Over, etc.) that a naive runs-total
+    // comparison can't know about. Previously this sync only called
+    // /wagons for scores, so m.resultText was never set by ALL2 and
+    // finalization fell through to d11DeriveFallbackResultText's plain
+    // "won by N runs (approx.)" guess — which is exactly right for a
+    // normal finish but silently WRONG whenever the real result involves
+    // DLS, a tie, Super Over, or any other non-linear margin. Fetched
+    // alongside /wagons (not instead of) since /wagons remains the source
+    // for ball-by-ball batting/bowling rows that /advance doesn't provide.
+    // Best-effort: if this call fails for any reason (quota, transient
+    // error), sync should still proceed on scores/points as before rather
+    // than aborting the whole function — the existing approx. fallback
+    // remains the safety net it always was.
+    let advanceResultText = '';
+    try {
+      const advRaw = await _all2Fetch(`matches/${m.all2MatchId}/advance`, { feature: showToast ? 'Sync Now / Fetch Final Result (manual)' : 'Auto Fetch Final Result', matchId });
+      const advInfo = advRaw?.response?.items?.info;
+      advanceResultText = (advInfo?.result || advInfo?.status_note || '').trim();
+    } catch (advErr) {
+      console.error('Advance Live Line 2 /advance fetch failed (non-fatal, continuing with /wagons only):', advErr);
+    }
+
     const innings = Array.isArray(raw?.response?.innings) ? raw.response.innings : [];
     if (innings.length === 0) {
       if (showToast) showNotif('No scorecard data yet on Advance Live Line 2 — try again once the match has started.', 'error');
@@ -17133,6 +17158,16 @@ async function d11SyncLiveMatchAll2(matchId, showToast) {
       liveM.status = 'completed';
       liveD11m.scored = true;
       _d11MarkTeamsScoredForMatch(matchId);
+      // ADDED: set the real result text from /advance BEFORE finalizing,
+      // so _d11AutoFinalizeIfClearResult / _d11FinalizeScoringCore see a
+      // real m.resultText already present and never fall through to
+      // d11DeriveFallbackResultText's plain runs-total "(approx.)" guess
+      // — same field other providers (LL3/LL4/LL5/etc.) already populate
+      // from their own result string before finalizing.
+      if (advanceResultText) {
+        liveM.resultText = advanceResultText;
+        await _updateMatchScoreFields(matchId, { resultText: advanceResultText });
+      }
       await _updateMatchScoreFields(matchId, { status: 'completed' });
       await _updateDream11MatchScoringFields(matchId, { scored: true });
       // Per explicit request: this provider doesn't have a result-text
@@ -25639,15 +25674,28 @@ function d11AiAutoSelect() {
   }
   best.picks.forEach(pid => addPlayer(players.find(p => p.id === pid)));
 
-  // Auto C & VC — top 2 by quality among selected
+  // Auto C & VC — weighted-random among the top few by quality among
+  // selected, using the same per-user seed as the pick selection above.
+  // FIX: a hard top-2 by qualityScore is identical for every user (quality
+  // depends only on player stats, not on the seed) — so every user got the
+  // exact same Captain/Vice-Captain even when their 11 picks differed.
+  // Captain/VC are now drawn from a weighted pool of the best-rated
+  // selected players, so they vary by user just like the rest of the team,
+  // while still favoring top scorers.
   const pickedPlayers = picks
     .map(pid => d11m.players.find(x => x.id === pid))
     .filter(Boolean)
     .sort((a, b) => qualityScore(b) - qualityScore(a));
 
+  const captainPoolK = Math.min(4, pickedPlayers.length);
+  const captainObj = pickWeightedRandom(pickedPlayers, captainPoolK) || pickedPlayers[0] || null;
+  const vcCandidates = pickedPlayers.filter(p => p.id !== captainObj?.id);
+  const vcPoolK = Math.min(4, vcCandidates.length);
+  const vcObj = pickWeightedRandom(vcCandidates, vcPoolK) || vcCandidates[0] || null;
+
   d11TeamDraft.picks = picks;
-  d11TeamDraft.captain = pickedPlayers[0]?.id || null;
-  d11TeamDraft.viceCaptain = pickedPlayers[1]?.id || null;
+  d11TeamDraft.captain = captainObj?.id || null;
+  d11TeamDraft.viceCaptain = vcObj?.id || null;
 
   // Auto-select 4 backups from the UNPICKED pool — best 4 by quality score,
   // any role (BAT/AR/BOWL/WK), per explicit request ("AI khud decide kare").
@@ -25658,8 +25706,8 @@ function d11AiAutoSelect() {
   d11TeamDraft.backups = backupPool.slice(0, D11_MAX_BACKUPS).map(p => p.id);
 
   render();
-  const capName = pickedPlayers[0]?.name || '';
-  const vcName = pickedPlayers[1]?.name || '';
+  const capName = captainObj?.name || '';
+  const vcName = vcObj?.name || '';
   const usedMix = mixSlots2 > 0 && best === attempt2AR;
   const compSummary = usedMix
     ? `${roleCounts.WK} WK · ${roleCounts.BAT} BAT · ${roleCounts.AR} AR · ${roleCounts.BOWL} BOWL (pool had too few AR, filled the rest with the best available WK/BAT/BOWL)`
@@ -28892,16 +28940,18 @@ function renderD11JoinContest() {
     ${deadlineClockStr ? `<div style="text-align:center;color:var(--dim);font-size:10.5px;margin-top:6px">${deadlineClockStr}</div>` : ''}
   </div>
 
-  <!-- Sub-tabs row: matches the real Dream11 app's "My Contests / My Teams / Stats" pill row exactly -->
+  <!-- Sub-tabs row: Contests / My Contests / My Teams / Stats.
+       FIX: "All Contests" used to only render in a second row that was
+       itself hidden whenever activeContestTab wasn't already 'all' — so
+       there was no button in the main row to get back to it once you
+       clicked "My Contests" or "Stats", making the join/Contests section
+       unreachable. It's now a normal always-visible tab in the main row. -->
   <div class="i11-contest-tabs">
+    <button class="i11-contest-tab ${activeContestTab==='all'?'active':''}" onclick="window._d11ContestSubTab='all';render()">Contests</button>
     <button class="i11-contest-tab ${activeContestTab==='mine'?'active':''}" onclick="window._d11ContestSubTab='mine';render()">My Contests (${myJoinedContestsCount})</button>
     <button class="i11-contest-tab" onclick="tab='dream11TeamPicker';d11ActiveMatchId='${matchId}';render();window.scrollTo(0,0)">My Teams${myTeams.length?` (${myTeams.length})`:''}</button>
     <button class="i11-contest-tab ${activeContestTab==='stats'?'active':''}" onclick="window._d11ContestSubTab='stats';render()">Stats</button>
   </div>
-  ${activeContestTab!=='mine' && activeContestTab!=='stats' ? `
-  <div class="i11-contest-tabs" style="margin-top:-4px">
-    <button class="i11-contest-tab ${activeContestTab==='all'?'active':''}" onclick="window._d11ContestSubTab='all';render()">All Contests</button>
-  </div>` : ''}
 
   ${activeContestTab==='stats' ? renderD11StatsTab(matchId) : ''}
 
@@ -39064,7 +39114,7 @@ function _applyPlayerDp(type, playerId, b64) {
      "Update Available" banner dikhega, koi re-install nahi chahiye.
      ══════════════════════════════════════════════════════════════════ -->
 <script>
-const APP_VERSION = "4.70.0";
+const APP_VERSION = "4.71.0";
 const LIVE_URL = "https://akmaldream11pak078-star.github.io/akmal-dream11-pak/index.html";
 const CHECK_INTERVAL_MS = 60 * 1000;
 
